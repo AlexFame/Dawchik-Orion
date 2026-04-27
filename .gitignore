@@ -1,0 +1,19 @@
+# Build outputs
+/build/
+/dist/
+/DerivedData/
+
+# IDE metadata
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Xcode
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Third-party checkouts
+/third_party/JUCE/
