@@ -239,6 +239,127 @@ inline float cubicHermite(float t, float y0, float y1, float y2, float y3) noexc
     return ((c3 * t + c2) * t + c1) * t + y1;
 }
 
+std::vector<int> detectOnsets(const juce::AudioBuffer<float>& buffer, double sampleRate)
+{
+    std::vector<int> onsets;
+    const auto numSamples = buffer.getNumSamples();
+    const auto numChannels = buffer.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
+        return onsets;
+
+    const auto windowSize = juce::jmax(1, static_cast<int>(sampleRate * 0.002));
+    const auto envelopeSize = numSamples / windowSize;
+    if (envelopeSize < 3)
+        return onsets;
+
+    std::vector<float> envelope(static_cast<size_t>(envelopeSize), 0.0f);
+    for (int i = 0; i < envelopeSize; ++i)
+    {
+        float energy = 0.0f;
+        const auto start = i * windowSize;
+        const auto end = juce::jmin(start + windowSize, numSamples);
+        for (int s = start; s < end; ++s)
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                const auto v = buffer.getSample(ch, s);
+                energy += v * v;
+            }
+        envelope[static_cast<size_t>(i)] = energy / static_cast<float>((end - start) * numChannels);
+    }
+
+    float maxOnset = 0.0f;
+    std::vector<float> onsetFn(static_cast<size_t>(envelopeSize), 0.0f);
+    for (int i = 1; i < envelopeSize; ++i)
+    {
+        onsetFn[static_cast<size_t>(i)] = juce::jmax(0.0f, envelope[static_cast<size_t>(i)] - envelope[static_cast<size_t>(i - 1)]);
+        maxOnset = juce::jmax(maxOnset, onsetFn[static_cast<size_t>(i)]);
+    }
+
+    if (maxOnset <= 0.0f)
+        return onsets;
+
+    const auto threshold = maxOnset * 0.15f;
+    const auto minGapWindows = juce::jmax(1, static_cast<int>(sampleRate * 0.03 / windowSize));
+    int lastPeak = -minGapWindows;
+
+    for (int i = 1; i < envelopeSize - 1; ++i)
+    {
+        if (onsetFn[static_cast<size_t>(i)] > threshold
+            && onsetFn[static_cast<size_t>(i)] >= onsetFn[static_cast<size_t>(i - 1)]
+            && onsetFn[static_cast<size_t>(i)] >= onsetFn[static_cast<size_t>(i + 1)]
+            && (i - lastPeak) >= minGapWindows)
+        {
+            onsets.push_back(i * windowSize);
+            lastPeak = i;
+        }
+    }
+
+    return onsets;
+}
+
+double detectTransientDensity(const juce::AudioBuffer<float>& buffer, double sampleRate)
+{
+    const auto onsets = detectOnsets(buffer, sampleRate);
+    const auto duration = static_cast<double>(buffer.getNumSamples()) / sampleRate;
+    return (duration > 0.05) ? static_cast<double>(onsets.size()) / duration : 0.0;
+}
+
+juce::AudioBuffer<float> sliceStretchBuffer(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
+{
+    const auto numSamples = source.getNumSamples();
+    const auto numChannels = source.getNumChannels();
+
+    auto onsets = detectOnsets(source, sampleRate);
+    if (onsets.empty() || onsets.front() != 0)
+        onsets.insert(onsets.begin(), 0);
+    if (onsets.back() != numSamples)
+        onsets.push_back(numSamples);
+
+    const auto ratio = static_cast<double>(outputSamples) / static_cast<double>(numSamples);
+    constexpr int fadeLen = 64;
+
+    juce::AudioBuffer<float> output(numChannels, outputSamples);
+    output.clear();
+
+    for (size_t i = 0; i + 1 < onsets.size(); ++i)
+    {
+        const auto srcStart = onsets[i];
+        const auto sliceLen = onsets[i + 1] - srcStart;
+        if (sliceLen <= 0)
+            continue;
+
+        const auto dstStart = juce::jlimit(0, outputSamples, static_cast<int>(std::round(static_cast<double>(srcStart) * ratio)));
+        const auto nextDst = (i + 2 < onsets.size())
+            ? juce::jlimit(0, outputSamples, static_cast<int>(std::round(static_cast<double>(onsets[i + 1]) * ratio)))
+            : outputSamples;
+        const auto space = nextDst - dstStart;
+        if (space <= 0)
+            continue;
+
+        const auto copyLen = juce::jmin(sliceLen, space, outputSamples - dstStart);
+        if (copyLen <= 0)
+            continue;
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            output.copyFrom(ch, dstStart, source, ch, srcStart, copyLen);
+
+        const auto actualFade = juce::jmin(fadeLen, copyLen);
+        if (actualFade > 1)
+        {
+            const auto fadeStart = dstStart + copyLen - actualFade;
+            for (int f = 0; f < actualFade; ++f)
+            {
+                const auto gain = 1.0f - static_cast<float>(f) / static_cast<float>(actualFade);
+                for (int ch = 0; ch < numChannels; ++ch)
+                    output.setSample(ch, fadeStart + f, output.getSample(ch, fadeStart + f) * gain);
+            }
+        }
+    }
+
+    DBG("[Warp] Slice mode: " + juce::String(static_cast<int>(onsets.size())) + " slices, ratio=" + juce::String(ratio, 3));
+    return output;
+}
+
 juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
 {
     if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
@@ -246,6 +367,19 @@ juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& s
 
     if (std::abs(outputSamples - source.getNumSamples()) <= 1)
         return source;
+
+    // Auto-detect: use slice-based warp for transient-heavy content
+    const auto onsets = detectOnsets(source, sampleRate);
+    const auto duration = static_cast<double>(source.getNumSamples()) / sampleRate;
+    const auto density = (duration > 0.05) ? static_cast<double>(onsets.size()) / duration : 0.0;
+
+    if (onsets.size() >= 3 && density > 4.0)
+    {
+        DBG("[Warp] Beats/slice mode (density=" + juce::String(density, 1) + "/sec, onsets=" + juce::String(static_cast<int>(onsets.size())) + ")");
+        return sliceStretchBuffer(source, outputSamples, sampleRate);
+    }
+
+    DBG("[Warp] Signalsmith stretch (density=" + juce::String(density, 1) + "/sec)");
 
     const auto channels = source.getNumChannels();
     juce::AudioBuffer<float> stretched(channels, outputSamples);
