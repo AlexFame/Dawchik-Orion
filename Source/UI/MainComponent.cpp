@@ -244,7 +244,11 @@ juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& s
     stretched.clear();
 
     signalsmith::stretch::SignalsmithStretch<float> stretcher;
-    stretcher.presetDefault(channels, static_cast<float>(sampleRate));
+    // Shorter analysis window (80ms vs default 120ms) for tighter transient
+    // reproduction on kicks/snares. Interval kept proportional for overlap.
+    const auto blockSamples = static_cast<int>(sampleRate * 0.08);
+    const auto intervalSamples = static_cast<int>(sampleRate * 0.02);
+    stretcher.configure(channels, blockSamples, intervalSamples);
     stretcher.setTransposeFactor(1.0f);
 
     std::vector<const float*> inputChannels(static_cast<std::size_t>(channels));
