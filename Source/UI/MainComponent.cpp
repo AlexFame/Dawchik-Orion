@@ -231,6 +231,14 @@ void rotateBufferLeft(juce::AudioBuffer<float>& buffer, int samplesToRotate)
     buffer = std::move(rotated);
 }
 
+inline float cubicHermite(float t, float y0, float y1, float y2, float y3) noexcept
+{
+    const auto c1 = 0.5f * (y2 - y0);
+    const auto c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+    const auto c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+    return ((c3 * t + c2) * t + c1) * t + y1;
+}
+
 juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
 {
     if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
@@ -738,14 +746,19 @@ private:
                         continue;
 
                     const auto sourceFraction = static_cast<float>(sourceSamplePosition - static_cast<double>(sourceIndex));
+                    const auto lastSample = audioData->buffer.getNumSamples() - 1;
+                    const auto i0 = juce::jmax(0, sourceIndex - 1);
+                    const auto i1 = sourceIndex;
+                    const auto i2 = juce::jmin(sourceIndex + 1, lastSample);
+                    const auto i3 = juce::jmin(sourceIndex + 2, lastSample);
                     for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
                     {
                         const auto sourceChannel = juce::jmin(channel, audioData->buffer.getNumChannels() - 1);
-                        const auto sampleA = audioData->buffer.getSample(sourceChannel, sourceIndex);
-                        const auto sampleB = sourceIndex + 1 < audioData->buffer.getNumSamples()
-                            ? audioData->buffer.getSample(sourceChannel, sourceIndex + 1)
-                            : sampleA;
-                        const auto sampleValue = (sampleA + (sampleB - sampleA) * sourceFraction) * linearGain;
+                        const auto y0 = audioData->buffer.getSample(sourceChannel, i0);
+                        const auto y1 = audioData->buffer.getSample(sourceChannel, i1);
+                        const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
+                        const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
+                        const auto sampleValue = cubicHermite(sourceFraction, y0, y1, y2, y3) * linearGain;
                         targetBuffer.addSample(channel, startSample + sampleIndex, sampleValue * 0.75f);
                     }
                 }
