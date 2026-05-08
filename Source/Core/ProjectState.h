@@ -1,0 +1,87 @@
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <juce_graphics/juce_graphics.h>
+
+#include <vector>
+
+namespace orion
+{
+enum class ClipType
+{
+    audio,
+    midi
+};
+
+struct MidiNote
+{
+    int pitch { 60 };
+    double startBeat { 0.0 };
+    double lengthInBeats { 1.0 };
+    int velocity { 100 };
+};
+
+struct TimelineClip
+{
+    juce::String name;
+    ClipType type { ClipType::audio };
+    double startBeat { 0.0 };
+    double lengthInBeats { 4.0 };
+    juce::Colour colour { juce::Colour(0xffeb6f3a) };
+    std::vector<MidiNote> midiNotes;
+    juce::String sourcePath;
+    double gainDb { 0.0 };
+    bool muted { false };
+    bool solo { false };
+    double sourceDurationSeconds { 0.0 };
+    double sourceBpm { 0.0 };
+    int detectedBars { 0 };
+    bool warpEnabled { false };
+    bool bpmGuessed { false };
+};
+
+struct TrackState
+{
+    juce::String name;
+    bool isMidiTrack { false };
+    juce::Colour colour { juce::Colour(0xffeb6f3a) };
+    bool muted { false };
+    bool solo { false };
+    bool recordArmed { false };
+    double volumeDb { 0.0 };
+    std::vector<TimelineClip> clips;
+};
+
+class ProjectState
+{
+public:
+    ProjectState();
+
+    double getTempoBpm() const noexcept;
+    void setTempoBpm(double newTempoBpm) noexcept;
+
+    int getNumerator() const noexcept;
+    int getDenominator() const noexcept;
+
+    double getLoopLengthInBeats() const noexcept;
+    double getProjectLengthInBeats() const noexcept;
+    double getContentEndInBeats() const noexcept;
+    bool hasLoopRange() const noexcept;
+    double getLoopStartBeat() const noexcept;
+    double getLoopEndBeat() const noexcept;
+    void setLoopRange(double startBeat, double endBeat) noexcept;
+    void clearLoopRange() noexcept;
+    const std::vector<TrackState>& getTracks() const noexcept;
+    std::vector<TrackState>& getTracks() noexcept;
+
+private:
+    double tempoBpm { 126.0 };
+    int timeSigNumerator { 4 };
+    int timeSigDenominator { 4 };
+    double loopLengthInBeats { 32.0 };
+    bool loopRangeActive { false };
+    double loopStartBeat { 0.0 };
+    double loopEndBeat { 8.0 };
+    std::vector<TrackState> tracks;
+};
+}  // namespace orion
