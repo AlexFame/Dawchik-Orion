@@ -1,14 +1,13 @@
 #include "MainComponent.h"
 
-#include <signalsmith-stretch/signalsmith-stretch.h>
-#if ORION_HAVE_RUBBERBAND
-#include <rubberband/RubberBandStretcher.h>
-#endif
-
 #include <cmath>
 #include <limits>
 #include <map>
+#include <signalsmith-stretch/signalsmith-stretch.h>
 #include <vector>
+#if ORION_HAVE_RUBBERBAND
+#include <rubberband/RubberBandStretcher.h>
+#endif
 
 namespace
 {
