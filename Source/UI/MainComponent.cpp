@@ -1,6 +1,9 @@
 #include "MainComponent.h"
 
 #include <signalsmith-stretch/signalsmith-stretch.h>
+#if ORION_HAVE_RUBBERBAND
+#include <rubberband/RubberBandStretcher.h>
+#endif
 
 #include <cmath>
 #include <limits>
@@ -35,6 +38,7 @@ constexpr int transportSectionGap = 12;
 constexpr int transportControlHeight = 62;
 constexpr int transportSectionHeight = 76;
 constexpr int transportContentVerticalNudge = -3;
+constexpr const char* warpBackendCacheVersion = ORION_HAVE_RUBBERBAND ? "rubberband_exp1" : "signalsmith_fallback";
 
 struct AudioWarpAnalysis
 {
@@ -372,14 +376,18 @@ juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& s
     const auto onsets = detectOnsets(source, sampleRate);
     const auto duration = static_cast<double>(source.getNumSamples()) / sampleRate;
     const auto density = (duration > 0.05) ? static_cast<double>(onsets.size()) / duration : 0.0;
+    const auto ratio = static_cast<double>(outputSamples) / static_cast<double>(source.getNumSamples());
+    const bool useSlice = onsets.size() >= 3 && density > 4.0;
 
-    if (onsets.size() >= 3 && density > 4.0)
-    {
-        DBG("[Warp] Beats/slice mode (density=" + juce::String(density, 1) + "/sec, onsets=" + juce::String(static_cast<int>(onsets.size())) + ")");
+    DBG("[Warp-Stretch] sourceSamples=" + juce::String(source.getNumSamples())
+        + " targetSamples=" + juce::String(outputSamples)
+        + " ratio=" + juce::String(ratio, 4)
+        + " onsets=" + juce::String(static_cast<int>(onsets.size()))
+        + " density=" + juce::String(density, 2) + "/sec"
+        + " path=" + juce::String(useSlice ? "SLICE" : "SIGNALSMITH"));
+
+    if (useSlice)
         return sliceStretchBuffer(source, outputSamples, sampleRate);
-    }
-
-    DBG("[Warp] Signalsmith stretch (density=" + juce::String(density, 1) + "/sec)");
 
     const auto channels = source.getNumChannels();
     juce::AudioBuffer<float> stretched(channels, outputSamples);
@@ -407,6 +415,100 @@ juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& s
     return stretched;
 }
 
+#if ORION_HAVE_RUBBERBAND
+juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
+{
+    if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
+        return source;
+
+    if (std::abs(outputSamples - source.getNumSamples()) <= 1)
+        return source;
+
+    try
+    {
+        const auto channels = source.getNumChannels();
+        const auto sourceSamples = source.getNumSamples();
+        const auto timeRatio = static_cast<double>(outputSamples) / static_cast<double>(sourceSamples);
+
+        RubberBand::RubberBandStretcher stretcher(
+            static_cast<std::size_t>(std::round(sampleRate)),
+            static_cast<std::size_t>(channels),
+            RubberBand::RubberBandStretcher::OptionProcessOffline
+                | RubberBand::RubberBandStretcher::OptionEngineFiner
+                | RubberBand::RubberBandStretcher::OptionTransientsCrisp
+                | RubberBand::RubberBandStretcher::OptionDetectorCompound
+                | RubberBand::RubberBandStretcher::OptionChannelsTogether,
+            timeRatio,
+            1.0);
+
+        stretcher.setExpectedInputDuration(static_cast<std::size_t>(sourceSamples));
+        stretcher.setTimeRatio(timeRatio);
+        stretcher.setPitchScale(1.0);
+
+        std::vector<const float*> inputChannels(static_cast<std::size_t>(channels));
+        for (int channel = 0; channel < channels; ++channel)
+            inputChannels[static_cast<std::size_t>(channel)] = source.getReadPointer(channel);
+
+        stretcher.study(inputChannels.data(), static_cast<std::size_t>(sourceSamples), true);
+        stretcher.process(inputChannels.data(), static_cast<std::size_t>(sourceSamples), true);
+
+        juce::AudioBuffer<float> stretched(channels, outputSamples);
+        stretched.clear();
+
+        std::vector<float*> outputChannels(static_cast<std::size_t>(channels));
+        int writePosition = 0;
+        int guard = 0;
+        while (writePosition < outputSamples && ++guard < 4096)
+        {
+            const auto available = stretcher.available();
+            if (available < 0)
+                break;
+
+            if (available == 0)
+                continue;
+
+            const auto framesToRead = juce::jmin(available, outputSamples - writePosition);
+            for (int channel = 0; channel < channels; ++channel)
+                outputChannels[static_cast<std::size_t>(channel)] = stretched.getWritePointer(channel, writePosition);
+
+            const auto retrieved = stretcher.retrieve(outputChannels.data(), static_cast<std::size_t>(framesToRead));
+            if (retrieved == 0)
+                break;
+
+            writePosition += static_cast<int>(retrieved);
+        }
+
+        DBG("[Warp-RubberBand] sourceSamples=" + juce::String(sourceSamples)
+            + " targetSamples=" + juce::String(outputSamples)
+            + " outputSamples=" + juce::String(stretched.getNumSamples())
+            + " writtenSamples=" + juce::String(writePosition)
+            + " timeRatio=" + juce::String(timeRatio, 6)
+            + " pitchScale=1.000000");
+
+        return stretched;
+    }
+    catch (...)
+    {
+        DBG("[Warp-RubberBand] failed; falling back to Signalsmith");
+        return stretchBufferToLength(source, outputSamples, sampleRate);
+    }
+}
+#endif
+
+juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
+                                                                      int outputSamples,
+                                                                      double sampleRate)
+{
+#if ORION_HAVE_RUBBERBAND
+    auto stretched = rubberBandStretchBufferToLength(source, outputSamples, sampleRate);
+    if (stretched.getNumSamples() == outputSamples && stretched.getNumChannels() == source.getNumChannels())
+        return stretched;
+
+    DBG("[Warp-RubberBand] invalid output; falling back to Signalsmith");
+#endif
+    return stretchBufferToLength(source, outputSamples, sampleRate);
+}
+
 juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
                                                        double sourceBpm,
                                                        double projectTempoBpm,
@@ -420,7 +522,7 @@ juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<fl
         return source;
 
     const auto outputSamples = juce::jmax(1, static_cast<int>(std::round(static_cast<double>(source.getNumSamples()) * tempoRatio)));
-    return stretchBufferToLength(source, outputSamples, sampleRate);
+    return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate);
 }
 
 juce::String compactInspectorFileName(const juce::File& file, const juce::String& fallbackName)
@@ -933,16 +1035,21 @@ private:
             return nullptr;
 
         const auto targetSamples = juce::jmax(1, static_cast<int>(std::round((clip.lengthInBeats / beatsPerSecond) * originalData.sampleRate)));
-        const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples);
+        const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples) + "|" + warpBackendCacheVersion;
         if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
+        {
+            DBG("[Warp-Cache] HIT key=" + juce::String(key));
             return it->second.get();
+        }
 
         if (! allowBuild)
             return nullptr;
 
+        DBG("[Warp-Cache] MISS key=" + juce::String(key) + " building...");
+
         auto data = std::make_unique<AudioFileData>();
         data->sampleRate = originalData.sampleRate;
-        data->buffer = stretchBufferToLength(originalData.buffer, targetSamples, originalData.sampleRate);
+        data->buffer = stretchBufferToLengthWithExperimentalBackend(originalData.buffer, targetSamples, originalData.sampleRate);
 
         const auto* dataPtr = data.get();
         warpedAudioCache.emplace(key, std::move(data));

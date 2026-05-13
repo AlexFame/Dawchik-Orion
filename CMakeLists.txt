@@ -17,6 +17,34 @@ if(NOT EXISTS "${ORION_JUCE_PATH}/CMakeLists.txt")
 endif()
 
 add_subdirectory("${ORION_JUCE_PATH}" JUCE)
+add_subdirectory(third_party/signalsmith-linear)
+add_subdirectory(third_party/signalsmith-stretch)
+
+find_path(
+    ORION_RUBBERBAND_INCLUDE_DIR
+    rubberband/RubberBandStretcher.h
+    PATHS
+        /opt/homebrew/include
+        /usr/local/include
+)
+
+find_library(
+    ORION_RUBBERBAND_LIBRARY
+    NAMES rubberband
+    PATHS
+        /opt/homebrew/lib
+        /usr/local/lib
+)
+
+find_library(ORION_ACCELERATE_FRAMEWORK Accelerate)
+
+if(ORION_RUBBERBAND_INCLUDE_DIR AND ORION_RUBBERBAND_LIBRARY)
+    message(STATUS "Rubber Band experimental warp enabled: ${ORION_RUBBERBAND_LIBRARY}")
+    set(ORION_HAVE_RUBBERBAND 1)
+else()
+    message(STATUS "Rubber Band not found; using Signalsmith warp only")
+    set(ORION_HAVE_RUBBERBAND 0)
+endif()
 
 juce_add_gui_app(Orion PRODUCT_NAME "Orion")
 
@@ -26,13 +54,22 @@ target_sources(
         Source/main.cpp
         Source/App/MainWindow.cpp
         Source/App/OrionApplication.cpp
+        Source/Audio/ExportService.cpp
+        Source/Audio/TransportController.cpp
+        Source/Audio/TransportEngine.cpp
+        Source/Core/ProjectSerializer.cpp
+        Source/Core/ProjectState.cpp
+        Source/UI/ArrangementTimelineComponent.cpp
+        Source/UI/BrowserPanelComponent.cpp
         Source/UI/MainComponent.cpp
+        Source/UI/MidiEditorOverlayComponent.cpp
 )
 
 target_include_directories(
     Orion
     PRIVATE
         Source
+        $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_INCLUDE_DIR}>
 )
 
 target_compile_definitions(
@@ -41,6 +78,7 @@ target_compile_definitions(
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+        ORION_HAVE_RUBBERBAND=${ORION_HAVE_RUBBERBAND}
 )
 
 target_link_libraries(
@@ -57,6 +95,9 @@ target_link_libraries(
         juce::juce_graphics
         juce::juce_gui_basics
         juce::juce_gui_extra
+        signalsmith-stretch
+        $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_LIBRARY}>
+        $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_ACCELERATE_FRAMEWORK}>
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
