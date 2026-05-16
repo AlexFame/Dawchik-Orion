@@ -17,3 +17,19 @@
 
 # Third-party checkouts
 /third_party/JUCE/
+
+# Local build/checkpoint artifacts
+/build-local/
+/backups/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+*.o
+*.o.d
+*.a
+*.dylib
+*.so
+*.app/

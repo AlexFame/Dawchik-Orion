@@ -7,6 +7,20 @@ juce::String clipTypeToString(orion::ClipType type)
     return type == orion::ClipType::midi ? "midi" : "audio";
 }
 
+juce::String samplerModeToString(orion::SamplerPlaybackMode mode)
+{
+    switch (mode)
+    {
+        case orion::SamplerPlaybackMode::oneShot:
+            return "oneShot";
+        case orion::SamplerPlaybackMode::slice:
+            return "slice";
+        case orion::SamplerPlaybackMode::classic:
+        default:
+            return "classic";
+    }
+}
+
 juce::var midiNoteToVar(const orion::MidiNote& note)
 {
     auto* object = new juce::DynamicObject();
@@ -34,6 +48,7 @@ juce::var timelineClipToVar(const orion::TimelineClip& clip)
     object->setProperty("detectedBars", clip.detectedBars);
     object->setProperty("warpEnabled", clip.warpEnabled);
     object->setProperty("bpmGuessed", clip.bpmGuessed);
+    object->setProperty("warpTargetLengthInBeats", clip.warpTargetLengthInBeats);
 
     juce::Array<juce::var> notes;
     for (const auto& note : clip.midiNotes)
@@ -53,6 +68,16 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("solo", track.solo);
     object->setProperty("recordArmed", track.recordArmed);
     object->setProperty("volumeDb", track.volumeDb);
+    object->setProperty("samplerSourcePath", track.samplerSourcePath);
+    object->setProperty("samplerRootMidiNote", track.samplerRootMidiNote);
+    object->setProperty("samplerMode", samplerModeToString(track.samplerMode));
+    object->setProperty("samplerKeyboardOctaveOffset", track.samplerKeyboardOctaveOffset);
+    object->setProperty("samplerTransposeSemitones", track.samplerTransposeSemitones);
+    object->setProperty("samplerSliceCount", track.samplerSliceCount);
+    object->setProperty("samplerWarpEnabled", track.samplerWarpEnabled);
+    object->setProperty("samplerSourceBpm", track.samplerSourceBpm);
+    object->setProperty("samplerSourceDurationSeconds", track.samplerSourceDurationSeconds);
+    object->setProperty("samplerDetectedBars", track.samplerDetectedBars);
 
     juce::Array<juce::var> clips;
     for (const auto& clip : track.clips)

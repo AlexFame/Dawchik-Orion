@@ -13,6 +13,13 @@ enum class ClipType
     midi
 };
 
+enum class SamplerPlaybackMode
+{
+    classic,
+    oneShot,
+    slice
+};
+
 struct MidiNote
 {
     int pitch { 60 };
@@ -38,6 +45,7 @@ struct TimelineClip
     int detectedBars { 0 };
     bool warpEnabled { false };
     bool bpmGuessed { false };
+    double warpTargetLengthInBeats { 0.0 };
 };
 
 struct TrackState
@@ -50,6 +58,16 @@ struct TrackState
     bool recordArmed { false };
     double volumeDb { 0.0 };
     std::vector<TimelineClip> clips;
+    juce::String samplerSourcePath;
+    int samplerRootMidiNote { 60 };
+    SamplerPlaybackMode samplerMode { SamplerPlaybackMode::classic };
+    int samplerKeyboardOctaveOffset { 0 };
+    int samplerTransposeSemitones { 0 };
+    int samplerSliceCount { 16 };
+    bool samplerWarpEnabled { false };
+    double samplerSourceBpm { 0.0 };
+    double samplerSourceDurationSeconds { 0.0 };
+    int samplerDetectedBars { 0 };
 };
 
 class ProjectState

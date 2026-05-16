@@ -59,6 +59,8 @@ target_sources(
         Source/Audio/TransportEngine.cpp
         Source/Core/ProjectSerializer.cpp
         Source/Core/ProjectState.cpp
+        Source/Sampler/SamplerEngine.cpp
+        Source/Sampler/SamplerPanelComponent.cpp
         Source/UI/ArrangementTimelineComponent.cpp
         Source/UI/BrowserPanelComponent.cpp
         Source/UI/MainComponent.cpp
@@ -95,6 +97,44 @@ target_link_libraries(
         juce::juce_graphics
         juce::juce_gui_basics
         juce::juce_gui_extra
+        signalsmith-stretch
+        $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_LIBRARY}>
+        $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_ACCELERATE_FRAMEWORK}>
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags
+)
+
+juce_add_console_app(OrionWarpCompare PRODUCT_NAME "Orion Warp Compare")
+
+target_sources(
+    OrionWarpCompare
+    PRIVATE
+        Source/Tools/WarpCompare.cpp
+)
+
+target_include_directories(
+    OrionWarpCompare
+    PRIVATE
+        Source
+        $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_INCLUDE_DIR}>
+)
+
+target_compile_definitions(
+    OrionWarpCompare
+    PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        ORION_HAVE_RUBBERBAND=${ORION_HAVE_RUBBERBAND}
+)
+
+target_link_libraries(
+    OrionWarpCompare
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_core
         signalsmith-stretch
         $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_LIBRARY}>
         $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_ACCELERATE_FRAMEWORK}>

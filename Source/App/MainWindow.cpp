@@ -18,6 +18,18 @@ MainWindow::MainWindow(juce::String name)
     setContentOwned(new MainComponent(), true);
     centreWithSize(1440, 900);
     setVisible(true);
+
+    if (auto* mainComponent = dynamic_cast<MainComponent*>(getContentComponent()))
+    {
+        mainComponent->resetToPlaylistView();
+
+        juce::Component::SafePointer<MainComponent> safeMainComponent(mainComponent);
+        juce::Timer::callAfterDelay(150, [safeMainComponent]
+        {
+            if (safeMainComponent != nullptr)
+                safeMainComponent->resetToPlaylistView();
+        });
+    }
 }
 
 void MainWindow::closeButtonPressed()
