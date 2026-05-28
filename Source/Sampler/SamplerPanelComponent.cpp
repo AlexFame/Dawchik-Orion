@@ -76,14 +76,22 @@ void SamplerPanelComponent::openTrackIndex(int trackIndex)
 
 void SamplerPanelComponent::closePanel()
 {
-    releaseTypingPianoNotes();
-    stopTimer();
+    // Don't release notes or drop the active track — we keep the sampler "armed"
+    // so the laptop keyboard continues to trigger the last selected track even
+    // after the visible panel goes away. Notes only get released when another
+    // track is opened or when the user explicitly disarms the keyboard.
     setVisible(false);
-    activeTrack = nullptr;
-    activeTrackIndex = -1;
 
     if (onClose)
         onClose();
+}
+
+void SamplerPanelComponent::disarmKeyboard()
+{
+    releaseTypingPianoNotes();
+    stopTimer();
+    activeTrack = nullptr;
+    activeTrackIndex = -1;
 }
 
 void SamplerPanelComponent::paint(juce::Graphics& g)
@@ -428,27 +436,25 @@ void SamplerPanelComponent::focusLost(FocusChangeType)
 
 void SamplerPanelComponent::visibilityChanged()
 {
-    if (! isVisible())
-    {
-        stopTimer();
-        releaseTypingPianoNotes();
-    }
+    // Keyboard polling timer keeps running even when the panel is hidden, so the
+    // user can keep playing the active track from anywhere in the app. The
+    // timer stops only when the active track is fully cleared.
 }
 
 void SamplerPanelComponent::timerCallback()
 {
-    if (isVisible())
-    {
+    // Always poll the keyboard while a track is armed, regardless of panel
+    // visibility — so the user can play notes from anywhere in the app.
+    if (activeTrack != nullptr)
         updateTypingPianoNotes();
 
-        if (playbackSliceIndex.has_value())
-        {
-            const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - playbackSliceStartedMs;
-            if (playbackSliceDurationMs <= 0.0 || elapsedMs >= playbackSliceDurationMs)
-                playbackSliceIndex.reset();
+    if (isVisible() && playbackSliceIndex.has_value())
+    {
+        const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - playbackSliceStartedMs;
+        if (playbackSliceDurationMs <= 0.0 || elapsedMs >= playbackSliceDurationMs)
+            playbackSliceIndex.reset();
 
-            repaint();
-        }
+        repaint();
     }
 }
 

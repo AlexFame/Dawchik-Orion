@@ -32,6 +32,9 @@ public:
     void openTrack(TrackState& trackState);
     void openTrackIndex(int trackIndex);
     void closePanel();
+    // Fully releases the active track so laptop keyboard no longer triggers anything.
+    void disarmKeyboard();
+    bool isArmed() const noexcept { return activeTrack != nullptr; }
 
     void paint(juce::Graphics& g) override;
     bool hitTest(int x, int y) override;

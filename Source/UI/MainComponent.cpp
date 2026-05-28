@@ -2086,22 +2086,54 @@ MainComponent::MainComponent()
     };
     arrangementTimeline.onClipSelectionChanged = [this](int trackIndex, int clipIndex)
     {
-        if (trackIndex >= 0 && clipIndex >= 0)
+        if (trackIndex >= 0)
         {
-            selectedArrangementClip = std::pair { trackIndex, clipIndex };
+            if (clipIndex >= 0)
+                selectedArrangementClip = std::pair { trackIndex, clipIndex };
+            else
+                selectedArrangementClip.reset();
+
             const auto& tracks = projectState.getTracks();
             if (trackIndex < static_cast<int>(tracks.size()))
             {
                 const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+                // FL-style sampler arm: any selection of a MIDI track with a sampler
+                // arms it, whether the user clicked a clip OR just the track header.
                 if (track.isMidiTrack && track.samplerSourcePath.isNotEmpty())
                 {
-                    samplerPanel.openTrackIndex(trackIndex);
-                    resized();
+                    // Only re-open the visible panel when a clip was clicked (matches
+                    // double-click expectation for opening). Bare header click just arms.
+                    if (clipIndex >= 0)
+                    {
+                        samplerPanel.openTrackIndex(trackIndex);
+                        resized();
+                    }
+                    else
+                    {
+                        // Header click — arm silently (don't pop the panel).
+                        if (! samplerPanel.isArmed() || ! samplerPanel.isVisible())
+                        {
+                            // Need to bind the active track for keyboard polling without
+                            // forcing the visible panel; openTrackIndex does the binding,
+                            // then we hide the panel again if it wasn't open before.
+                            const bool wasVisible = samplerPanel.isVisible();
+                            samplerPanel.openTrackIndex(trackIndex);
+                            if (! wasVisible)
+                                samplerPanel.setVisible(false);
+                        }
+                        else
+                        {
+                            samplerPanel.openTrackIndex(trackIndex);
+                        }
+                    }
+                }
+                else if (samplerPanel.isArmed())
+                {
+                    // Switched to an audio (or non-sampled) track — disarm.
+                    samplerPanel.disarmKeyboard();
                 }
 
-                // Selection change happens right after a clip is dropped — log the
-                // detected key + bake the warp/pitch cache so playback uses it.
-                if (clipIndex < static_cast<int>(track.clips.size()))
+                if (clipIndex >= 0 && clipIndex < static_cast<int>(track.clips.size()))
                 {
                     const auto& clip = track.clips[static_cast<std::size_t>(clipIndex)];
                     if (clip.type == ClipType::audio && clip.sourceKeyRoot >= 0)

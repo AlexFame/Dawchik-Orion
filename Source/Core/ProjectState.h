@@ -111,7 +111,7 @@ private:
     double tempoBpm { 126.0 };
     int timeSigNumerator { 4 };
     int timeSigDenominator { 4 };
-    double loopLengthInBeats { 32.0 };
+    double loopLengthInBeats { 128.0 };
     bool loopRangeActive { false };
     double loopStartBeat { 0.0 };
     double loopEndBeat { 8.0 };

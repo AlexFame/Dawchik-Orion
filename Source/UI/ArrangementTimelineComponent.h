@@ -164,6 +164,9 @@ private:
     bool hasTimelineChangedSince(const TimelineSnapshot& snapshot) const noexcept;
     void clampScrollOffsets();
     void adjustZoom(double horizontalDelta, std::optional<juce::Point<int>> focusPoint);
+    // Zooms out (only when needed) so the given end-beat is visible with some margin.
+    // Used after dropping a clip so the user immediately sees its full extent.
+    void ensureBeatVisible(double endBeat);
     double getTimelineEndBeats() const noexcept;
     int getLaneHeightForTrack(int trackIndex) const noexcept;
     int getTrackTopForIndex(int trackIndex) const noexcept;
@@ -209,7 +212,7 @@ private:
     std::vector<TimelineSnapshot> undoStack;
     std::vector<TimelineSnapshot> redoStack;
     
-    double pixelsPerBeat { 32.0 };
+    double pixelsPerBeat { 6.0 };
     double scrollX { 0.0 };
     double scrollY { 0.0 };
     double pendingMagnifyDelta { 0.0 };

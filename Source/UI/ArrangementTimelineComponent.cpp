@@ -427,6 +427,8 @@ void ArrangementTimelineComponent::addAudioTrack()
     });
 
     setSingleSelection(std::nullopt);
+    selectedTrackIndex = index;
+    notifyClipSelectionChanged();
     clampScrollOffsets();
     repaint();
 }
@@ -447,6 +449,10 @@ void ArrangementTimelineComponent::addMidiTrack()
     });
 
     setSingleSelection(std::nullopt);
+    // Auto-select the freshly created track so subsequent actions (double-click on a
+    // browser sample, etc.) target it instead of creating yet another track.
+    selectedTrackIndex = index;
+    notifyClipSelectionChanged();
     clampScrollOffsets();
     repaint();
 }
@@ -925,6 +931,9 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
             updateTrackVolumeFromPoint(trackHeaderHit->trackIndex, trackHeaderHit->bounds, event.getPosition().x);
         }
 
+        // FL-style: clicking a track header arms it for laptop keyboard input
+        // (no separate "arm" button) — fires selection callback with clipIndex=-1.
+        notifyClipSelectionChanged();
         grabKeyboardFocus();
         repaint();
         return;
@@ -1684,16 +1693,14 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
 
     if (targetTrackIndex < 0)
     {
+        // Not on an existing track. Allow creating a new track anywhere in the empty
+        // timeline area below the ruler — not only inside the next-track ghost lane.
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(42);
+        tracksBounds.removeFromTop(42); // skip ruler
 
-        const auto newTrackIndex = static_cast<int>(project.getTracks().size());
-        const auto newTrackLane = getTrackLaneBounds(newTrackIndex);
-        if (dragSourceDetails.localPosition.y >= newTrackLane.getY()
-            && dragSourceDetails.localPosition.y < newTrackLane.getBottom()
-            && tracksBounds.contains(tracksBounds.getX() + 1, dragSourceDetails.localPosition.y))
+        if (tracksBounds.contains(tracksBounds.getX() + 1, dragSourceDetails.localPosition.y))
         {
-            targetTrackIndex = newTrackIndex;
+            targetTrackIndex = static_cast<int>(project.getTracks().size());
             createNewTrack = true;
         }
     }
@@ -1769,6 +1776,30 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(tracks[static_cast<std::size_t>(targetTrackIndex)].clips.size()) - 1 });
 
     clearBrowserDropPreview();
+    // Auto-fit zoom-out if the freshly dropped clip extends past the visible area.
+    ensureBeatVisible(startBeat + lengthBeats);
+    clampScrollOffsets();
+    repaint();
+}
+
+void ArrangementTimelineComponent::ensureBeatVisible(double endBeat)
+{
+    if (endBeat <= 0.0) return;
+
+    auto bounds = getTimelineContentBounds(*this);
+    auto gridArea = bounds.withTrimmedTop(42);
+    gridArea.removeFromLeft(trackHeaderWidth);
+    const auto fullWidth = static_cast<double>(gridArea.getWidth());
+    if (fullWidth <= 0.0 || pixelsPerBeat <= 0.0) return;
+
+    const auto visibleEndBeat = (scrollX + fullWidth) / pixelsPerBeat;
+    if (endBeat <= visibleEndBeat) return; // already fits, don't touch zoom
+
+    // Zoom out just enough to show endBeat with ~15% padding on the right.
+    const auto targetBeats = endBeat * 1.15;
+    const auto targetPpb   = fullWidth / targetBeats;
+    pixelsPerBeat = juce::jlimit(minPixelsPerBeat, maxPixelsPerBeat, juce::jmin(pixelsPerBeat, targetPpb));
+    scrollX = 0.0;
     clampScrollOffsets();
     repaint();
 }
@@ -2009,16 +2040,13 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
 
     if (targetTrackIndex < 0)
     {
+        // Anywhere in the empty timeline area = new-track drop zone.
         auto tracksBounds = getTimelineContentBounds(*this);
         tracksBounds.removeFromTop(42);
 
-        const auto newTrackIndex = static_cast<int>(project.getTracks().size());
-        const auto newTrackLane = getTrackLaneBounds(newTrackIndex);
-        if (position.y >= newTrackLane.getY()
-            && position.y < newTrackLane.getBottom()
-            && tracksBounds.contains(tracksBounds.getX() + 1, position.y))
+        if (tracksBounds.contains(tracksBounds.getX() + 1, position.y))
         {
-            targetTrackIndex = newTrackIndex;
+            targetTrackIndex = static_cast<int>(project.getTracks().size());
             createNewTrack = true;
         }
     }
@@ -2082,6 +2110,10 @@ void ArrangementTimelineComponent::notifyClipSelectionChanged()
 
     if (selectedClip.has_value())
         onClipSelectionChanged(selectedClip->trackIndex, selectedClip->clipIndex);
+    else if (selectedTrackIndex.has_value())
+        // Track header selected but no clip — still report the track so consumers
+        // (e.g. sampler arming) can react to a "track-only" selection.
+        onClipSelectionChanged(*selectedTrackIndex, -1);
     else
         onClipSelectionChanged(-1, -1);
 }
