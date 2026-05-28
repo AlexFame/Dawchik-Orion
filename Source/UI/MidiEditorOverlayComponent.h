@@ -17,12 +17,18 @@ public:
     MidiEditorOverlayComponent();
     ~MidiEditorOverlayComponent() override;
 
-    void openClip(TrackState& trackState, TimelineClip& clipState);
+    void openClip(TrackState& trackState, TimelineClip& clipState,
+                  int projectKeyRoot = 0, bool projectKeyIsMinor = true,
+                  bool initialScaleLock = true);
+    // Sync the scale from outside (e.g. project key changed while editor is open).
+    void setProjectKey(int rootSemitones, bool minor);
+    void setScaleLockExternally(bool enabled);
     void closeEditor();
     std::function<void()> onClose;
     std::function<void()> onTogglePlayback;
     std::function<double()> onRequestPlayheadBeat;
     std::function<bool()> onRequestPlayingState;
+    std::function<void(bool)> onScaleLockChanged; // fired when the in-editor toggle is flipped
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -115,6 +121,7 @@ private:
     int pitchToLane(int pitch) const noexcept;
     int getDisplayedLaneCount() const noexcept;
     bool isPitchInScale(int pitch) const noexcept;
+    int  snapPitchToScale(int pitch) const noexcept;
     bool isBlackKey(int pitch) const noexcept;
     bool isNoteSelected(int noteIndex) const noexcept;
     void selectSingleNote(int noteIndex);
@@ -156,6 +163,8 @@ private:
     juce::TextButton scaleButton;
     juce::TextButton snapButton;
     juce::TextButton closeButton;
+    juce::ToggleButton scaleLockToggle;
+    juce::Label scaleLockLabel;
     double horizontalZoom { 1.0 };
     double verticalZoom { 1.0 };
     double scrollX { 0.0 };
@@ -166,6 +175,7 @@ private:
     int scalePatternIndex { 0 };
     double snapSizeInBeats { 0.25 };
     bool focusModeEnabled { false };
+    bool scaleLockEnabled { true };  // new notes snap to in-scale pitches when true
     bool hasStoredViewportBeforeFocus { false };
     bool ignoreNextMouseDown { false };
     std::vector<NoteSnapshot> undoStack;

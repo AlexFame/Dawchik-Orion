@@ -589,6 +589,49 @@ bool SamplerPanelComponent::updateTypingPianoNotes()
                 noteIdentity = 10000 + keyCode;
                 currentlyActiveSlices.insert(sliceIndex);
             }
+            else
+            {
+                // Diatonic mapping for pitched playback modes when scale lock is on:
+                // each "white" laptop key plays the NEXT scale degree (no duplicates).
+                // "Black key" positions (numbers + s/d/g/h/j/l/; etc.) are skipped.
+                const auto lockEnabled = onRequestScaleLockEnabled && onRequestScaleLockEnabled();
+                if (lockEnabled && onRequestProjectKeyRoot && onRequestProjectKeyIsMinor)
+                {
+                    static const std::array<std::pair<int, int>, 12> upperRow {{
+                        {'q', 0}, {'w', 1}, {'e', 2}, {'r', 3}, {'t', 4}, {'y', 5},
+                        {'u', 6}, {'i', 7}, {'o', 8}, {'p', 9}, {'[', 10}, {']', 11},
+                    }};
+                    static const std::array<std::pair<int, int>, 11> lowerRow {{
+                        {'z', 0}, {'x', 1}, {'c', 2}, {'v', 3}, {'b', 4}, {'n', 5},
+                        {'m', 6}, {',', 7}, {'.', 8}, {'/', 9}, {'\'', 10},
+                    }};
+
+                    int diatonicIdx = -1;
+                    bool isLowerRow = false;
+                    for (const auto& [k, idx] : upperRow)
+                        if (k == keyCode) { diatonicIdx = idx; break; }
+                    if (diatonicIdx < 0)
+                    {
+                        for (const auto& [k, idx] : lowerRow)
+                            if (k == keyCode) { diatonicIdx = idx; isLowerRow = true; break; }
+                    }
+                    if (diatonicIdx < 0) continue; // chromatic accidental key — skip silently
+
+                    static const std::array<int, 7> majorScale { 0, 2, 4, 5, 7, 9, 11 };
+                    static const std::array<int, 7> minorScale { 0, 2, 3, 5, 7, 8, 10 };
+                    const auto& pattern = onRequestProjectKeyIsMinor() ? minorScale : majorScale;
+                    const auto root     = onRequestProjectKeyRoot();
+                    const auto rowBase  = isLowerRow ? 48 : 60;
+                    const auto octShift = diatonicIdx / 7;
+                    const auto degree   = diatonicIdx % 7;
+
+                    playablePitch = juce::jlimit(0, 127,
+                                                 rowBase + root + octShift * 12 + pattern[static_cast<std::size_t>(degree)]
+                                                     + track->samplerKeyboardOctaveOffset * 12
+                                                     + track->samplerTransposeSemitones);
+                    noteIdentity  = playablePitch;
+                }
+            }
 
             currentlyDown.insert(noteIdentity);
             if (! activeNotes.contains(noteIdentity))

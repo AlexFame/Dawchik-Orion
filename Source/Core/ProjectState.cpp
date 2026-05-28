@@ -154,6 +154,16 @@ void ProjectState::setKey(int rootSemitones, bool minor) noexcept
     projectKeyIsMinor = minor;
 }
 
+bool ProjectState::isScaleLockEnabled() const noexcept
+{
+    return scaleLockEnabled;
+}
+
+void ProjectState::setScaleLockEnabled(bool enabled) noexcept
+{
+    scaleLockEnabled = enabled;
+}
+
 int ProjectState::getNumerator() const noexcept
 {
     return timeSigNumerator;

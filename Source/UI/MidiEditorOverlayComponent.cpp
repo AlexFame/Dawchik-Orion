@@ -104,6 +104,22 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     snapButton.addListener(this);
     addAndMakeVisible(snapButton);
 
+    scaleLockLabel.setText("Scale Lock", juce::dontSendNotification);
+    scaleLockLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
+    scaleLockLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
+    addAndMakeVisible(scaleLockLabel);
+
+    scaleLockToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    scaleLockToggle.setToggleState(scaleLockEnabled, juce::dontSendNotification);
+    scaleLockToggle.onClick = [this]
+    {
+        scaleLockEnabled = scaleLockToggle.getToggleState();
+        if (onScaleLockChanged)
+            onScaleLockChanged(scaleLockEnabled);
+        repaint();
+    };
+    addAndMakeVisible(scaleLockToggle);
+
     focusToggle.setVisible(false);
 
     closeButton.setButtonText("Back To Arrangement");
@@ -115,7 +131,9 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
 
 MidiEditorOverlayComponent::~MidiEditorOverlayComponent() = default;
 
-void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& clipState)
+void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& clipState,
+                                          int projectKeyRoot, bool projectKeyIsMinor,
+                                          bool initialScaleLock)
 {
     activeTrack = &trackState;
     activeClip = &clipState;
@@ -135,8 +153,11 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     scrollY = 0.0;
     pendingMagnifyDelta = 0.0;
     ignoreWheelUntilMs = 0.0;
-    scaleRoot = 0;
-    scalePatternIndex = 0;
+    // Inherit scale from project key. scalePatterns[0]=Minor, [1]=Major.
+    scaleRoot         = ((projectKeyRoot % 12) + 12) % 12;
+    scalePatternIndex = projectKeyIsMinor ? 0 : 1;
+    scaleLockEnabled  = initialScaleLock;
+    scaleLockToggle.setToggleState(scaleLockEnabled, juce::dontSendNotification);
     snapSizeInBeats = 0.25;
     focusModeEnabled = false;
     hasStoredViewportBeforeFocus = false;
@@ -165,6 +186,21 @@ void MidiEditorOverlayComponent::closeEditor()
 
     if (onClose)
         onClose();
+}
+
+void MidiEditorOverlayComponent::setProjectKey(int rootSemitones, bool minor)
+{
+    scaleRoot         = ((rootSemitones % 12) + 12) % 12;
+    scalePatternIndex = minor ? 0 : 1;
+    updateSubtitle();
+    repaint();
+}
+
+void MidiEditorOverlayComponent::setScaleLockExternally(bool enabled)
+{
+    scaleLockEnabled = enabled;
+    scaleLockToggle.setToggleState(enabled, juce::dontSendNotification);
+    repaint();
 }
 
 void MidiEditorOverlayComponent::timerCallback()
@@ -348,6 +384,9 @@ void MidiEditorOverlayComponent::resized()
     scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 2));
     controlsArea.removeFromLeft(8);
     snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 2));
+    controlsArea.removeFromLeft(12);
+    scaleLockToggle.setBounds(controlsArea.removeFromLeft(22).reduced(0, 4));
+    scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 2));
     contextLabel.setBounds(centerArea.reduced(8, 4));
     closeButton.setBounds(topBar.removeFromRight(190).reduced(0, 8));
     clampScrollOffsets();
@@ -570,7 +609,10 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
             auto& movedNote = activeClip->midiNotes[static_cast<std::size_t>(noteDragState->selectedIndices[i])];
             const auto& originalNote = noteDragState->originalSelectedNotes[i];
             movedNote.startBeat = juce::jlimit(0.0, activeClip->lengthInBeats - movedNote.lengthInBeats, snapBeat(originalNote.startBeat + beatDelta));
-            movedNote.pitch = juce::jlimit(lowestPitch, highestPitch, originalNote.pitch + pitchDelta);
+            auto newPitch = juce::jlimit(lowestPitch, highestPitch, originalNote.pitch + pitchDelta);
+            if (scaleLockEnabled && ! isPitchInScale(newPitch))
+                newPitch = snapPitchToScale(newPitch);
+            movedNote.pitch = newPitch;
         }
     }
     else
@@ -590,7 +632,10 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
     {
         pushUndoSnapshot();
         const auto snappedBeat = snapBeat(xToBeat(static_cast<double>(marqueeState->origin.x)));
-        const auto pitch = yToPitch(marqueeState->origin.y);
+        auto pitch = yToPitch(marqueeState->origin.y);
+        // Scale lock: snap new notes to the closest in-scale pitch when enabled.
+        if (scaleLockEnabled && ! isPitchInScale(pitch))
+            pitch = snapPitchToScale(pitch);
         activeClip->midiNotes.push_back(MidiNote { pitch, snappedBeat, 1.0, 100 });
         selectSingleNote(static_cast<int>(activeClip->midiNotes.size()) - 1);
     }
@@ -846,6 +891,19 @@ bool MidiEditorOverlayComponent::isPitchInScale(int pitch) const noexcept
     const int scaleRelative = (pitchClass - scaleRoot + 12) % 12;
     const auto& pattern = scalePatterns[static_cast<std::size_t>(scalePatternIndex)].pitchClasses;
     return std::find(pattern.begin(), pattern.end(), scaleRelative) != pattern.end();
+}
+
+// Snap a chromatic pitch to the closest in-scale pitch. Ties prefer the lower one
+// (musically the diatonic neighbour below is usually a safer guess).
+int MidiEditorOverlayComponent::snapPitchToScale(int pitch) const noexcept
+{
+    if (isPitchInScale(pitch)) return pitch;
+    for (int dist = 1; dist <= 6; ++dist)
+    {
+        if (isPitchInScale(pitch - dist)) return pitch - dist;
+        if (isPitchInScale(pitch + dist)) return pitch + dist;
+    }
+    return pitch;
 }
 
 bool MidiEditorOverlayComponent::isBlackKey(int pitch) const noexcept

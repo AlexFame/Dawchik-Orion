@@ -24,6 +24,10 @@ public:
     std::function<void()> onAllNotesOff;
     std::function<double()> onRequestProjectTempoBpm;
     std::function<TrackState*(int)> onResolveTrack;
+    // Scale lock support: lets the panel snap pitched keyboard input into the project key.
+    std::function<int()>  onRequestProjectKeyRoot;
+    std::function<bool()> onRequestProjectKeyIsMinor;
+    std::function<bool()> onRequestScaleLockEnabled;
 
     void openTrack(TrackState& trackState);
     void openTrackIndex(int trackIndex);

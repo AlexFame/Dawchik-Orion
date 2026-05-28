@@ -88,6 +88,11 @@ public:
     bool isKeyMinor() const noexcept;
     void setKey(int rootSemitones, bool minor) noexcept;
 
+    // Global scale lock: when enabled, any pitched note input (sampler keyboard,
+    // piano-roll click, drag) snaps to the nearest in-scale pitch.
+    bool isScaleLockEnabled() const noexcept;
+    void setScaleLockEnabled(bool enabled) noexcept;
+
     int getNumerator() const noexcept;
     int getDenominator() const noexcept;
 
@@ -112,6 +117,7 @@ private:
     double loopEndBeat { 8.0 };
     int  projectKeyRoot { 0 };       // C by default
     bool projectKeyIsMinor { true }; // A minor / C minor are common in production
+    bool scaleLockEnabled { true };
     std::vector<TrackState> tracks;
 };
 }  // namespace orion

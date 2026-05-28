@@ -2023,6 +2023,9 @@ MainComponent::MainComponent()
         arrangementTimeline.grabKeyboardFocus();
     };
     samplerPanel.onRequestProjectTempoBpm = [this]() { return projectState.getTempoBpm(); };
+    samplerPanel.onRequestProjectKeyRoot    = [this]() { return projectState.getKeyRoot(); };
+    samplerPanel.onRequestProjectKeyIsMinor = [this]() { return projectState.isKeyMinor(); };
+    samplerPanel.onRequestScaleLockEnabled  = [this]() { return projectState.isScaleLockEnabled(); };
     samplerPanel.onResolveTrack = [this](int trackIndex) -> TrackState*
     {
         auto& tracks = projectState.getTracks();
@@ -2072,7 +2075,14 @@ MainComponent::MainComponent()
     {
         auto& track = projectState.getTracks()[static_cast<std::size_t>(trackIndex)];
         auto& clip = track.clips[static_cast<std::size_t>(clipIndex)];
-        midiEditorOverlay.openClip(track, clip);
+        midiEditorOverlay.openClip(track, clip,
+                                   projectState.getKeyRoot(),
+                                   projectState.isKeyMinor(),
+                                   projectState.isScaleLockEnabled());
+    };
+    midiEditorOverlay.onScaleLockChanged = [this](bool enabled)
+    {
+        projectState.setScaleLockEnabled(enabled);
     };
     arrangementTimeline.onClipSelectionChanged = [this](int trackIndex, int clipIndex)
     {
@@ -3243,6 +3253,8 @@ void MainComponent::showKeySelectionMenu()
             // the cache key includes the semitone shift, so this populates the new entries.
             if (arrangementPlaybackSource != nullptr)
                 arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+            // Sync the piano-roll scale to the new project key if it's open.
+            midiEditorOverlay.setProjectKey(root, isMinor);
             updateTransportLabels();
             refreshClipInspector();
             arrangementTimeline.repaint();
