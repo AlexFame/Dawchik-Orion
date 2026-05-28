@@ -138,6 +138,22 @@ void ProjectState::setTempoBpm(double newTempoBpm) noexcept
     tempoBpm = juce::jlimit(60.0, 200.0, newTempoBpm);
 }
 
+int ProjectState::getKeyRoot() const noexcept
+{
+    return projectKeyRoot;
+}
+
+bool ProjectState::isKeyMinor() const noexcept
+{
+    return projectKeyIsMinor;
+}
+
+void ProjectState::setKey(int rootSemitones, bool minor) noexcept
+{
+    projectKeyRoot = ((rootSemitones % 12) + 12) % 12;
+    projectKeyIsMinor = minor;
+}
+
 int ProjectState::getNumerator() const noexcept
 {
     return timeSigNumerator;

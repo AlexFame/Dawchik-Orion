@@ -3,6 +3,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <functional>
+#include <map>
+#include <string>
+#include <vector>
 
 #include "../Audio/TransportEngine.h"
 #include "../Core/ProjectState.h"
@@ -180,6 +183,15 @@ private:
     void deleteSelectedTrack();
     juce::Rectangle<int> getAddTrackButtonBounds() const noexcept;
     void updateTrackVolumeFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x);
+
+    struct AudioPeaks
+    {
+        std::vector<float> minVals;
+        std::vector<float> maxVals;
+        int samplesPerBucket { 256 };
+    };
+    const AudioPeaks* getOrComputePeaks(const juce::String& path);
+    std::map<std::string, AudioPeaks> waveformCache;
 
     ProjectState& project;
     TransportEngine& transport;

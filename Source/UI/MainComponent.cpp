@@ -32,7 +32,7 @@ constexpr int maxBrowserPanelWidth = 520;
 constexpr int browserResizeHandleWidth = 10;
 constexpr int transportBrandWidth = 92;
 constexpr int transportClusterWidth = 314;
-constexpr int transportTempoWidth = 112;
+constexpr int transportTempoWidth = 178; // BPM + KEY combined card
 constexpr int transportModeWidth = 266;
 constexpr int transportUtilityWidth = 236;
 constexpr int transportSectionGap = 12;
@@ -42,6 +42,17 @@ constexpr int transportContentVerticalNudge = -3;
 constexpr int samplerBottomPanelHeight = 320;
 constexpr const char* warpBackendCacheVersion = ORION_HAVE_RUBBERBAND ? "rubberband_exp1_drain1" : "signalsmith_fallback";
 
+// Convert (rootSemi 0..11, minor) → display name like "Cm" / "F#" / "Bb minor".
+juce::String formatKeyName(int rootSemi, bool minor, bool fullName = false)
+{
+    static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    if (rootSemi < 0 || rootSemi > 11) return "?";
+    juce::String s(names[rootSemi]);
+    if (fullName) s += minor ? " minor" : " major";
+    else          s += minor ? "m" : "";
+    return s;
+}
+
 struct AudioWarpAnalysis
 {
     double durationSeconds { 0.0 };
@@ -50,7 +61,109 @@ struct AudioWarpAnalysis
     juce::String bpmSource { "none" };
     double bpmConfidence { 0.0 };
     bool bpmGuessed { false };
+    int  sourceKeyRoot { -1 };       // -1 = unknown, otherwise 0..11 (C..B)
+    bool sourceKeyIsMinor { false };
 };
+
+// Parses musical key from a filename. Strict — only accepts standalone token candidates
+// (rejects words like "Bass", "Drum" that start with a note letter). Handles "Cm",
+// "C minor", "C_minor", "Cmin", "Cmaj", "C# minor", "Db", "Fsharp", "Bbm" etc.
+struct ParsedKey { int root { -1 }; bool minor { false }; };
+ParsedKey parseKeyFromFileName(const juce::File& file)
+{
+    auto raw  = file.getFileNameWithoutExtension();
+    auto text = juce::String(' ') + raw.toLowerCase().replaceCharacters("_-.()[]", "       ") + juce::String(' ');
+
+    auto letterToSemi = [](juce::juce_wchar c) -> int
+    {
+        switch (c)
+        {
+            case 'c': return 0;
+            case 'd': return 2;
+            case 'e': return 4;
+            case 'f': return 5;
+            case 'g': return 7;
+            case 'a': return 9;
+            case 'b': return 11;
+        }
+        return -1;
+    };
+    auto isLetter = [](juce::juce_wchar c) { return c >= 'a' && c <= 'z'; };
+
+    ParsedKey best { -1, false };
+    int bestScore = 0;
+
+    for (int i = 1; i + 1 < text.length(); ++i)
+    {
+        const auto prev = text[i - 1];
+        if (prev != ' ' && prev != '\t') continue;
+        const auto c = text[i];
+        const auto semi = letterToSemi(c);
+        if (semi < 0) continue;
+
+        int rootSemi = semi;
+        int pos = i + 1;
+        bool hadAccidental = false;
+
+        if (pos < text.length())
+        {
+            const auto a = text[pos];
+            if (a == '#')
+            {
+                rootSemi = (rootSemi + 1) % 12; ++pos; hadAccidental = true;
+            }
+            else if (a == 'b' && pos + 1 < text.length())
+            {
+                const auto next = text[pos + 1];
+                if (next == 'm' || next == ' ' || next == '\t' || (next >= '0' && next <= '9'))
+                {
+                    rootSemi = (rootSemi + 11) % 12; ++pos; hadAccidental = true;
+                }
+            }
+        }
+
+        int modePos = pos;
+        while (modePos < text.length() && (text[modePos] == ' ' || text[modePos] == '\t')) ++modePos;
+        const bool skippedSpace = modePos > pos;
+
+        bool isMinor = false, modeKnown = false, isValid = false;
+
+        if (modePos >= text.length())
+        {
+            isValid = true;
+        }
+        else
+        {
+            const auto rem = text.substring(modePos, juce::jmin(modePos + 6, text.length()));
+            if      (rem.startsWith("minor")) { isMinor = true;  modeKnown = true; isValid = true; }
+            else if (rem.startsWith("major")) { isMinor = false; modeKnown = true; isValid = true; }
+            else if (rem.startsWith("min"))   { isMinor = true;  modeKnown = true; isValid = true; }
+            else if (rem.startsWith("maj"))   { isMinor = false; modeKnown = true; isValid = true; }
+            else if (! skippedSpace && text[pos] == 'm')
+            {
+                if (pos + 1 >= text.length() || ! isLetter(text[pos + 1]))
+                {
+                    isMinor = true; modeKnown = true; isValid = true;
+                }
+            }
+            else if (skippedSpace)
+            {
+                isValid = true;
+            }
+        }
+
+        if (! isValid) continue;
+
+        const int score = (modeKnown ? 1000 : 100) + (hadAccidental ? 50 : 0) + juce::jmax(0, 100 - i);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            best.root = rootSemi;
+            best.minor = isMinor;
+        }
+    }
+    return best;
+}
 
 double parseBpmFromFileName(const juce::File& file)
 {
@@ -123,6 +236,12 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
         return result;
 
     result.durationSeconds = static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
+
+    // Detect key from filename — common patterns like "Cm_120bpm", "F#maj_loop", "Dbm".
+    const auto parsedKey = parseKeyFromFileName(file);
+    result.sourceKeyRoot    = parsedKey.root;
+    result.sourceKeyIsMinor = parsedKey.minor;
+
     const auto nameBpm = parseBpmFromFileName(file);
     if (nameBpm > 0.0)
     {
@@ -310,6 +429,158 @@ double detectTransientDensity(const juce::AudioBuffer<float>& buffer, double sam
     return (duration > 0.05) ? static_cast<double>(onsets.size()) / duration : 0.0;
 }
 
+// Peak-based detector tuned for kick/snare: 1.5ms window, 45% rise threshold, 80ms min gap.
+std::vector<int> detectStrongTransients(const juce::AudioBuffer<float>& buffer, double sampleRate)
+{
+    std::vector<int> transients;
+    const auto numSamples  = buffer.getNumSamples();
+    const auto numChannels = buffer.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
+        return transients;
+
+    const auto windowSize    = juce::jmax(1, static_cast<int>(sampleRate * 0.0015));
+    const auto envelopeSize  = numSamples / windowSize;
+    if (envelopeSize < 3)
+        return transients;
+
+    std::vector<float> envelope(static_cast<size_t>(envelopeSize), 0.0f);
+    for (int i = 0; i < envelopeSize; ++i)
+    {
+        float peak = 0.0f;
+        const auto start = i * windowSize;
+        const auto end   = juce::jmin(start + windowSize, numSamples);
+        for (int s = start; s < end; ++s)
+            for (int ch = 0; ch < numChannels; ++ch)
+                peak = juce::jmax(peak, std::abs(buffer.getSample(ch, s)));
+        envelope[static_cast<size_t>(i)] = peak;
+    }
+
+    float maxRise = 0.0f;
+    std::vector<float> rise(static_cast<size_t>(envelopeSize), 0.0f);
+    for (int i = 1; i < envelopeSize; ++i)
+    {
+        rise[static_cast<size_t>(i)] = juce::jmax(0.0f, envelope[static_cast<size_t>(i)] - envelope[static_cast<size_t>(i - 1)]);
+        maxRise = juce::jmax(maxRise, rise[static_cast<size_t>(i)]);
+    }
+    if (maxRise <= 0.0f)
+        return transients;
+
+    const auto threshold    = maxRise * 0.45f;
+    const auto minPeakLevel = 0.12f;
+    const auto minGapWin    = juce::jmax(1, static_cast<int>(sampleRate * 0.08 / windowSize));
+    int lastPeak = -minGapWin;
+
+    for (int i = 1; i < envelopeSize - 1; ++i)
+    {
+        if (rise[static_cast<size_t>(i)] > threshold
+            && envelope[static_cast<size_t>(i)] >= minPeakLevel
+            && rise[static_cast<size_t>(i)] >= rise[static_cast<size_t>(i - 1)]
+            && rise[static_cast<size_t>(i)] >= rise[static_cast<size_t>(i + 1)]
+            && (i - lastPeak) >= minGapWin)
+        {
+            transients.push_back(i * windowSize);
+            lastPeak = i;
+        }
+    }
+    return transients;
+}
+
+// Crest factor = peak / RMS. High (>10) means percussive gaps between hits (drums).
+// Low (<8) means sustained energy (melodic). Reliable discriminator.
+float computeCrestFactor(const juce::AudioBuffer<float>& buffer)
+{
+    const auto numSamples  = buffer.getNumSamples();
+    const auto numChannels = buffer.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return 1.0f;
+    float peakVal = 0.0f, sumSq = 0.0f;
+    for (int ch = 0; ch < numChannels; ++ch)
+        for (int s = 0; s < numSamples; ++s)
+        {
+            const auto v = std::abs(buffer.getSample(ch, s));
+            peakVal = juce::jmax(peakVal, v);
+            sumSq  += v * v;
+        }
+    const auto rms = std::sqrt(sumSq / static_cast<float>(numSamples * numChannels));
+    return rms > 0.0001f ? peakVal / rms : 1.0f;
+}
+
+// Forward declaration of the underlying RubberBand path.
+juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer<float>& source,
+                                                          int outputSamples,
+                                                          double sampleRate,
+                                                          const std::map<std::size_t, std::size_t>& keyframes,
+                                                          double pitchScale);
+
+// Drum warp: pre-emphasis + keyframed RubberBand + de-emphasis.
+// (1) Apply a HF-boost filter to source. HF transient detail is amplified.
+// (2) RubberBand stretches the pre-emphasised source. Its STFT-smearing affects the
+//     loud HF content less severely (because it's loud → survives smearing relatively).
+// (3) Apply symmetric HF-cut to the output. HF returns to natural level, but the
+//     PROPORTION of transient HF energy is higher than without pre-emphasis.
+// Classic technique from tape recording / audio coding to preserve detail through
+// lossy processing. Headroom is consumed during stage 1 so we attenuate to avoid clipping.
+juce::AudioBuffer<float> drumBeatsTailfillBuffer(const juce::AudioBuffer<float>& source,
+                                                  int outputSamples,
+                                                  double sampleRate)
+{
+    const auto sourceSamples = source.getNumSamples();
+    const auto channels      = source.getNumChannels();
+    if (sourceSamples <= 1 || outputSamples <= 1 || channels <= 0 || sampleRate <= 0.0)
+        return source;
+
+    // Pre-emphasis filter: y[n] = x[n] - alpha * x[n-1], boosts HF before stretching.
+    // alpha = 0.85 at 44.1kHz boosts roughly +6dB above 2.5kHz so HF transient detail
+    // survives RubberBand's STFT smearing. Headroom attenuation prevents clipping
+    // from the boost; de-emphasis afterwards restores natural balance.
+    const auto preAlpha   = 0.85f;
+    const auto headroom   = 0.5f;
+    juce::AudioBuffer<float> emphSource(channels, sourceSamples);
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        const auto srcCh = juce::jmin(ch, source.getNumChannels() - 1);
+        float prev = 0.0f;
+        for (int s = 0; s < sourceSamples; ++s)
+        {
+            const auto x = source.getSample(srcCh, s) * headroom;
+            const auto y = x - preAlpha * prev;
+            emphSource.setSample(ch, s, y);
+            prev = x;
+        }
+    }
+
+    // Stretch with keyframes.
+    const auto transients = detectStrongTransients(source, sampleRate);
+    const auto timeRatio  = static_cast<double>(outputSamples) / static_cast<double>(sourceSamples);
+
+    std::map<std::size_t, std::size_t> keyframes;
+    for (auto t : transients)
+        if (t > 0 && t < sourceSamples)
+            keyframes[static_cast<std::size_t>(t)] =
+                static_cast<std::size_t>(std::round(static_cast<double>(t) * timeRatio));
+
+    auto output = rubberBandStretchBufferToLength(emphSource, outputSamples, sampleRate, keyframes, 1.0);
+    if (output.getNumSamples() < outputSamples || output.getNumChannels() != channels)
+        return output;
+
+    // De-emphasis filter: inverse of pre-emphasis, restores natural HF balance.
+    // y[n] = x[n] + alpha * y[n-1]. Also undoes the headroom attenuation.
+    const auto restore = 1.0f / headroom;
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        float prev = 0.0f;
+        for (int s = 0; s < output.getNumSamples(); ++s)
+        {
+            const auto x = output.getSample(ch, s);
+            const auto y = x + preAlpha * prev;
+            prev = y;
+            output.setSample(ch, s, y * restore);
+        }
+    }
+
+    return output;
+}
+
 juce::AudioBuffer<float> sliceStretchBuffer(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
 {
     const auto numSamples = source.getNumSamples();
@@ -418,12 +689,17 @@ juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& s
 }
 
 #if ORION_HAVE_RUBBERBAND
-juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
+juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer<float>& source,
+                                                          int outputSamples,
+                                                          double sampleRate,
+                                                          const std::map<std::size_t, std::size_t>& keyframes = {},
+                                                          double pitchScale = 1.0)
 {
     if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
         return source;
 
-    if (std::abs(outputSamples - source.getNumSamples()) <= 1)
+    // Bypass the stretcher only when neither time nor pitch is being changed.
+    if (std::abs(outputSamples - source.getNumSamples()) <= 1 && std::abs(pitchScale - 1.0) < 0.0001)
         return source;
 
     try
@@ -441,13 +717,19 @@ juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer
                 | RubberBand::RubberBandStretcher::OptionDetectorCompound
                 | RubberBand::RubberBandStretcher::OptionChannelsTogether,
             timeRatio,
-            1.0);
+            pitchScale);
 
         constexpr int blockSize = 16384;
         stretcher.setExpectedInputDuration(static_cast<std::size_t>(sourceSamples));
         stretcher.setMaxProcessSize(static_cast<std::size_t>(blockSize));
         stretcher.setTimeRatio(timeRatio);
-        stretcher.setPitchScale(1.0);
+        stretcher.setPitchScale(pitchScale);
+
+        // Lock transient positions to the warp grid — this is how Ableton's Beats/Complex
+        // modes preserve attacks. RubberBand stretches the gaps between keyframes only;
+        // the transient samples themselves are aligned exactly to their target positions.
+        if (! keyframes.empty())
+            stretcher.setKeyFrameMap(keyframes);
 
         std::vector<const float*> inputChannels(static_cast<std::size_t>(channels));
         std::vector<std::vector<float>> collected(static_cast<std::size_t>(channels));
@@ -538,12 +820,77 @@ juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer
 }
 #endif
 
+enum class LoopType { drum, melodic };
+
+// Multi-signal loop classifier. Path keywords are the strongest signal;
+// audio analysis (crest + transients) is the fallback for unnamed/ambiguous files.
+LoopType inferLoopType(const juce::String& sourcePath,
+                       const juce::AudioBuffer<float>& source,
+                       double sampleRate)
+{
+    const auto pathLower = sourcePath.toLowerCase();
+
+    static const std::vector<juce::String> drumKeywords {
+        "drum", "kick", "snare", "break", "808", "hihat", "hi-hat", "hi_hat",
+        "perc", "clap", "tom", "ride", "cymbal", "rim", "shaker", "tamb",
+        "conga", "bongo"
+    };
+    static const std::vector<juce::String> melodicKeywords {
+        "melody", "melodic", "lead", "pad", "synth", "piano", "guitar",
+        "violin", "string", "flute", "horn", "sax", "chord", "vocal", "vox",
+        "keys", "arp", "bell", "rhodes"
+    };
+
+    bool drumHit = false, melodicHit = false;
+    for (const auto& kw : drumKeywords)
+        if (pathLower.contains(kw)) { drumHit = true; break; }
+    for (const auto& kw : melodicKeywords)
+        if (pathLower.contains(kw)) { melodicHit = true; break; }
+
+    // Path keyword is the strongest signal — if the file is named clearly, trust the name.
+    if (drumHit && ! melodicHit)  { DBG("[Warp] inferLoopType: drum (path)");    return LoopType::drum; }
+    if (melodicHit && ! drumHit)  { DBG("[Warp] inferLoopType: melodic (path)"); return LoopType::melodic; }
+
+    // Ambiguous (both or neither matched): fall back to audio analysis.
+    const auto strongTransients = detectStrongTransients(source, sampleRate);
+    if (strongTransients.size() < 2)
+    {
+        DBG("[Warp] inferLoopType: melodic (no transients)");
+        return LoopType::melodic;
+    }
+
+    const auto duration = sampleRate > 0.0 ? static_cast<double>(source.getNumSamples()) / sampleRate : 0.0;
+    const auto density  = duration > 0.1   ? static_cast<double>(strongTransients.size()) / duration : 0.0;
+    if (density < 1.0 || density > 8.0)
+    {
+        DBG("[Warp] inferLoopType: melodic (density=" + juce::String(density, 2) + ")");
+        return LoopType::melodic;
+    }
+
+    const auto crest = computeCrestFactor(source);
+    DBG("[Warp] inferLoopType: density=" + juce::String(density, 2)
+        + " crest=" + juce::String(crest, 1)
+        + " -> " + juce::String(crest >= 7.0f ? "drum" : "melodic"));
+    return (crest >= 7.0f) ? LoopType::drum : LoopType::melodic;
+}
+
 juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
                                                                       int outputSamples,
-                                                                      double sampleRate)
+                                                                      double sampleRate,
+                                                                      const juce::String& sourcePath = {},
+                                                                      double pitchScale = 1.0)
 {
+    if (inferLoopType(sourcePath, source, sampleRate) == LoopType::drum)
+    {
+        // Drum path doesn't support pitch shift yet (tonal preservation for drums is iffy
+        // anyway). Just stretch via the drum algorithm and ignore pitchScale for now.
+        juce::ignoreUnused(pitchScale);
+        return drumBeatsTailfillBuffer(source, outputSamples, sampleRate);
+    }
+
+    // Melodic: RubberBand with optional pitch shift for key matching.
 #if ORION_HAVE_RUBBERBAND
-    auto stretched = rubberBandStretchBufferToLength(source, outputSamples, sampleRate);
+    auto stretched = rubberBandStretchBufferToLength(source, outputSamples, sampleRate, {}, pitchScale);
     if (stretched.getNumSamples() > 0 && stretched.getNumChannels() == source.getNumChannels())
         return stretched;
 
@@ -555,7 +902,8 @@ juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce
 juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
                                                        double sourceBpm,
                                                        double projectTempoBpm,
-                                                       double sampleRate)
+                                                       double sampleRate,
+                                                       const juce::String& sourcePath = {})
 {
     if (source.getNumSamples() <= 1 || sourceBpm <= 0.0 || projectTempoBpm <= 0.0)
         return source;
@@ -565,7 +913,7 @@ juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<fl
         return source;
 
     const auto outputSamples = juce::jmax(1, static_cast<int>(std::round(static_cast<double>(source.getNumSamples()) * tempoRatio)));
-    return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate);
+    return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate, sourcePath);
 }
 
 juce::String compactInspectorFileName(const juce::File& file, const juce::String& fallbackName)
@@ -821,9 +1169,9 @@ public:
           transport(engine),
           audioFormatManager(formatManager),
           samplerEngine(audioFormatManager,
-                        [](const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
+                        [](const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate, const juce::String& sourcePath)
                         {
-                            return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate);
+                            return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate, sourcePath);
                         })
     {
     }
@@ -1134,6 +1482,18 @@ private:
         return dataPtr;
     }
 
+    // Semitone offset to transpose the clip from its detected source key into the
+    // current project key. Picks the shortest direction (max 6 semitones either way).
+    int computeKeyShiftSemitones(const TimelineClip& clip) const noexcept
+    {
+        if (! clip.keyShiftEnabled) return 0;
+        if (clip.sourceKeyRoot < 0)  return 0;
+        int diff = project.getKeyRoot() - clip.sourceKeyRoot;
+        while (diff > 6)  diff -= 12;
+        while (diff < -6) diff += 12;
+        return diff;
+    }
+
     const AudioFileData* getWarpedAudioFileData(const TimelineClip& clip,
                                                 const AudioFileData& originalData,
                                                 double beatsPerSecond,
@@ -1143,8 +1503,12 @@ private:
         if (beatsPerSecond <= 0.0 || originalData.sampleRate <= 0.0 || warpLengthInBeats <= 0.0)
             return nullptr;
 
-        const auto targetSamples = juce::jmax(1, static_cast<int>(std::round((warpLengthInBeats / beatsPerSecond) * originalData.sampleRate)));
-        const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples) + "|" + warpBackendCacheVersion;
+        const auto targetSamples   = juce::jmax(1, static_cast<int>(std::round((warpLengthInBeats / beatsPerSecond) * originalData.sampleRate)));
+        const auto semitonesShift  = computeKeyShiftSemitones(clip);
+        const auto pitchScale      = std::pow(2.0, static_cast<double>(semitonesShift) / 12.0);
+        const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples)
+                       + "|p" + std::to_string(semitonesShift)
+                       + "|" + warpBackendCacheVersion;
         if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
         {
             DBG("[Warp-Cache] HIT key=" + juce::String(key));
@@ -1154,11 +1518,11 @@ private:
         if (! allowBuild)
             return nullptr;
 
-        DBG("[Warp-Cache] MISS key=" + juce::String(key) + " building...");
+        DBG("[Warp-Cache] MISS key=" + juce::String(key) + " building... pitchSemi=" + juce::String(semitonesShift));
 
         auto data = std::make_unique<AudioFileData>();
         data->sampleRate = originalData.sampleRate;
-        data->buffer = stretchBufferToLengthWithExperimentalBackend(originalData.buffer, targetSamples, originalData.sampleRate);
+        data->buffer = stretchBufferToLengthWithExperimentalBackend(originalData.buffer, targetSamples, originalData.sampleRate, clip.sourcePath, pitchScale);
 
         const auto* dataPtr = data.get();
         warpedAudioCache.emplace(key, std::move(data));
@@ -1413,12 +1777,13 @@ MainComponent::MainComponent()
     bpmEditor.setBorder(juce::BorderSize<int>(0));
     bpmEditor.setIndents(0, 0);
     bpmEditor.setInputRestrictions(6, "0123456789.");
-    bpmEditor.setVisible(false);
     bpmEditor.setAlwaysOnTop(true);
     bpmEditor.onReturnKey = [this]() { endTempoEditing(true); };
     bpmEditor.onEscapeKey = [this]() { endTempoEditing(false); };
     bpmEditor.onFocusLost = [this]() { endTempoEditing(true); };
-    addAndMakeVisible(bpmEditor);
+    // addChildComponent keeps the editor hidden by default so paint()'s g.drawText
+    // renders the BPM number at startup. addAndMakeVisible would auto-show it empty.
+    addChildComponent(bpmEditor);
 
     meterCaptionLabel.setText("BPM", juce::dontSendNotification);
     meterCaptionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.68f));
@@ -1504,6 +1869,11 @@ MainComponent::MainComponent()
                 }
                 if (clip->detectedBars == 0 && analysis.detectedBars > 0)
                     clip->detectedBars = analysis.detectedBars;
+                if (clip->sourceKeyRoot < 0 && analysis.sourceKeyRoot >= 0)
+                {
+                    clip->sourceKeyRoot    = analysis.sourceKeyRoot;
+                    clip->sourceKeyIsMinor = analysis.sourceKeyIsMinor;
+                }
             }
 
             clip->warpEnabled = clipWarpToggle.getToggleState();
@@ -1718,12 +2088,28 @@ MainComponent::MainComponent()
                     samplerPanel.openTrackIndex(trackIndex);
                     resized();
                 }
+
+                // Selection change happens right after a clip is dropped — log the
+                // detected key + bake the warp/pitch cache so playback uses it.
+                if (clipIndex < static_cast<int>(track.clips.size()))
+                {
+                    const auto& clip = track.clips[static_cast<std::size_t>(clipIndex)];
+                    if (clip.type == ClipType::audio && clip.sourceKeyRoot >= 0)
+                        DBG("[KeyDetect] clip='" + clip.name + "' sourceKey="
+                            + formatKeyName(clip.sourceKeyRoot, clip.sourceKeyIsMinor)
+                            + " projectKey="
+                            + formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor()));
+                }
             }
         }
         else
         {
             selectedArrangementClip.reset();
         }
+
+        // Re-bake the warp cache so freshly-dropped clips pick up auto-detected pitch.
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
 
         refreshClipInspector();
     };
@@ -1775,8 +2161,8 @@ void MainComponent::paint(juce::Graphics& g)
                static_cast<float>(topStrip.getRight()), static_cast<float>(topStrip.getBottom() - 1), 1.0f);
 
     auto transportVisual = topStrip.reduced(18, 14);
-    const auto contentWidth = transportBrandWidth + transportClusterWidth + transportTempoWidth + transportModeWidth
-        + transportUtilityWidth + transportSectionGap * 4;
+    const auto contentWidth = transportBrandWidth + transportClusterWidth + transportTempoWidth
+        + transportModeWidth + transportUtilityWidth + transportSectionGap * 4;
     auto contentRow = transportVisual.withSizeKeepingCentre(juce::jmin(contentWidth, transportVisual.getWidth()), transportVisual.getHeight());
     contentRow.removeFromLeft(transportBrandWidth);
     contentRow.removeFromLeft(transportSectionGap);
@@ -1793,6 +2179,9 @@ void MainComponent::paint(juce::Graphics& g)
     const auto centeredModeCluster = modeCluster.withSizeKeepingCentre(modeCluster.getWidth(), transportSectionHeight);
     const auto centeredRightUtility = rightUtility.withSizeKeepingCentre(rightUtility.getWidth(), transportSectionHeight);
 
+    // KEY occupies the right half of the BPM card.
+    cachedKeyCardBounds = centeredBpmCard.withTrimmedLeft(centeredBpmCard.getWidth() / 2);
+
     for (const auto& section : { centeredTransportCluster, centeredBpmCard, centeredModeCluster, centeredRightUtility })
     {
         const auto isTempoCard = section == centeredBpmCard;
@@ -1802,21 +2191,51 @@ void MainComponent::paint(juce::Graphics& g)
         g.drawRoundedRectangle(section.toFloat(), 12.0f, 1.0f);
     }
 
-    for (const auto x : { centeredTransportCluster.getRight() + (transportSectionGap / 2), centeredBpmCard.getRight() + (transportSectionGap / 2), centeredModeCluster.getRight() + (transportSectionGap / 2) })
+    // Vertical divider between BPM and KEY halves of the combined card.
+    {
+        const auto dividerX = centeredBpmCard.getCentreX();
+        g.setColour(juce::Colours::white.withAlpha(0.10f));
+        g.drawLine(static_cast<float>(dividerX), static_cast<float>(centeredBpmCard.getY() + 10),
+                   static_cast<float>(dividerX), static_cast<float>(centeredBpmCard.getBottom() - 10), 1.0f);
+    }
+
+    for (const auto x : { centeredTransportCluster.getRight() + (transportSectionGap / 2),
+                          centeredBpmCard.getRight() + (transportSectionGap / 2),
+                          centeredModeCluster.getRight() + (transportSectionGap / 2) })
     {
         g.setColour(juce::Colours::white.withAlpha(0.09f));
         g.drawLine(static_cast<float>(x), static_cast<float>(centeredTransportCluster.getY() + 6),
                    static_cast<float>(x), static_cast<float>(centeredTransportCluster.getBottom() - 6), 1.0f);
     }
 
+    const auto bpmHalf = centeredBpmCard.withTrimmedRight(centeredBpmCard.getWidth() / 2);
+    const auto keyHalf = cachedKeyCardBounds;
+
     if (! bpmEditor.isVisible())
     {
-        auto bpmTextBounds = centeredBpmCard.withSizeKeepingCentre(centeredBpmCard.getWidth(), transportControlHeight)
+        auto bpmTextBounds = bpmHalf.withSizeKeepingCentre(bpmHalf.getWidth(), transportControlHeight)
                                 .translated(0, transportContentVerticalNudge);
         bpmTextBounds = bpmTextBounds.removeFromTop(38);
         g.setColour(juce::Colours::white);
-        g.setFont(juce::FontOptions(26.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(24.0f, juce::Font::bold));
         g.drawText(juce::String(projectState.getTempoBpm(), 2), bpmTextBounds, juce::Justification::centred);
+    }
+
+    // KEY half: large key name on top, "KEY" caption below.
+    {
+        auto keyValueBounds = keyHalf.withSizeKeepingCentre(keyHalf.getWidth(), transportControlHeight)
+                                  .translated(0, transportContentVerticalNudge);
+        auto keyCaptionBounds = keyValueBounds;
+        keyValueBounds = keyValueBounds.removeFromTop(38);
+        g.setColour(juce::Colours::white);
+        g.setFont(juce::FontOptions(24.0f, juce::Font::bold));
+        g.drawText(formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor()),
+                   keyValueBounds, juce::Justification::centred);
+
+        keyCaptionBounds.removeFromTop(40);
+        g.setColour(mutedText);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.drawText("KEY", keyCaptionBounds, juce::Justification::centredTop);
     }
 
     auto workArea = bounds.withTrimmedTop(20);
@@ -1887,21 +2306,26 @@ void MainComponent::resized()
     transportButtons.removeFromLeft(8);
     redoButton.setBounds(transportButtons.removeFromLeft(54));
 
-    auto bpmBounds = centeredBpmCard.withSizeKeepingCentre(centeredBpmCard.getWidth(), transportControlHeight)
-                        .translated(0, transportContentVerticalNudge);
+    // Combined BPM + KEY card: BPM occupies the left half, KEY the right half.
+    auto bpmHalf = centeredBpmCard.withTrimmedRight(centeredBpmCard.getWidth() / 2);
+    auto keyHalf = centeredBpmCard.withTrimmedLeft(centeredBpmCard.getWidth() / 2);
+
+    auto bpmBounds = bpmHalf.withSizeKeepingCentre(bpmHalf.getWidth(), transportControlHeight)
+                         .translated(0, transportContentVerticalNudge);
     auto bpmTop = bpmBounds.removeFromTop(38);
     bpmValueLabel.setBounds(bpmTop);
-    bpmEditor.setBounds(bpmTop);
+    const auto editorBoxHeight = static_cast<int>(std::ceil(bpmValueLabel.getFont().getHeight()));
+    bpmEditor.setBounds(bpmTop.withSizeKeepingCentre(bpmTop.getWidth(), editorBoxHeight));
     if (bpmEditor.isVisible())
         bpmEditor.toFront(false);
     else
-    {
         bpmValueLabel.setVisible(false);
-    }
-    auto bpmBottom = bpmBounds;
-    auto bottomLeft = bpmBottom.removeFromLeft(bpmBottom.getWidth() / 2);
-    bpmCaptionLabel.setBounds(bottomLeft);
-    meterValueLabel.setBounds(bpmBottom);
+
+    bpmCaptionLabel.setBounds(bpmBounds); // "TEMPO" caption fills the bottom of the BPM half.
+
+    // KEY half: value and "KEY" caption are drawn directly in paint().
+    // Hide the legacy meter labels so they don't overlap our custom drawing.
+    meterValueLabel.setBounds({});
     meterCaptionLabel.setBounds({});
 
     auto modeButtons = centeredModeCluster.withSizeKeepingCentre(centeredModeCluster.getWidth(), transportControlHeight)
@@ -2018,6 +2442,12 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
     if (event.getNumberOfClicks() >= 2 && bpmValueLabel.getBounds().contains(event.getPosition()))
     {
         beginTempoEditing();
+        return;
+    }
+
+    if (! cachedKeyCardBounds.isEmpty() && cachedKeyCardBounds.contains(event.getPosition()))
+    {
+        showKeySelectionMenu();
         return;
     }
 
@@ -2244,7 +2674,7 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
     if (transportEngine.isPlaying())
     {
         const auto analysis = analyzeAudioWarpMetadata(item.file, projectState.getTempoBpm(), projectState.getNumerator());
-        previewBuffer = makeTempoFittedPreviewBuffer(previewBuffer, analysis.sourceBpm, projectState.getTempoBpm(), sampleRate);
+        previewBuffer = makeTempoFittedPreviewBuffer(previewBuffer, analysis.sourceBpm, projectState.getTempoBpm(), sampleRate, item.file.getFullPathName());
     }
 
     previewBufferSource = std::make_unique<BufferPreviewSource>(std::move(previewBuffer), sampleRate);
@@ -2777,6 +3207,47 @@ void MainComponent::endTempoEditing(bool applyChanges)
     bpmValueLabel.setText(juce::String(projectState.getTempoBpm(), 2), juce::dontSendNotification);
     bpmValueLabel.setVisible(false);
     repaint();
+}
+
+void MainComponent::showKeySelectionMenu()
+{
+    juce::PopupMenu menu;
+    static const char* noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+
+    const auto currentRoot  = projectState.getKeyRoot();
+    const auto currentMinor = projectState.isKeyMinor();
+
+    juce::PopupMenu majorSub;
+    juce::PopupMenu minorSub;
+    for (int root = 0; root < 12; ++root)
+    {
+        const auto majorId = 100 + root;
+        const auto minorId = 200 + root;
+        majorSub.addItem(majorId, juce::String(noteNames[root]) + " major",
+                          true, root == currentRoot && ! currentMinor);
+        minorSub.addItem(minorId, juce::String(noteNames[root]) + " minor",
+                          true, root == currentRoot && currentMinor);
+    }
+    menu.addSubMenu("Major", majorSub);
+    menu.addSubMenu("Minor", minorSub);
+
+    menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this).withTargetScreenArea(
+        localAreaToGlobal(cachedKeyCardBounds)),
+        [this](int result)
+        {
+            if (result <= 0) return;
+            const auto isMinor = result >= 200;
+            const auto root    = (isMinor ? result - 200 : result - 100) % 12;
+            projectState.setKey(root, isMinor);
+            // Force-rebuild every clip's warped buffer with the new pitch shift —
+            // the cache key includes the semitone shift, so this populates the new entries.
+            if (arrangementPlaybackSource != nullptr)
+                arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+            updateTransportLabels();
+            refreshClipInspector();
+            arrangementTimeline.repaint();
+            repaint();
+        });
 }
 
 TimelineClip* MainComponent::getSelectedTimelineClip() noexcept

@@ -437,7 +437,7 @@ const SamplerEngine::SampleData* SamplerEngine::getWarpedSampleData(const juce::
 
     auto data = std::make_unique<SampleData>();
     data->sampleRate = sourceData.sampleRate;
-    data->buffer = stretchBuffer(sourceData.buffer, targetSamples, sourceData.sampleRate);
+    data->buffer = stretchBuffer(sourceData.buffer, targetSamples, sourceData.sampleRate, path);
 
     std::scoped_lock lock(cacheMutex);
     const auto [it, inserted] = warpedSampleCache.emplace(key, std::move(data));

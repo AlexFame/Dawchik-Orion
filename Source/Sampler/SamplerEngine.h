@@ -17,7 +17,7 @@ namespace orion
 class SamplerEngine final
 {
 public:
-    using StretchBufferCallback = std::function<juce::AudioBuffer<float>(const juce::AudioBuffer<float>&, int, double)>;
+    using StretchBufferCallback = std::function<juce::AudioBuffer<float>(const juce::AudioBuffer<float>&, int, double, const juce::String&)>;
 
     explicit SamplerEngine(juce::AudioFormatManager& formatManager);
     SamplerEngine(juce::AudioFormatManager& formatManager, StretchBufferCallback stretchBuffer);

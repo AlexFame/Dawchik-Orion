@@ -46,6 +46,11 @@ struct TimelineClip
     bool warpEnabled { false };
     bool bpmGuessed { false };
     double warpTargetLengthInBeats { 0.0 };
+    // Key data: rootSemitones in [0,11] (C=0..B=11), or -1 if unknown.
+    int  sourceKeyRoot { -1 };
+    bool sourceKeyIsMinor { false };
+    // When true, audio clips are auto-pitch-shifted to match the project key.
+    bool keyShiftEnabled { true };
 };
 
 struct TrackState
@@ -78,6 +83,11 @@ public:
     double getTempoBpm() const noexcept;
     void setTempoBpm(double newTempoBpm) noexcept;
 
+    // Project key: root semitone (0=C..11=B) + minor/major mode.
+    int  getKeyRoot() const noexcept;
+    bool isKeyMinor() const noexcept;
+    void setKey(int rootSemitones, bool minor) noexcept;
+
     int getNumerator() const noexcept;
     int getDenominator() const noexcept;
 
@@ -100,6 +110,8 @@ private:
     bool loopRangeActive { false };
     double loopStartBeat { 0.0 };
     double loopEndBeat { 8.0 };
+    int  projectKeyRoot { 0 };       // C by default
+    bool projectKeyIsMinor { true }; // A minor / C minor are common in production
     std::vector<TrackState> tracks;
 };
 }  // namespace orion

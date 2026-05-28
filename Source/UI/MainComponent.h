@@ -68,6 +68,7 @@ private:
     void applyTempoFromTransportText();
     void beginTempoEditing();
     void endTempoEditing(bool applyChanges);
+    void showKeySelectionMenu();
     TimelineClip* getSelectedTimelineClip() noexcept;
     const TimelineClip* getSelectedTimelineClip() const noexcept;
     juce::Rectangle<int> getBrowserResizeHandleBounds() const noexcept;
@@ -90,6 +91,7 @@ private:
     juce::Label meterCaptionLabel;
     juce::Label meterValueLabel;
     juce::TextEditor bpmEditor;
+    juce::Rectangle<int> cachedKeyCardBounds;
     juce::Label playlistLabel;
     juce::Label pianoRollLabel;
     juce::Label clipInspectorEmptyLabel;

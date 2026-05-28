@@ -4,11 +4,21 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <mutex>
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
 namespace
 {
+juce::AudioFormatManager& getSharedWaveformFormatManager()
+{
+    static juce::AudioFormatManager manager;
+    static std::once_flag flag;
+    std::call_once(flag, [&]() { manager.registerBasicFormats(); });
+    return manager;
+}
+
 const auto timelineBackground = juce::Colour(0xff20252a);
 const auto majorGridColour = juce::Colour(0xff56616b);
 const auto minorGridColour = juce::Colour(0xff3b444c);
@@ -68,7 +78,118 @@ struct AudioImportAnalysis
     juce::String bpmSource { "none" };
     double bpmConfidence { 0.0 };
     bool bpmGuessed { false };
+    int  sourceKeyRoot { -1 };
+    bool sourceKeyIsMinor { false };
 };
+
+// Parses musical key from a filename. Strict — only accepts standalone token candidates
+// (rejects words like "Bass", "Drum" that start with a note letter). Handles "Cm",
+// "C minor", "C_minor", "Cmin", "Cmaj", "C# minor", "Db", "Fsharp", "Bbm" etc.
+struct ParsedClipKey { int root { -1 }; bool minor { false }; };
+ParsedClipKey parseKeyFromClipFileName(const juce::File& file)
+{
+    auto raw  = file.getFileNameWithoutExtension();
+    auto text = juce::String(' ') + raw.toLowerCase().replaceCharacters("_-.()[]", "       ") + juce::String(' ');
+
+    auto letterToSemi = [](juce::juce_wchar c) -> int
+    {
+        switch (c)
+        {
+            case 'c': return 0;
+            case 'd': return 2;
+            case 'e': return 4;
+            case 'f': return 5;
+            case 'g': return 7;
+            case 'a': return 9;
+            case 'b': return 11;
+        }
+        return -1;
+    };
+    auto isLetter = [](juce::juce_wchar c) { return c >= 'a' && c <= 'z'; };
+
+    ParsedClipKey best { -1, false };
+    int bestScore = 0;
+
+    for (int i = 1; i + 1 < text.length(); ++i)
+    {
+        const auto prev = text[i - 1];
+        if (prev != ' ' && prev != '\t') continue;       // word boundary
+        const auto c = text[i];
+        const auto semi = letterToSemi(c);
+        if (semi < 0) continue;
+
+        int rootSemi = semi;
+        int pos = i + 1;
+        bool hadAccidental = false;
+
+        // Optional sharp/flat
+        if (pos < text.length())
+        {
+            const auto a = text[pos];
+            if (a == '#')
+            {
+                rootSemi = (rootSemi + 1) % 12; ++pos; hadAccidental = true;
+            }
+            else if (a == 'b' && pos + 1 < text.length())
+            {
+                // Accept 'b' as flat only when followed by 'm' (Cbm), space, or digit (Cb 120bpm).
+                const auto next = text[pos + 1];
+                if (next == 'm' || next == ' ' || next == '\t' || (next >= '0' && next <= '9'))
+                {
+                    rootSemi = (rootSemi + 11) % 12; ++pos; hadAccidental = true;
+                }
+            }
+        }
+
+        // Look at what immediately follows root+accidental.
+        int modePos = pos;
+        while (modePos < text.length() && (text[modePos] == ' ' || text[modePos] == '\t')) ++modePos;
+        const bool skippedSpace = modePos > pos;
+
+        bool isMinor = false, modeKnown = false, isValid = false;
+
+        if (modePos >= text.length())
+        {
+            // End of name — standalone note → default major.
+            isValid = true;
+        }
+        else
+        {
+            const auto rem = text.substring(modePos, juce::jmin(modePos + 6, text.length()));
+            if      (rem.startsWith("minor")) { isMinor = true;  modeKnown = true; isValid = true; }
+            else if (rem.startsWith("major")) { isMinor = false; modeKnown = true; isValid = true; }
+            else if (rem.startsWith("min"))   { isMinor = true;  modeKnown = true; isValid = true; }
+            else if (rem.startsWith("maj"))   { isMinor = false; modeKnown = true; isValid = true; }
+            else if (! skippedSpace && text[pos] == 'm')
+            {
+                // "Cm" — 'm' immediately after root (no space). Reject if followed by another letter
+                // that's not part of a mode suffix.
+                if (pos + 1 >= text.length() || ! isLetter(text[pos + 1]))
+                {
+                    isMinor = true; modeKnown = true; isValid = true;
+                }
+            }
+            else if (skippedSpace)
+            {
+                // Standalone note followed by space and something non-mode → default major.
+                isValid = true;
+            }
+            // else: root immediately followed by a letter that's not m/maj/min → false positive (e.g. "Bass", "Drum"). Reject.
+        }
+
+        if (! isValid) continue;
+
+        // Explicit mode strongly preferred. Accidentals also score higher.
+        const int score = (modeKnown ? 1000 : 100) + (hadAccidental ? 50 : 0) + juce::jmax(0, 100 - i);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            best.root = rootSemi;
+            best.minor = isMinor;
+        }
+    }
+    return best;
+}
 
 double parseBpmFromFileName(const juce::File& file)
 {
@@ -151,6 +272,12 @@ AudioImportAnalysis analyzeImportedAudioClip(const juce::File& file, double temp
     const auto durationInBeats = durationSeconds * beatsPerSecond;
     result.durationSeconds = durationSeconds;
     result.clipLengthInBeats = juce::jmax(minimumClipLengthInBeats, durationInBeats);
+
+    // Parse key from filename so the dropped clip is auto-pitched to the project key.
+    const auto parsedKey = parseKeyFromClipFileName(file);
+    result.sourceKeyRoot    = parsedKey.root;
+    result.sourceKeyIsMinor = parsedKey.minor;
+
     const auto nameBpm = parseBpmFromFileName(file);
     if (nameBpm > 0.0)
     {
@@ -560,32 +687,42 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
             if (clip.type == ClipType::audio && shouldDrawWaveform)
             {
-                g.saveState();
-                g.reduceClipRegion(clipBoundsInt);
-                g.setColour(juce::Colours::white.withAlpha(0.45f));
-                const float barWidth = 2.5f;
-                const float centerY = clipBodyBounds.getY() + clipBodyBounds.getHeight() * 0.5f;
-                const float maxBarHeight = juce::jmax(8.0f, clipBodyBounds.getHeight() - 6.0f);
-
-                // Fixed number of waveform samples per beat so shape never changes
-                constexpr double samplesPerBeat = 4.0;
-                const int totalSamples = static_cast<int>(clip.lengthInBeats * samplesPerBeat);
-                const auto seed = static_cast<int>(clip.name.hashCode());
-
-                for (int i = 0; i < totalSamples; ++i)
+                const auto* peaks = getOrComputePeaks(clip.sourcePath);
+                if (peaks != nullptr && ! peaks->minVals.empty())
                 {
-                    const auto progress = totalSamples > 1 ? static_cast<float>(i) / static_cast<float>(totalSamples - 1) : 0.0f;
-                    const float x = static_cast<float>(clipBodyBounds.getX()) + progress * static_cast<float>(clipBodyBounds.getWidth());
+                    g.saveState();
+                    g.reduceClipRegion(clipBoundsInt);
+                    g.setColour(juce::Colours::white.withAlpha(0.7f));
 
-                    // Deterministic height from sample index + clip seed
-                    juce::Random rand(seed + i * 7919);
-                    float intensity = 0.2f + 0.8f * rand.nextFloat();
-                    float modulation = std::sin(static_cast<float>(i) * 0.35f) * 0.5f + 0.5f;
-                    float height = 4.0f + (intensity * modulation * maxBarHeight);
+                    const auto bodyX     = clipBodyBounds.getX();
+                    const auto bodyWidth = juce::jmax(1, clipBodyBounds.getWidth());
+                    const auto centerY   = static_cast<float>(clipBodyBounds.getY()) + clipBodyBounds.getHeight() * 0.5f;
+                    const auto halfH     = juce::jmax(2.0f, static_cast<float>(clipBodyBounds.getHeight()) * 0.45f);
+                    const auto numBuckets = static_cast<int>(peaks->minVals.size());
 
-                    g.fillRoundedRectangle(x - barWidth * 0.5f, centerY - height * 0.5f, barWidth, height, barWidth * 0.5f);
+                    for (int px = 0; px < bodyWidth; ++px)
+                    {
+                        const auto bStart = static_cast<int>(static_cast<double>(px) * numBuckets / bodyWidth);
+                        const auto bEnd   = static_cast<int>(static_cast<double>(px + 1) * numBuckets / bodyWidth);
+                        const auto safeEnd = juce::jmax(bStart + 1, bEnd);
+
+                        float minVal = 0.0f, maxVal = 0.0f;
+                        for (int b = bStart; b < safeEnd && b < numBuckets; ++b)
+                        {
+                            minVal = juce::jmin(minVal, peaks->minVals[static_cast<size_t>(b)]);
+                            maxVal = juce::jmax(maxVal, peaks->maxVals[static_cast<size_t>(b)]);
+                        }
+
+                        const auto x       = static_cast<float>(bodyX + px);
+                        const auto top     = centerY + minVal * halfH;
+                        const auto bottom  = centerY + maxVal * halfH;
+                        if (bottom - top >= 0.5f)
+                            g.drawLine(x, top, x, bottom, 1.0f);
+                        else
+                            g.fillRect(x, centerY - 0.5f, 1.0f, 1.0f);
+                    }
+                    g.restoreState();
                 }
-                g.restoreState();
             }
             else if (! clip.midiNotes.empty() && clipBodyBounds.getWidth() > 12 && clipBodyBounds.getHeight() > 12)
             {
@@ -1623,7 +1760,10 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         analysis.detectedBars,
         true,
         analysis.bpmGuessed,
-        lengthBeats
+        lengthBeats,
+        analysis.sourceKeyRoot,
+        analysis.sourceKeyIsMinor,
+        true   // keyShiftEnabled — auto pitch to project key by default
     });
 
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(tracks[static_cast<std::size_t>(targetTrackIndex)].clips.size()) - 1 });
@@ -1924,7 +2064,10 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
         analysis.detectedBars,
         analysis.detectedBars > 0,
         analysis.bpmGuessed,
-        lengthBeats
+        lengthBeats,
+        analysis.sourceKeyRoot,
+        analysis.sourceKeyIsMinor,
+        true
     };
 
     browserDropPreviewColour = previewClip.colour;
@@ -1950,5 +2093,68 @@ std::optional<juce::Rectangle<int>> ArrangementTimelineComponent::getSelectedTra
 
     auto lane = getTrackLaneBounds(selectedClip->trackIndex);
     return lane.removeFromLeft(trackHeaderWidth).reduced(8, 6);
+}
+
+const ArrangementTimelineComponent::AudioPeaks* ArrangementTimelineComponent::getOrComputePeaks(const juce::String& path)
+{
+    if (path.isEmpty())
+        return nullptr;
+
+    const auto key = path.toStdString();
+    if (const auto it = waveformCache.find(key); it != waveformCache.end())
+        return &it->second;
+
+    juce::File file(path);
+    if (! file.existsAsFile())
+        return nullptr;
+
+    auto& fm = getSharedWaveformFormatManager();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels <= 0)
+        return nullptr;
+
+    constexpr int samplesPerBucket = 256;
+    const auto totalSamples = static_cast<int>(juce::jmin<juce::int64>(reader->lengthInSamples,
+                                                                       static_cast<juce::int64>(std::numeric_limits<int>::max())));
+    const auto numChannels = static_cast<int>(reader->numChannels);
+    const auto numBuckets = (totalSamples + samplesPerBucket - 1) / samplesPerBucket;
+
+    AudioPeaks peaks;
+    peaks.samplesPerBucket = samplesPerBucket;
+    peaks.minVals.assign(static_cast<size_t>(numBuckets), 0.0f);
+    peaks.maxVals.assign(static_cast<size_t>(numBuckets), 0.0f);
+
+    constexpr int chunkSize = 8192;
+    juce::AudioBuffer<float> chunk(numChannels, chunkSize);
+    int samplesProcessed = 0;
+
+    while (samplesProcessed < totalSamples)
+    {
+        const auto toRead = juce::jmin(chunkSize, totalSamples - samplesProcessed);
+        if (! reader->read(&chunk, 0, toRead, samplesProcessed, true, true))
+            break;
+
+        for (int i = 0; i < toRead; ++i)
+        {
+            const auto bucketIdx = (samplesProcessed + i) / samplesPerBucket;
+            if (bucketIdx >= numBuckets)
+                break;
+
+            float val = 0.0f;
+            for (int ch = 0; ch < numChannels; ++ch)
+                val += chunk.getSample(ch, i);
+            val /= static_cast<float>(numChannels);
+
+            auto& mn = peaks.minVals[static_cast<size_t>(bucketIdx)];
+            auto& mx = peaks.maxVals[static_cast<size_t>(bucketIdx)];
+            mn = juce::jmin(mn, val);
+            mx = juce::jmax(mx, val);
+        }
+        samplesProcessed += toRead;
+    }
+
+    auto [it, inserted] = waveformCache.emplace(key, std::move(peaks));
+    juce::ignoreUnused(inserted);
+    return &it->second;
 }
 }  // namespace orion
