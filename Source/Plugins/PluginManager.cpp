@@ -1,9 +1,27 @@
 #include "PluginManager.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace orion
 {
+namespace
+{
+juce::String pluginSortKey(const juce::PluginDescription& description)
+{
+    return (description.name + " " + description.manufacturerName + " " + description.pluginFormatName).toLowerCase();
+}
+
+void sortPluginDescriptions(juce::Array<juce::PluginDescription>& descriptions)
+{
+    std::sort(descriptions.begin(), descriptions.end(),
+              [](const auto& a, const auto& b)
+              {
+                  return pluginSortKey(a) < pluginSortKey(b);
+              });
+}
+}  // namespace
+
 //==============================================================================
 // Scan plugins in a helper process. Some plugins assert if scanned off the main
 // thread, and others can hang while their bundle is inspected. Keeping each scan
@@ -267,7 +285,9 @@ void PluginManager::scanForPlugins(std::function<void(const juce::String&, doubl
 
 juce::Array<juce::PluginDescription> PluginManager::getAllDescriptions() const
 {
-    return knownPlugins.getTypes();
+    auto result = knownPlugins.getTypes();
+    sortPluginDescriptions(result);
+    return result;
 }
 
 juce::Array<juce::PluginDescription> PluginManager::getInstrumentDescriptions() const
@@ -276,6 +296,7 @@ juce::Array<juce::PluginDescription> PluginManager::getInstrumentDescriptions() 
     for (const auto& type : knownPlugins.getTypes())
         if (type.isInstrument)
             result.add(type);
+    sortPluginDescriptions(result);
     return result;
 }
 

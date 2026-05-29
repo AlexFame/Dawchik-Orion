@@ -31,6 +31,25 @@ juce::var midiNoteToVar(const orion::MidiNote& note)
     return juce::var(object);
 }
 
+juce::var pitchSlideToVar(const orion::PitchSlide& slide)
+{
+    auto* object = new juce::DynamicObject();
+    object->setProperty("sourcePitch", slide.sourcePitch);
+    object->setProperty("sourceNoteStartBeat", slide.sourceNoteStartBeat);
+
+    juce::Array<juce::var> points;
+    for (const auto& point : slide.points)
+    {
+        auto* pointObject = new juce::DynamicObject();
+        pointObject->setProperty("beat", point.beat);
+        pointObject->setProperty("pitch", point.pitch);
+        points.add(juce::var(pointObject));
+    }
+
+    object->setProperty("points", juce::var(points));
+    return juce::var(object);
+}
+
 juce::var timelineClipToVar(const orion::TimelineClip& clip)
 {
     auto* object = new juce::DynamicObject();
@@ -58,6 +77,12 @@ juce::var timelineClipToVar(const orion::TimelineClip& clip)
         notes.add(midiNoteToVar(note));
 
     object->setProperty("midiNotes", juce::var(notes));
+
+    juce::Array<juce::var> slides;
+    for (const auto& slide : clip.pitchSlides)
+        slides.add(pitchSlideToVar(slide));
+
+    object->setProperty("pitchSlides", juce::var(slides));
     return juce::var(object);
 }
 

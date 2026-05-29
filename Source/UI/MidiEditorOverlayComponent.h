@@ -30,6 +30,8 @@ public:
     std::function<double()> onRequestPlayheadBeat;
     std::function<bool()> onRequestPlayingState;
     std::function<void(bool)> onScaleLockChanged; // fired when the in-editor toggle is flipped
+    std::function<void(int, int)> onPreviewNoteOn;
+    std::function<void(int)> onPreviewNoteOff;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -87,7 +89,9 @@ private:
     struct NoteSnapshot
     {
         std::vector<MidiNote> midiNotes;
+        std::vector<PitchSlide> pitchSlides;
         std::set<int> selectedNotes;
+        std::optional<int> selectedSlide;
         double horizontalZoom { 1.0 };
         double verticalZoom { 1.0 };
         int scaleRoot { 0 };
@@ -104,6 +108,41 @@ private:
         bool historyCaptured { false };
     };
 
+    struct SlideDrawState
+    {
+        PitchSlide slide;
+        bool movedEnough { false };
+    };
+
+    enum class SlideVisibilityMode
+    {
+        off,
+        ghost,
+        active
+    };
+
+    enum class SlideEditMode
+    {
+        move,
+        resizeStart,
+        resizeEnd
+    };
+
+    struct SlideHit
+    {
+        int slideIndex { -1 };
+        SlideEditMode mode { SlideEditMode::move };
+    };
+
+    struct SlideEditState
+    {
+        int slideIndex { -1 };
+        SlideEditMode mode { SlideEditMode::move };
+        juce::Point<int> mouseDownPosition;
+        PitchSlide originalSlide;
+        bool historyCaptured { false };
+    };
+
     void buttonClicked(juce::Button* button) override;
     juce::Rectangle<int> getTopBarBounds() const noexcept;
     juce::Rectangle<int> getKeyboardBounds() const noexcept;
@@ -114,9 +153,12 @@ private:
     double getPixelsPerBeat() const noexcept;
     double getVisibleBeatRange() const noexcept;
     std::optional<NoteHit> hitTestNote(juce::Point<int> position) const;
+    std::optional<SlideHit> hitTestSlide(juce::Point<int> position) const;
     std::optional<int> hitTestVelocityBar(juce::Point<int> position) const;
     std::set<int> hitTestNotesInRect(juce::Rectangle<int> selection) const;
     int yToPitch(int y) const noexcept;
+    double yToContinuousPitch(double y) const noexcept;
+    float pitchToCentreY(double pitch) const noexcept;
     int laneIndexToPitch(int laneIndex) const noexcept;
     double xToBeat(double x) const noexcept;
     double snapBeat(double beat) const noexcept;
@@ -129,6 +171,7 @@ private:
     void selectSingleNote(int noteIndex);
     void duplicateSelectedNotes();
     void deleteSelectedNotes();
+    void deleteSelectedSlide();
     void quantizeSelectedNotes();
     void updateSubtitle();
     void clearSelection();
@@ -146,6 +189,15 @@ private:
     void showScaleMenu();
     void showSnapMenu();
     bool updateLiveKeyboardPitches();
+    bool appendSlidePoint(PitchSlide& slide, juce::Point<int> position) const;
+    std::optional<PitchSlide> makeSlideAt(juce::Point<int> position) const;
+    void smoothSlide(PitchSlide& slide) const;
+    bool slideTouchesSelectedNotes(const PitchSlide& slide) const noexcept;
+    bool shouldDrawSlide(const PitchSlide& slide, int slideIndex, bool drawingPreview) const noexcept;
+    juce::String getSlideVisibilityName() const;
+    std::optional<int> keyboardPitchForPoint(juce::Point<int> position) const noexcept;
+    void setMousePreviewPitch(std::optional<int> pitch);
+    void releaseMousePreviewPitch();
 
     juce::String trackName;
     juce::String clipName;
@@ -153,11 +205,15 @@ private:
     TrackState* activeTrack { nullptr };
     TimelineClip* activeClip { nullptr };
     std::set<int> selectedNotes;
+    std::optional<int> selectedSlide;
     std::set<int> liveKeyboardPitches;
+    std::optional<int> mousePreviewPitch;
     std::optional<NoteHit> hoverNote;
     std::optional<NoteDragState> noteDragState;
     std::optional<MarqueeState> marqueeState;
     std::optional<VelocityDragState> velocityDragState;
+    std::optional<SlideDrawState> slideDrawState;
+    std::optional<SlideEditState> slideEditState;
 
     juce::Label titleLabel;
     juce::Label subtitleLabel;
@@ -168,6 +224,8 @@ private:
     juce::TextButton scaleButton;
     juce::TextButton snapButton;
     juce::TextButton quantizeButton;
+    juce::TextButton slidePenButton;
+    juce::TextButton slideVisibilityButton;
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;
     juce::Label scaleLockLabel;
@@ -182,6 +240,8 @@ private:
     double snapSizeInBeats { 0.25 };
     bool focusModeEnabled { false };
     bool scaleLockEnabled { true };  // new notes snap to in-scale pitches when true
+    bool slidePenEnabled { false };
+    SlideVisibilityMode slideVisibilityMode { SlideVisibilityMode::ghost };
     bool hasStoredViewportBeforeFocus { false };
     bool ignoreNextMouseDown { false };
     std::vector<NoteSnapshot> undoStack;

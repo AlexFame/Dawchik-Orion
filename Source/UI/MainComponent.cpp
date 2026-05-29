@@ -32,7 +32,7 @@ constexpr int transportBrandWidth = 92;
 constexpr int transportClusterWidth = 314;
 constexpr int transportTempoWidth = 178; // BPM + KEY combined card
 constexpr int transportModeWidth = 200; // METRONOME (56) + 8 + LOOP (56) + 8 + COUNT IN (66) + slack
-constexpr int transportUtilityWidth = 300;
+constexpr int transportUtilityWidth = 372;
 constexpr int transportSectionGap = 12;
 constexpr int transportControlHeight = 62;
 constexpr int transportSectionHeight = 76;
@@ -361,7 +361,8 @@ private:
 MainComponent::MainComponent()
     : transportEngine(projectState),
       transportController(projectState, transportEngine),
-      arrangementTimeline(projectState, transportEngine)
+      arrangementTimeline(projectState, transportEngine),
+      mixerPanel(projectState)
 {
     setWantsKeyboardFocus(true);
 
@@ -573,6 +574,7 @@ MainComponent::MainComponent()
     countInButton.setButtonText("COUNT IN");
     browserButton.setButtonText("BROWSER");
     scanPluginsButton.setButtonText("Scan VST3");
+    mixerButton.setButtonText("MIXER");
     openButton.setButtonText("OPEN");
     saveButton.setButtonText("SAVE");
     exportButton.setButtonText("EXPORT");
@@ -589,6 +591,7 @@ MainComponent::MainComponent()
     loopButton.setComponentID("loop");
     countInButton.setComponentID("countin");
     browserButton.setComponentID("browser");
+    mixerButton.setComponentID("mixer");
     openButton.setComponentID("open");
     saveButton.setComponentID("save");
     exportButton.setComponentID("export");
@@ -596,7 +599,7 @@ MainComponent::MainComponent()
 
     for (auto* button : { &playButton, &stopButton, &recordButton, &rewindButton, &undoButton, &redoButton,
                           &metronomeButton, &loopButton, &countInButton, &browserButton, &scanPluginsButton,
-                          &openButton, &saveButton, &exportButton, &settingsButton })
+                          &mixerButton, &openButton, &saveButton, &exportButton, &settingsButton })
     {
         button->setLookAndFeel(&transportButtonLookAndFeel);
         button->setColour(juce::TextButton::buttonColourId, transportButtonColour);
@@ -629,6 +632,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(browserPanel);
     addAndMakeVisible(midiEditorOverlay);
     addAndMakeVisible(samplerPanel);
+    addChildComponent(mixerPanel);
     audioFormatManager.registerBasicFormats();
     arrangementPlaybackSource = std::make_unique<ArrangementPlaybackSource>(projectState, transportEngine, audioFormatManager);
     clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine,
@@ -638,7 +642,55 @@ MainComponent::MainComponent()
     masterMixerSource.addInputSource(&previewTransportSource, false);
     masterMixerSource.addInputSource(arrangementPlaybackSource.get(), false);
     masterMixerSource.addInputSource(clickTrackSource.get(), false);
-    previewSourcePlayer.setSource(&masterMixerSource);
+    // Master stage (gain + level metering) sits between the mixer and the device.
+    masterStripSource = std::make_unique<MasterStripSource>(masterMixerSource);
+    masterStripSource->setGainDb(masterGainDb);
+    previewSourcePlayer.setSource(masterStripSource.get());
+
+    mixerPanel.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
+    mixerPanel.onTrackChanged = [this]()
+    {
+        arrangementTimeline.repaint();
+        refreshClipInspector();
+    };
+    mixerPanel.onSetMasterGainDb = [this](double db)
+    {
+        masterGainDb = db;
+        if (masterStripSource != nullptr)
+            masterStripSource->setGainDb(db);
+    };
+    mixerPanel.onRequestMasterGainDb = [this]() { return masterGainDb; };
+    mixerPanel.onRequestMasterPeak = [this]() -> float
+    {
+        return masterStripSource != nullptr ? masterStripSource->fetchAndResetPeak() : 0.0f;
+    };
+
+    // Both the mixer strips and the timeline track headers read the decayed levels
+    // that this component maintains (single owner — see updateTrackMeterLevels()).
+    const auto linearLevelForTrack = [this](int trackIndex) -> float
+    {
+        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackMeterLevels.size()))
+                   ? trackMeterLevels[static_cast<std::size_t>(trackIndex)]
+                   : 0.0f;
+    };
+    // 0..1 bar height (mapped over -60..0 dB).
+    const auto requestTrackLevel = [linearLevelForTrack](int trackIndex) -> float
+    {
+        const auto lin = linearLevelForTrack(trackIndex);
+        const auto db = lin > 0.0f ? juce::Decibels::gainToDecibels(lin, -60.0f) : -60.0f;
+        return juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 0.0f, 0.0f, 1.0f));
+    };
+    // Held peak level in dB (Logic-style hold; returns -100 when silent → "-inf").
+    const auto requestTrackLevelDb = [this](int trackIndex) -> float
+    {
+        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackPeakHoldDb.size()))
+                   ? trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
+                   : -100.0f;
+    };
+    mixerPanel.onRequestTrackLevel = requestTrackLevel;
+    mixerPanel.onRequestTrackLevelDb = requestTrackLevelDb;
+    arrangementTimeline.onRequestTrackLevel = requestTrackLevel;
+    arrangementTimeline.onRequestTrackLevelDb = requestTrackLevelDb;
     browserPanel.onPreviewItem = [this](const BrowserItem& item)
     {
         if (item.isDirectory)
@@ -760,6 +812,53 @@ MainComponent::MainComponent()
             stopTransportFromUi();
         }
     };
+    midiEditorOverlay.onPreviewNoteOn = [this](int midiNote, int velocity)
+    {
+        if (arrangementPlaybackSource == nullptr || ! selectedArrangementClip.has_value())
+            return;
+
+        auto& tracks = projectState.getTracks();
+        const auto trackIndex = selectedArrangementClip->first;
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+            return;
+
+        const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
+        {
+            arrangementPlaybackSource->instrumentLiveNoteOn(trackIndex, midiNote, velocity);
+            return;
+        }
+
+        if (track.samplerSourcePath.isNotEmpty())
+        {
+            arrangementPlaybackSource->samplerNoteOn(track.samplerSourcePath,
+                                                     midiNote,
+                                                     velocity,
+                                                     track.samplerRootMidiNote,
+                                                     track.volumeDb,
+                                                     track.samplerMode,
+                                                     0,
+                                                     track.samplerSliceCount,
+                                                     track.samplerWarpEnabled,
+                                                     track.samplerSourceBpm);
+        }
+    };
+    midiEditorOverlay.onPreviewNoteOff = [this](int midiNote)
+    {
+        if (arrangementPlaybackSource == nullptr || ! selectedArrangementClip.has_value())
+            return;
+
+        auto& tracks = projectState.getTracks();
+        const auto trackIndex = selectedArrangementClip->first;
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+            return;
+
+        const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
+            arrangementPlaybackSource->instrumentLiveNoteOff(trackIndex, midiNote);
+        else
+            arrangementPlaybackSource->samplerNoteOff(midiNote, track.samplerMode);
+    };
     midiEditorOverlay.onRequestPlayheadBeat = [this]() { return transportEngine.getPlayheadBeat(); };
     midiEditorOverlay.onRequestPlayingState = [this]() { return transportEngine.isPlaying(); };
     arrangementTimeline.onMidiClipDoubleClick = [this](int trackIndex, int clipIndex)
@@ -770,6 +869,13 @@ MainComponent::MainComponent()
                                    projectState.getKeyRoot(),
                                    projectState.isKeyMinor(),
                                    projectState.isScaleLockEnabled());
+    };
+    arrangementTimeline.onTogglePlayback = [this]()
+    {
+        if (transportEngine.isPlaying() || transportEngine.isCountInActive())
+            stopTransportFromUi();
+        else
+            toggleTransportFromUi();
     };
     midiEditorOverlay.onScaleLockChanged = [this](bool enabled)
     {
@@ -874,7 +980,7 @@ MainComponent::~MainComponent()
 {
     for (auto* button : { &playButton, &stopButton, &recordButton, &rewindButton, &undoButton, &redoButton,
                           &metronomeButton, &loopButton, &countInButton, &browserButton, &scanPluginsButton,
-                          &openButton, &saveButton, &exportButton, &settingsButton })
+                          &mixerButton, &openButton, &saveButton, &exportButton, &settingsButton })
     {
         button->setLookAndFeel(nullptr);
     }
@@ -893,6 +999,7 @@ MainComponent::~MainComponent()
     currentPreviewFile = juce::File();
     currentPreviewTempoBpm = 0.0;
     previewSourcePlayer.setSource(nullptr);
+    masterStripSource.reset();
     audioDeviceManager.removeAudioCallback(&previewSourcePlayer);
 }
 
@@ -1115,6 +1222,8 @@ void MainComponent::resized()
     auto utilityButtons = centeredRightUtility.withSizeKeepingCentre(centeredRightUtility.getWidth(), transportControlHeight)
                               .translated(0, transportContentVerticalNudge)
                               .reduced(8, 0);
+    mixerButton.setBounds(utilityButtons.removeFromLeft(60));
+    utilityButtons.removeFromLeft(8);
     openButton.setBounds(utilityButtons.removeFromLeft(56));
     utilityButtons.removeFromLeft(8);
     saveButton.setBounds(utilityButtons.removeFromLeft(56));
@@ -1213,6 +1322,7 @@ void MainComponent::resized()
     }
 
     midiEditorOverlay.setBounds(getLocalBounds());
+    mixerPanel.setBounds(getLocalBounds());
     samplerPanel.setBounds(samplerOpen ? samplerArea : juce::Rectangle<int>());
     samplerPanel.setVisible(samplerOpen);
 }
@@ -1306,6 +1416,12 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (midiEditorOverlay.isVisible() && midiEditorOverlay.keyPressed(key))
         return true;
 
+    if (mixerPanel.isVisible() && key == juce::KeyPress::escapeKey)
+    {
+        mixerPanel.closePanel();
+        return true;
+    }
+
     if (samplerPanel.isVisible() && (key == juce::KeyPress::escapeKey || key == juce::KeyPress::returnKey))
     {
         samplerPanel.closePanel();
@@ -1360,9 +1476,60 @@ void MainComponent::resetToPlaylistView()
     repaint();
 }
 
+void MainComponent::updateTrackMeterLevels()
+{
+    const auto trackCount = static_cast<int>(projectState.getTracks().size());
+    const auto sized = static_cast<std::size_t>(juce::jmax(0, trackCount));
+    if (static_cast<int>(trackMeterLevels.size()) != trackCount)
+    {
+        trackMeterLevels.assign(sized, 0.0f);
+        trackPeakHoldDb.assign(sized, -100.0f);
+        trackPeakHoldFrames.assign(sized, 0);
+    }
+
+    // Logic-style ballistics at 60 Hz: the bar rises instantly and falls smoothly,
+    // while the numeric readout HOLDS the peak for ~1 s before easing down — so the
+    // number stays readable instead of flickering every frame.
+    constexpr int   peakHoldFrames     = 60;    // ~1.0 s hold at 60 Hz
+    constexpr float peakReleaseDbPerTick = 0.35f; // ~21 dB/s slow release afterwards
+
+    for (int i = 0; i < trackCount; ++i)
+    {
+        const auto peak = arrangementPlaybackSource != nullptr
+                              ? arrangementPlaybackSource->fetchAndResetTrackPeak(i)
+                              : 0.0f;
+
+        // Fast bar level (linear): instant rise, smooth fall.
+        auto& level = trackMeterLevels[static_cast<std::size_t>(i)];
+        level = juce::jmax(peak, level * 0.85f);
+
+        // Peak-hold numeric readout (dB).
+        const auto peakDb = peak > 0.0001f ? juce::Decibels::gainToDecibels(peak) : -100.0f;
+        auto& holdDb     = trackPeakHoldDb[static_cast<std::size_t>(i)];
+        auto& holdFrames = trackPeakHoldFrames[static_cast<std::size_t>(i)];
+        if (peakDb >= holdDb)
+        {
+            holdDb = peakDb;
+            holdFrames = peakHoldFrames;
+        }
+        else if (holdFrames > 0)
+        {
+            --holdFrames;
+        }
+        else
+        {
+            holdDb = juce::jmax(-100.0f, holdDb - peakReleaseDbPerTick);
+        }
+    }
+
+    // The timeline repaints itself continuously (its own 120 Hz timer), so the
+    // header meters animate without an extra repaint here.
+}
+
 void MainComponent::timerCallback()
 {
     updateTransportLabels();
+    updateTrackMeterLevels();
 
     // While recording, drive the live UI feedback:
     //  (a) auto-start a recording clip the moment count-in ends and real playback begins
@@ -1416,7 +1583,7 @@ void MainComponent::timerCallback()
                 clipStart,
                 juce::jmax(0.25, playheadBeat - clipStart),
                 track.colour.brighter(0.1f),
-                {}, "", 0.0, false, false,
+                {}, {}, "", 0.0, false, false,
                 0.0, 0.0, 0,
                 false, false, 0.0,
                 -1, false, true
@@ -1498,6 +1665,10 @@ void MainComponent::buttonClicked(juce::Button* button)
         browserPanel.setVisible(browserPanelVisible);
         resized();
         repaint();
+    }
+    else if (button == &mixerButton)
+    {
+        toggleMixerFromUi();
     }
     else if (button == &openButton)
     {
@@ -2108,6 +2279,19 @@ void MainComponent::toggleLoopFromUi()
     loopButton.setToggleState(transportEngine.isLoopEnabled(), juce::dontSendNotification);
     updateTransportLabels();
     arrangementTimeline.repaint();
+}
+
+void MainComponent::toggleMixerFromUi()
+{
+    if (mixerPanel.isVisible())
+    {
+        mixerPanel.closePanel();
+    }
+    else
+    {
+        mixerPanel.setBounds(getLocalBounds());
+        mixerPanel.open();
+    }
 }
 
 void MainComponent::saveProjectInteractively()

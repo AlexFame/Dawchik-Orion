@@ -209,12 +209,23 @@ void TransportEngine::timerCallback()
         while (playheadBeat >= loopEnd)
             playheadBeat = loopStart + std::fmod(playheadBeat - loopStart, loopSpan);
     }
-    else if (! recordArmed && playheadBeat >= project.getContentEndInBeats())
+    else if (! recordArmed)
     {
         // Same rule as getPlayheadBeat(): no content-end wraparound while record-armed,
         // otherwise an empty project's recording would overwrite itself in a 1-clip loop.
         const auto repeatEndBeat = project.getContentEndInBeats();
-        playheadBeat = repeatEndBeat > 0.0 ? std::fmod(playheadBeat, repeatEndBeat) : 0.0;
+        if (repeatEndBeat > 0.0)
+        {
+            // There is content — wrap the playhead at the end of the last clip.
+            if (playheadBeat >= repeatEndBeat)
+                playheadBeat = std::fmod(playheadBeat, repeatEndBeat);
+        }
+        else
+        {
+            // Empty project (no clips): let the playhead run forward freely up to the
+            // project length instead of snapping back to 0 every tick (which froze it).
+            playheadBeat = juce::jmin(playheadBeat, project.getProjectLengthInBeats());
+        }
         paused = false;
     }
 }

@@ -28,6 +28,19 @@ struct MidiNote
     int velocity { 100 };
 };
 
+struct PitchSlidePoint
+{
+    double beat { 0.0 };
+    double pitch { 60.0 };
+};
+
+struct PitchSlide
+{
+    std::vector<PitchSlidePoint> points;
+    int sourcePitch { 60 };
+    double sourceNoteStartBeat { 0.0 };
+};
+
 struct TimelineClip
 {
     juce::String name;
@@ -36,6 +49,7 @@ struct TimelineClip
     double lengthInBeats { 4.0 };
     juce::Colour colour { juce::Colour(0xffeb6f3a) };
     std::vector<MidiNote> midiNotes;
+    std::vector<PitchSlide> pitchSlides;
     juce::String sourcePath;
     double gainDb { 0.0 };
     bool muted { false };

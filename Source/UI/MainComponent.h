@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "../Audio/ExportService.h"
 #include "../Audio/TransportController.h"
@@ -20,6 +21,7 @@
 #include "ArrangementTimelineComponent.h"
 #include "BrowserPanelComponent.h"
 #include "MidiEditorOverlayComponent.h"
+#include "MixerPanelComponent.h"
 
 namespace orion
 {
@@ -28,6 +30,7 @@ namespace orion
 class BufferPreviewSource;
 class ArrangementPlaybackSource;
 class ClickTrackSource;
+class MasterStripSource;
 
 class MainComponent final : public juce::Component,
                             public juce::DragAndDropContainer,
@@ -74,6 +77,7 @@ private:
     void stopTransportFromUi();
     void rewindTransportFromUi();
     void toggleLoopFromUi();
+    void toggleMixerFromUi();
     void saveProjectInteractively();
     void openProjectInteractively();
     void loadProjectFromFile(const juce::File& file);
@@ -98,6 +102,7 @@ private:
     BrowserPanelComponent browserPanel;
     MidiEditorOverlayComponent midiEditorOverlay;
     SamplerPanelComponent samplerPanel;
+    MixerPanelComponent mixerPanel;
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
 
@@ -172,6 +177,7 @@ private:
         }
     };
     BrowserCollapseArrow browserCollapseArrow;
+    juce::TextButton mixerButton;
     juce::TextButton openButton;
     juce::TextButton saveButton;
     juce::TextButton exportButton;
@@ -184,6 +190,15 @@ private:
     std::unique_ptr<BufferPreviewSource> previewBufferSource;
     std::unique_ptr<ArrangementPlaybackSource> arrangementPlaybackSource;
     std::unique_ptr<ClickTrackSource> clickTrackSource;
+    std::unique_ptr<MasterStripSource> masterStripSource;
+    double masterGainDb { 0.0 };
+    // Decayed per-track output levels (0..1) for the timeline + mixer meters.
+    // MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks
+    // so the two meter views never steal peaks from each other.
+    std::vector<float> trackMeterLevels;   // fast bar level (linear), responsive
+    std::vector<float> trackPeakHoldDb;    // Logic-style held peak in dB (numeric readout)
+    std::vector<int>   trackPeakHoldFrames;// remaining hold frames before the number falls
+    void updateTrackMeterLevels();
     std::unique_ptr<juce::FileChooser> saveFileChooser;
     std::unique_ptr<juce::FileChooser> openFileChooser;
     std::unique_ptr<juce::FileChooser> exportFileChooser;

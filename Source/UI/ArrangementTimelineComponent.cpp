@@ -661,6 +661,41 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         auto thumbBounds = sliderBounds.withWidth(18).withX(sliderBounds.getX() + static_cast<int>(std::round(volumeRatio * static_cast<float>(sliderBounds.getWidth() - 18))));
         g.fillRoundedRectangle(thumbBounds.toFloat(), 8.0f);
 
+        // Horizontal live output meter + numeric dB readout, in the band just below
+        // the controls row. Laid out from trackNameArea coordinates so it never
+        // disturbs the control hit-testing above.
+        const int meterBandTop = trackNameArea.getY() + 64;
+        const int meterBandHeight = juce::jmin(14, trackNameArea.getBottom() - 2 - meterBandTop);
+        if (meterBandHeight >= 6)
+        {
+            juce::Rectangle<int> meterBand(trackNameArea.getX() + 12, meterBandTop,
+                                           trackNameArea.getWidth() - 24, meterBandHeight);
+            auto barBounds = meterBand.removeFromLeft(118);
+            meterBand.removeFromLeft(8);
+            auto dbTextBounds = meterBand;
+
+            const auto level = juce::jlimit(0.0f, 1.0f,
+                onRequestTrackLevel ? onRequestTrackLevel(trackIndex) : 0.0f);
+            g.setColour(juce::Colours::black.withAlpha(0.45f));
+            g.fillRoundedRectangle(barBounds.toFloat(), 2.0f);
+            if (level > 0.001f)
+            {
+                auto fill = barBounds.toFloat();
+                fill = fill.removeFromLeft(fill.getWidth() * level);
+                const auto colour = level > 0.92f ? juce::Colours::red
+                                  : level > 0.75f ? juce::Colours::orange
+                                                  : juce::Colour(0xff4fd27a);
+                g.setColour(colour);
+                g.fillRoundedRectangle(fill, 2.0f);
+            }
+
+            const auto levelDb = onRequestTrackLevelDb ? onRequestTrackLevelDb(trackIndex) : -100.0f;
+            g.setColour(juce::Colours::white.withAlpha(0.7f));
+            g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
+            g.drawText(levelDb <= -60.0f ? juce::String("-inf") : juce::String(levelDb, 1) + " dB",
+                       dbTextBounds, juce::Justification::centredLeft, false);
+        }
+
         if (trackSelected)
         {
             auto resizeHandle = trackNameArea.reduced(24, 0);
@@ -1286,6 +1321,16 @@ void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& even
 
 bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
 {
+    if (key == juce::KeyPress::spaceKey)
+    {
+        if (onTogglePlayback)
+        {
+            onTogglePlayback();
+            return true;
+        }
+        return false;
+    }
+
     if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0) && undo())
         return true;
 
@@ -1608,6 +1653,7 @@ void ArrangementTimelineComponent::createMidiClipAt(int trackIndex, double start
         track.colour,
         {},
         {},
+        {},
         0.0,
         false,
         false,
@@ -1820,6 +1866,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         startBeat,
         lengthBeats,
         clipColour,
+        {},
         {},
         sourceFile.getFullPathName(),
         0.0,
@@ -2152,6 +2199,7 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
         startBeat,
         lengthBeats,
         juce::Colour(static_cast<juce::uint32>(static_cast<int>(payload->getProperty("colour")))),
+        {},
         {},
         sourceFile.getFullPathName(),
         0.0,

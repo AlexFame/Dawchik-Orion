@@ -44,6 +44,47 @@ float readCubicSample(const juce::AudioBuffer<float>& buffer, int channel, doubl
     const auto a3 = y1;
     return ((a0 * fraction + a1) * fraction + a2) * fraction + a3;
 }
+
+double pitchRatioForPitch(double midiPitch, int rootMidiNote) noexcept
+{
+    return std::pow(2.0, (midiPitch - static_cast<double>(rootMidiNote)) / 12.0);
+}
+
+std::optional<double> slidePitchForNoteAtBeat(const TimelineClip& clip, const MidiNote& note, double beat)
+{
+    for (const auto& slide : clip.pitchSlides)
+    {
+        if (slide.points.size() < 2)
+            continue;
+
+        const auto slideStart = slide.points.front().beat;
+        const auto noteEnd = note.startBeat + juce::jmax(0.01, note.lengthInBeats);
+        const auto originalSource = slide.sourcePitch == note.pitch
+            && std::abs(slide.sourceNoteStartBeat - note.startBeat) < 0.0001;
+        const auto startsInsideNote = slideStart >= note.startBeat && slideStart <= noteEnd;
+        if (! originalSource && ! startsInsideNote)
+            continue;
+
+        if (beat < slide.points.front().beat)
+            continue;
+        if (beat >= slide.points.back().beat)
+            return slide.points.back().pitch;
+
+        for (std::size_t i = 1; i < slide.points.size(); ++i)
+        {
+            const auto& a = slide.points[i - 1];
+            const auto& b = slide.points[i];
+            if (beat < a.beat || beat > b.beat)
+                continue;
+
+            const auto span = juce::jmax(0.0001, b.beat - a.beat);
+            const auto t = juce::jlimit(0.0, 1.0, (beat - a.beat) / span);
+            return a.pitch + (b.pitch - a.pitch) * t;
+        }
+    }
+
+    return std::nullopt;
+}
 }
 
 SamplerEngine::SamplerEngine(juce::AudioFormatManager& formatManager)
@@ -153,7 +194,8 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
             const auto noteSeconds = (clipLocalBeat - note.startBeat) / beatsPerSecond;
             double sourceStartPosition = 0.0;
             double sourceEndPosition = static_cast<double>(sampleData->buffer.getNumSamples());
-            double playbackRatio = getPitchRatio(note.pitch, track.samplerRootMidiNote);
+            const auto slidePitch = slidePitchForNoteAtBeat(clip, note, clipLocalBeat);
+            double playbackRatio = pitchRatioForPitch(slidePitch.value_or(static_cast<double>(note.pitch)), track.samplerRootMidiNote);
 
             if (track.samplerMode == SamplerPlaybackMode::slice)
             {

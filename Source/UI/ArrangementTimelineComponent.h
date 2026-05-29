@@ -24,6 +24,11 @@ public:
     std::function<void(int, int)> onClipSelectionChanged;
     std::function<void(int)> onTrackHeaderDoubleClick;
     std::function<void(int)> onTrackHeaderRightClick;
+    std::function<void()> onTogglePlayback;
+    // Returns the current 0..1 output level for a track (for the header meter).
+    std::function<float(int)> onRequestTrackLevel;
+    // Returns the current live signal level in dB (-100 ≈ silent → "-inf").
+    std::function<float(int)> onRequestTrackLevelDb;
 
     void paint(juce::Graphics& g) override;
     void resized() override;

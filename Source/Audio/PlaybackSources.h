@@ -5,6 +5,9 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <memory>
@@ -21,6 +24,8 @@
 // no UI dependency, so they live in Audio/ and will host per-track plugins later.
 namespace orion
 {
+constexpr double vstPitchBendRangeSemitones = 12.0;
+
 class BufferPreviewSource final : public juce::PositionableAudioSource
 {
 public:
@@ -104,6 +109,9 @@ public:
     {
         outputSampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
         preparedBlockSize = samplesPerBlockExpected > 0 ? samplesPerBlockExpected : 512;
+
+        // Pre-allocate the metering scratch buffer so the audio callback never reallocates.
+        samplerMeterScratch.setSize(2, preparedBlockSize, false, false, true);
 
         const juce::ScopedLock sl(instrumentLock);
         for (auto& [trackIndex, slot] : instruments)
@@ -256,6 +264,16 @@ public:
             if (slot != nullptr)
                 slot->pendingAllNotesOff = true;
         }
+    }
+
+    // Per-track output metering. Pure observation: the audio thread records the
+    // loudest post-fader sample magnitude seen for each track; the UI thread reads
+    // and resets it. This does NOT change the mix in any way.
+    float fetchAndResetTrackPeak(int trackIndex) noexcept
+    {
+        if (trackIndex < 0 || trackIndex >= maxMeterTracks)
+            return 0.0f;
+        return trackPeaks[static_cast<std::size_t>(trackIndex)].exchange(0.0f, std::memory_order_relaxed);
     }
 
     void prepareWarpCacheForCurrentTempo()
@@ -416,6 +434,7 @@ private:
 
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
             const auto hasInstrument = trackHasInstrument(trackIndex);
+            float trackOutputPeak = 0.0f; // loudest post-fader magnitude for this track (metering only)
             for (const auto& clip : track.clips)
             {
                 if (clip.muted || clip.recording)
@@ -430,19 +449,50 @@ private:
                     if (hasInstrument)
                         continue;
 
-                    samplerEngine.renderMidiClip(targetBuffer,
-                                                 startSample,
-                                                 numSamples,
-                                                 blockStartBeat,
-                                                 renderSampleRate,
-                                                 beatsPerSecond,
-                                                 loopStartBeat,
-                                                 loopEndBeat,
-                                                 repeatEndBeat,
-                                                 wrapToLoop,
-                                                 wrapToProject,
-                                                 track,
-                                                 clip);
+                    if (isRealtime)
+                    {
+                        // Render into an isolated scratch buffer so we can measure this
+                        // track's level, then mix it into the output unchanged.
+                        const auto numCh = juce::jmax(1, targetBuffer.getNumChannels());
+                        samplerMeterScratch.setSize(numCh, numSamples, false, false, true);
+                        samplerMeterScratch.clear();
+                        samplerEngine.renderMidiClip(samplerMeterScratch,
+                                                     0,
+                                                     numSamples,
+                                                     blockStartBeat,
+                                                     renderSampleRate,
+                                                     beatsPerSecond,
+                                                     loopStartBeat,
+                                                     loopEndBeat,
+                                                     repeatEndBeat,
+                                                     wrapToLoop,
+                                                     wrapToProject,
+                                                     track,
+                                                     clip);
+                        for (int channel = 0; channel < numCh; ++channel)
+                        {
+                            trackOutputPeak = juce::jmax(trackOutputPeak,
+                                                         samplerMeterScratch.getMagnitude(channel, 0, numSamples));
+                            const auto srcChannel = juce::jmin(channel, samplerMeterScratch.getNumChannels() - 1);
+                            targetBuffer.addFrom(channel, startSample, samplerMeterScratch, srcChannel, 0, numSamples);
+                        }
+                    }
+                    else
+                    {
+                        samplerEngine.renderMidiClip(targetBuffer,
+                                                     startSample,
+                                                     numSamples,
+                                                     blockStartBeat,
+                                                     renderSampleRate,
+                                                     beatsPerSecond,
+                                                     loopStartBeat,
+                                                     loopEndBeat,
+                                                     repeatEndBeat,
+                                                     wrapToLoop,
+                                                     wrapToProject,
+                                                     track,
+                                                     clip);
+                    }
                     continue;
                 }
 
@@ -508,10 +558,16 @@ private:
                         const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
                         const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
                         const auto sampleValue = cubicHermite(sourceFraction, y0, y1, y2, y3) * linearGain;
-                        targetBuffer.addSample(channel, startSample + sampleIndex, sampleValue * 0.75f);
+                        const auto outputValue = sampleValue * 0.75f;
+                        targetBuffer.addSample(channel, startSample + sampleIndex, outputValue);
+                        if (isRealtime)
+                            trackOutputPeak = juce::jmax(trackOutputPeak, std::abs(outputValue));
                     }
                 }
             }
+
+            if (isRealtime)
+                accumulateTrackPeak(trackIndex, trackOutputPeak);
         }
 
         // Render any hosted VST instruments for this block (clip notes + live keyboard).
@@ -679,6 +735,7 @@ private:
                         {
                             const auto offset = juce::jlimit(0, numSamples - 1,
                                 static_cast<int>(std::round((onBeat - blockStartBeat) / beatAdvancePerSample)));
+                            midi.addEvent(juce::MidiMessage::pitchWheel(1, 8192), offset);
                             midi.addEvent(juce::MidiMessage::noteOn(1, note.pitch,
                                 static_cast<juce::uint8>(juce::jlimit(1, 127, note.velocity))), offset);
                         }
@@ -688,6 +745,88 @@ private:
                                 static_cast<int>(std::round((offBeat - blockStartBeat) / beatAdvancePerSample)));
                             midi.addEvent(juce::MidiMessage::noteOff(1, note.pitch), offset);
                         }
+                    }
+
+                    for (const auto& slide : clip.pitchSlides)
+                    {
+                        if (slide.points.size() < 2)
+                            continue;
+
+                        const auto slideStartBeat = clip.startBeat + slide.points.front().beat;
+                        const auto slideEndBeat = clip.startBeat + slide.points.back().beat;
+
+                        double slideHoldEndBeat = slideEndBeat;
+                        int slideSourcePitch = slide.sourcePitch;
+                        bool foundDynamicSource = false;
+
+                        for (const auto& note : clip.midiNotes)
+                        {
+                            if (note.pitch != slide.sourcePitch
+                                || std::abs(note.startBeat - slide.sourceNoteStartBeat) > 0.0001)
+                                continue;
+
+                            slideHoldEndBeat = clip.startBeat + note.startBeat + juce::jmax(0.01, note.lengthInBeats);
+                            slideSourcePitch = note.pitch;
+                            foundDynamicSource = true;
+                            break;
+                        }
+
+                        if (! foundDynamicSource)
+                        {
+                            for (const auto& note : clip.midiNotes)
+                            {
+                                const auto noteEnd = note.startBeat + juce::jmax(0.01, note.lengthInBeats);
+                                if (slide.points.front().beat < note.startBeat || slide.points.front().beat > noteEnd)
+                                    continue;
+
+                                slideHoldEndBeat = clip.startBeat + noteEnd;
+                                slideSourcePitch = note.pitch;
+                                foundDynamicSource = true;
+                                break;
+                            }
+                        }
+
+                        if (slideHoldEndBeat < blockStartBeat || slideStartBeat >= blockEndBeat)
+                            continue;
+
+                        auto pitchAt = [&slide](double clipBeat)
+                        {
+                            if (clipBeat <= slide.points.front().beat)
+                                return slide.points.front().pitch;
+                            if (clipBeat >= slide.points.back().beat)
+                                return slide.points.back().pitch;
+
+                            for (std::size_t i = 1; i < slide.points.size(); ++i)
+                            {
+                                const auto& a = slide.points[i - 1];
+                                const auto& b = slide.points[i];
+                                if (clipBeat < a.beat || clipBeat > b.beat)
+                                    continue;
+
+                                const auto span = juce::jmax(0.0001, b.beat - a.beat);
+                                const auto t = juce::jlimit(0.0, 1.0, (clipBeat - a.beat) / span);
+                                return a.pitch + (b.pitch - a.pitch) * t;
+                            }
+
+                            return slide.points.back().pitch;
+                        };
+
+                        const auto firstSample = juce::jlimit(0, numSamples - 1,
+                            static_cast<int>(std::floor((juce::jmax(slideStartBeat, blockStartBeat) - blockStartBeat) / beatAdvancePerSample)));
+                        const auto lastSample = juce::jlimit(0, numSamples - 1,
+                            static_cast<int>(std::ceil((juce::jmin(slideHoldEndBeat, blockEndBeat) - blockStartBeat) / beatAdvancePerSample)));
+
+                        for (int offset = firstSample; offset <= lastSample; offset += 64)
+                        {
+                            const auto clipBeat = (blockStartBeat + static_cast<double>(offset) * beatAdvancePerSample) - clip.startBeat;
+                            const auto semitones = juce::jlimit(-vstPitchBendRangeSemitones,
+                                                                 vstPitchBendRangeSemitones,
+                                                                 pitchAt(clipBeat) - static_cast<double>(slideSourcePitch));
+                            const auto wheel = juce::jlimit(0, 16383,
+                                static_cast<int>(std::round(8192.0 + (semitones / vstPitchBendRangeSemitones) * 8191.0)));
+                            midi.addEvent(juce::MidiMessage::pitchWheel(1, wheel), offset);
+                        }
+
                     }
                 }
             }
@@ -704,11 +843,28 @@ private:
                 continue;
 
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
+            float instrumentPeak = 0.0f;
+            for (int ch = 0; ch < slot->scratch.getNumChannels(); ++ch)
+                instrumentPeak = juce::jmax(instrumentPeak, slot->scratch.getMagnitude(ch, 0, numSamples));
+            accumulateTrackPeak(trackIndex, instrumentPeak * trackGain);
+
             for (int ch = 0; ch < targetBuffer.getNumChannels(); ++ch)
             {
                 const auto srcCh = juce::jmin(ch, slot->scratch.getNumChannels() - 1);
                 targetBuffer.addFrom(ch, startSample, slot->scratch, srcCh, 0, numSamples, trackGain);
             }
+        }
+    }
+
+    // Record a track's loudest magnitude this block (keeps the max until the UI reads it).
+    void accumulateTrackPeak(int trackIndex, float peak) noexcept
+    {
+        if (trackIndex < 0 || trackIndex >= maxMeterTracks || peak <= 0.0f)
+            return;
+        auto& slot = trackPeaks[static_cast<std::size_t>(trackIndex)];
+        float prev = slot.load(std::memory_order_relaxed);
+        while (peak > prev && ! slot.compare_exchange_weak(prev, peak, std::memory_order_relaxed))
+        {
         }
     }
 
@@ -724,6 +880,10 @@ private:
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
     juce::CriticalSection instrumentLock;
     std::map<int, std::unique_ptr<InstrumentSlot>> instruments;
+
+    static constexpr int maxMeterTracks = 512;
+    std::array<std::atomic<float>, maxMeterTracks> trackPeaks {};
+    juce::AudioBuffer<float> samplerMeterScratch;
 };
 
 class ClickTrackSource final : public juce::AudioSource
@@ -815,5 +975,66 @@ private:
     double clickFrequency { 1320.0 };
     float currentAmplitude { 0.0f };
     int lastBeatIndex { -1 };
+};
+
+// Master output stage. Sits between the master mixer and the audio device:
+// applies a master gain and captures the output peak level for the mixer's
+// master meter. All audio runs through here, so it stays deliberately cheap.
+class MasterStripSource final : public juce::AudioSource
+{
+public:
+    explicit MasterStripSource(juce::AudioSource& downstreamSource)
+        : downstream(downstreamSource)
+    {
+    }
+
+    void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override
+    {
+        downstream.prepareToPlay(samplesPerBlockExpected, newSampleRate);
+    }
+
+    void releaseResources() override
+    {
+        downstream.releaseResources();
+    }
+
+    void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
+    {
+        downstream.getNextAudioBlock(info);
+
+        if (info.buffer == nullptr || info.numSamples <= 0)
+            return;
+
+        const auto gain = gainLinear.load(std::memory_order_relaxed);
+        if (std::abs(gain - 1.0f) > 1.0e-4f)
+            info.buffer->applyGain(info.startSample, info.numSamples, gain);
+
+        float blockPeak = 0.0f;
+        for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
+            blockPeak = juce::jmax(blockPeak, info.buffer->getMagnitude(ch, info.startSample, info.numSamples));
+
+        // Keep the loudest peak seen since the UI last read it.
+        float prev = meterPeak.load(std::memory_order_relaxed);
+        while (blockPeak > prev
+               && ! meterPeak.compare_exchange_weak(prev, blockPeak, std::memory_order_relaxed))
+        {
+        }
+    }
+
+    void setGainDb(double db) noexcept
+    {
+        gainLinear.store(juce::Decibels::decibelsToGain(static_cast<float>(db)), std::memory_order_relaxed);
+    }
+
+    // Returns the peak magnitude observed since the previous call, then resets it.
+    float fetchAndResetPeak() noexcept
+    {
+        return meterPeak.exchange(0.0f, std::memory_order_relaxed);
+    }
+
+private:
+    juce::AudioSource& downstream;
+    std::atomic<float> gainLinear { 1.0f };
+    std::atomic<float> meterPeak { 0.0f };
 };
 }  // namespace orion

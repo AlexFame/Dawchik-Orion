@@ -67,6 +67,7 @@ target_sources(
         Source/UI/BrowserPanelComponent.cpp
         Source/UI/MainComponent.cpp
         Source/UI/MidiEditorOverlayComponent.cpp
+        Source/UI/MixerPanelComponent.cpp
 )
 
 target_include_directories(
