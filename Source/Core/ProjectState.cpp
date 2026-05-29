@@ -45,6 +45,16 @@ void ProjectState::setScaleLockEnabled(bool enabled) noexcept
     scaleLockEnabled = enabled;
 }
 
+bool ProjectState::isRecordWithMetronome() const noexcept
+{
+    return recordWithMetronome;
+}
+
+void ProjectState::setRecordWithMetronome(bool enabled) noexcept
+{
+    recordWithMetronome = enabled;
+}
+
 int ProjectState::getNumerator() const noexcept
 {
     return timeSigNumerator;

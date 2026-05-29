@@ -26,6 +26,7 @@ public:
     void closeEditor();
     std::function<void()> onClose;
     std::function<void()> onTogglePlayback;
+    std::function<void()> onStopAndRewindToClipStart;
     std::function<double()> onRequestPlayheadBeat;
     std::function<bool()> onRequestPlayingState;
     std::function<void(bool)> onScaleLockChanged; // fired when the in-editor toggle is flipped
@@ -33,6 +34,7 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
     bool keyPressed(const juce::KeyPress& key) override;
+    bool keyStateChanged(bool isKeyDown) override;
     void focusLost(FocusChangeType cause) override;
     void mouseMove(const juce::MouseEvent& event) override;
     void mouseExit(const juce::MouseEvent& event) override;
@@ -127,6 +129,7 @@ private:
     void selectSingleNote(int noteIndex);
     void duplicateSelectedNotes();
     void deleteSelectedNotes();
+    void quantizeSelectedNotes();
     void updateSubtitle();
     void clearSelection();
     void pushUndoSnapshot();
@@ -142,6 +145,7 @@ private:
     juce::String getSnapName() const;
     void showScaleMenu();
     void showSnapMenu();
+    bool updateLiveKeyboardPitches();
 
     juce::String trackName;
     juce::String clipName;
@@ -149,6 +153,7 @@ private:
     TrackState* activeTrack { nullptr };
     TimelineClip* activeClip { nullptr };
     std::set<int> selectedNotes;
+    std::set<int> liveKeyboardPitches;
     std::optional<NoteHit> hoverNote;
     std::optional<NoteDragState> noteDragState;
     std::optional<MarqueeState> marqueeState;
@@ -162,6 +167,7 @@ private:
     juce::ToggleButton focusToggle;
     juce::TextButton scaleButton;
     juce::TextButton snapButton;
+    juce::TextButton quantizeButton;
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;
     juce::Label scaleLockLabel;

@@ -688,8 +688,30 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto isSelected = isClipSelected(SelectedClip { trackIndex, clipIndex });
             g.saveState();
             g.reduceClipRegion(clipBoundsInt);
+
+            // Body fill.
             g.setColour(clip.colour.withSaturation(0.78f));
             g.fillRoundedRectangle(clipBounds, 10.0f);
+
+            // Studio One-style header strip: a darker band at the top where the clip
+            // name lives. Gives every clip a visible top edge even when adjacent clips
+            // touch — together with the dark outline below this creates a clear seam
+            // between flush clips.
+            if (clipBounds.getHeight() > 18.0f)
+            {
+                g.setColour(clip.colour.withSaturation(0.85f).darker(0.35f));
+                juce::Path headerPath;
+                const auto headerStrip = juce::Rectangle<float>(clipBounds.getX(),
+                                                                clipBounds.getY(),
+                                                                clipBounds.getWidth(),
+                                                                juce::jmin(20.0f, clipBounds.getHeight() * 0.32f));
+                // Round only the top corners — the bottom of the header is a flat seam.
+                headerPath.addRoundedRectangle(headerStrip.getX(), headerStrip.getY(),
+                                               headerStrip.getWidth(), headerStrip.getHeight(),
+                                               10.0f, 10.0f,
+                                               true, true, false, false);
+                g.fillPath(headerPath);
+            }
 
             if (clip.type == ClipType::audio && shouldDrawWaveform)
             {
@@ -764,10 +786,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 }
             }
 
+            // Always draw a 1px darker outline around every clip. This is what makes two
+            // flush clips visually separable — without it adjacent clips read as one
+            // continuous block (the issue raised when we removed the 2px inset gap).
+            g.setColour(clip.colour.darker(0.55f).withAlpha(0.85f));
+            g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), 9.5f, 1.0f);
+
             if (isSelected)
             {
-                g.setColour(juce::Colours::white.withAlpha(0.58f));
-                g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), 9.5f, 1.2f);
+                g.setColour(juce::Colours::white.withAlpha(0.65f));
+                g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), 9.5f, 1.6f);
             }
 
             if (shouldDrawLabel)
@@ -784,6 +812,13 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             g.restoreState();
         }
     }
+
+    // Studio One-style overlay grid: re-draw bar / 4-bar / 16-bar lines on TOP of clips
+    // at low alpha so the bar structure is always visible through clip bodies. The fine
+    // beat grid stays underneath — too much detail through clips just makes them muddy.
+    drawGridLayer(visibleTracksArea, barStepBeats,     majorGridColour.withAlpha(0.18f), 1.0f);
+    drawGridLayer(visibleTracksArea, majorStepBeats,   majorGridColour.withAlpha(0.28f), 1.15f);
+    drawGridLayer(visibleTracksArea, sectionStepBeats, majorGridColour.withAlpha(0.38f), 1.4f);
 
     g.restoreState();
 
@@ -915,6 +950,19 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     const auto trackHeaderHit = hitTestTrackHeader(event.getPosition());
     if (trackHeaderHit.has_value())
     {
+        // Right-click anywhere on the header body (not on a control) opens the
+        // track context menu (used for loading / managing VST instruments).
+        if (event.mods.isPopupMenu() && trackHeaderHit->control == TrackHeaderControl::none)
+        {
+            selectedTrackIndex = trackHeaderHit->trackIndex;
+            notifyClipSelectionChanged();
+            grabKeyboardFocus();
+            repaint();
+            if (onTrackHeaderRightClick)
+                onTrackHeaderRightClick(trackHeaderHit->trackIndex);
+            return;
+        }
+
         selectedTrackIndex = trackHeaderHit->trackIndex;
         setSingleSelection(std::nullopt);
 
@@ -1896,12 +1944,19 @@ juce::Rectangle<int> ArrangementTimelineComponent::getClipBounds(const TimelineC
     auto lane = getTrackLaneBounds(trackIndex);
     auto clipLane = lane;
     clipLane.removeFromLeft(trackHeaderWidth);
-    const auto clipX = beatToX(clip.startBeat, clipLane);
+    const auto clipX    = beatToX(clip.startBeat, clipLane);
     const auto clipEndX = beatToX(clip.startBeat + clip.lengthInBeats, clipLane);
+
+    // Snap each edge to integer pixels with the SAME rounding rule so that two clips
+    // sharing a beat boundary (clipA.end == clipB.start) land on the same pixel column
+    // — no visible gap between them at any zoom level. Previously each clip was inset by
+    // 1px on each side, which guaranteed a 2px gap between adjacent clips.
+    const auto left  = juce::roundToInt(clipX);
+    const auto right = juce::roundToInt(clipEndX);
     return juce::Rectangle<int>(
-        static_cast<int>(clipX + 1.0f),
+        left,
         lane.getY() + 1,
-        static_cast<int>(juce::jmax(1.0f, clipEndX - clipX - 2.0f)),
+        juce::jmax(1, right - left),
         juce::jmax(1, lane.getHeight() - 2));
 }
 

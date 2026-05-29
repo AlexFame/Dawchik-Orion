@@ -31,6 +31,7 @@ public:
 
     std::function<void(const BrowserItem&)> onPreviewItem;
     std::function<void(const BrowserItem&)> onActivateItem;
+    std::function<void()>                   onCloseRequested;
 
     std::optional<BrowserItem> getSelectedItem() const;
     void chooseRootFolder();
@@ -109,5 +110,11 @@ private:
     juce::Time watchedLocationTimestamp;
     std::unique_ptr<juce::FileChooser> folderChooser;
     juce::TextButton chooseFolderButton { "Add Folder" };
+    juce::TextButton closeButton { juce::String::charToString(0x00D7) }; // "×"
+    juce::TextEditor searchEditor;
+    juce::String     searchQuery;
+    // Items returned from the filesystem before applying the search filter.
+    // `items` (in the .cpp) holds the post-filter view; this holds the source.
+    std::vector<BrowserItem> unfilteredItems;
 };
 }  // namespace orion

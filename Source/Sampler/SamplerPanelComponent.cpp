@@ -419,7 +419,13 @@ bool SamplerPanelComponent::keyPressed(const juce::KeyPress& key)
 
     if (pitchForKeyCode(key.getKeyCode()).has_value())
     {
-        return updateTypingPianoNotes();
+        const auto handled = updateTypingPianoNotes();
+        // Even if the async key-state poll missed this exact event, consume musical
+        // keys while a playable track is armed so macOS does not emit its system beep.
+        return handled
+            || (track != nullptr
+                && juce::Process::isForegroundProcess()
+                && (track->samplerSourcePath.isNotEmpty() || track->instrumentPluginId.isNotEmpty()));
     }
 
     return false;
@@ -445,7 +451,7 @@ void SamplerPanelComponent::timerCallback()
 {
     // Always poll the keyboard while a track is armed, regardless of panel
     // visibility — so the user can play notes from anywhere in the app.
-    if (activeTrack != nullptr)
+    if (getActiveTrack() != nullptr)
         updateTypingPianoNotes();
 
     if (isVisible() && playbackSliceIndex.has_value())
@@ -549,8 +555,16 @@ TrackState* SamplerPanelComponent::getActiveTrack() const
 
 bool SamplerPanelComponent::updateTypingPianoNotes()
 {
+    if (! juce::Process::isForegroundProcess())
+    {
+        releaseTypingPianoNotes();
+        return false;
+    }
+
     auto* track = getActiveTrack();
-    if (track == nullptr || track->samplerSourcePath.isEmpty())
+    // The typing keyboard drives either a loaded sampler sample OR a hosted VST
+    // instrument. Tracks with neither produce no sound, so bail out.
+    if (track == nullptr || (track->samplerSourcePath.isEmpty() && track->instrumentPluginId.isEmpty()))
     {
         releaseTypingPianoNotes();
         return false;

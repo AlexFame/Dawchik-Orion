@@ -51,6 +51,9 @@ struct TimelineClip
     bool sourceKeyIsMinor { false };
     // When true, audio clips are auto-pitch-shifted to match the project key.
     bool keyShiftEnabled { true };
+    // Transient UI/audio state: a clip currently being recorded is visible on
+    // the timeline but must not play back until the take is finalized.
+    bool recording { false };
 };
 
 struct TrackState
@@ -73,6 +76,14 @@ struct TrackState
     double samplerSourceBpm { 0.0 };
     double samplerSourceDurationSeconds { 0.0 };
     int samplerDetectedBars { 0 };
+
+    // Hosted VST instrument (empty = none). instrumentPluginId is the plugin's
+    // stable identifier (PluginDescription::createIdentifierString()), used to
+    // find and re-instantiate it. instrumentStateBase64 holds the plugin's saved
+    // state (getStateInformation, base64-encoded) for project persistence.
+    juce::String instrumentPluginId;
+    juce::String instrumentPluginName;
+    juce::String instrumentStateBase64;
 };
 
 class ProjectState
@@ -92,6 +103,10 @@ public:
     // piano-roll click, drag) snaps to the nearest in-scale pitch.
     bool isScaleLockEnabled() const noexcept;
     void setScaleLockEnabled(bool enabled) noexcept;
+
+    // Whether the metronome ticks (count-in + during playback) when recording.
+    bool isRecordWithMetronome() const noexcept;
+    void setRecordWithMetronome(bool enabled) noexcept;
 
     int getNumerator() const noexcept;
     int getDenominator() const noexcept;
@@ -118,6 +133,7 @@ private:
     int  projectKeyRoot { 0 };       // C by default
     bool projectKeyIsMinor { true }; // A minor / C minor are common in production
     bool scaleLockEnabled { true };
+    bool recordWithMetronome { true };
     std::vector<TrackState> tracks;
 };
 }  // namespace orion

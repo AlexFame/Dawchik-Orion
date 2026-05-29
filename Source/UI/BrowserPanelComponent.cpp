@@ -14,9 +14,11 @@ const auto rowSelected = juce::Colours::white.withAlpha(0.09f);
 const auto buttonColour = juce::Colour(0xff1b232b);
 const auto buttonOutlineColour = juce::Colours::white.withAlpha(0.18f);
 constexpr int rowHeight = 46;
+// Extra row added below the directory path label to hold the search field, hence
+// headerHeight needs more vertical room than before.
 constexpr int rowGap = 7;
 constexpr int dragThresholdPx = 5;
-constexpr int headerHeight = 116;
+constexpr int headerHeight = 152; // title + subtitle + path + search field
 constexpr float horizontalSwipeThreshold = 0.14f;
 constexpr int horizontalSwipeLockMs = 320;
 const juce::String mountedDevicesHubName = "Mounted Devices";
@@ -176,6 +178,24 @@ BrowserPanelComponent::BrowserPanelComponent()
     chooseFolderButton.addListener(this);
     addAndMakeVisible(chooseFolderButton);
 
+    // (Close button removed — toggling the browser is the toolbar's BROWSER button.)
+    closeButton.setVisible(false);
+
+    searchEditor.setTextToShowWhenEmpty("Search...", juce::Colours::white.withAlpha(0.35f));
+    searchEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff141c24));
+    searchEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    searchEditor.setColour(juce::TextEditor::highlightColourId, juce::Colours::white.withAlpha(0.20f));
+    searchEditor.setColour(juce::TextEditor::outlineColourId, buttonOutlineColour);
+    searchEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a8cff));
+    searchEditor.setFont(juce::FontOptions(13.0f, juce::Font::plain));
+    searchEditor.setReturnKeyStartsNewLine(false);
+    searchEditor.onTextChange = [this]
+    {
+        searchQuery = searchEditor.getText().trim();
+        refreshEntries();
+    };
+    addAndMakeVisible(searchEditor);
+
     currentDirectory = getMacBrowseRoot();
     showLocationRoots(false);
     refreshEntries();
@@ -299,7 +319,16 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 void BrowserPanelComponent::resized()
 {
     auto bounds = getLocalBounds();
-    chooseFolderButton.setBounds(bounds.removeFromTop(30).removeFromRight(104).reduced(0, 2));
+
+    // Row 1: title row — Add Folder (right).
+    auto titleRow = bounds.removeFromTop(30);
+    closeButton.setBounds({});
+    chooseFolderButton.setBounds(titleRow.removeFromRight(104).reduced(0, 2));
+
+    // Skip the subtitle + path block painted in paint() (18 + 52 = 70px) and place
+    // the search editor in the remaining header band.
+    bounds.removeFromTop(18 + 52);
+    searchEditor.setBounds(bounds.removeFromTop(28).reduced(0, 2));
 }
 
 void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
@@ -515,6 +544,11 @@ void BrowserPanelComponent::buttonClicked(juce::Button* button)
 {
     if (button == &chooseFolderButton)
         chooseRootFolder();
+    else if (button == &closeButton)
+    {
+        if (onCloseRequested)
+            onCloseRequested();
+    }
 }
 
 void BrowserPanelComponent::timerCallback()
@@ -763,12 +797,38 @@ void BrowserPanelComponent::refreshEntries()
     juce::String newSignature;
     for (const auto& item : refreshedItems)
         newSignature << item.name << "|" << item.subtitle << "|" << item.file.getFullPathName() << "\n";
+    // Include the search query in the signature — typing in the search box doesn't
+    // change the directory listing but it MUST trigger a refresh of `items`.
+    newSignature << "@q=" << searchQuery;
 
     if (newSignature == entrySignature)
         return;
 
     entrySignature = newSignature;
-    items = std::move(refreshedItems);
+    unfilteredItems = std::move(refreshedItems);
+
+    // Apply the case-insensitive search filter. Parent-link rows (".." / "Go up")
+    // always pass through so the user can keep navigating while a query is active.
+    if (searchQuery.isEmpty())
+    {
+        items = unfilteredItems;
+    }
+    else
+    {
+        items.clear();
+        items.reserve(unfilteredItems.size());
+        const auto lowerQuery = searchQuery.toLowerCase();
+        for (const auto& item : unfilteredItems)
+        {
+            if (item.isParentLink
+                || item.name.toLowerCase().contains(lowerQuery)
+                || item.subtitle.toLowerCase().contains(lowerQuery))
+            {
+                items.push_back(item);
+            }
+        }
+    }
+
     selectedIndex.reset();
     hoverIndex.reset();
     dragIndex.reset();

@@ -54,13 +54,41 @@ constexpr std::array<SnapSetting, 5> snapSettings {{
     { "1/64", 0.0625 },
 }};
 
-juce::String noteNameForPitch(int pitch)
-{
-    static constexpr const char* noteNames[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-    const auto pitchClass = ((pitch % 12) + 12) % 12;
-    const auto octave = (pitch / 12) - 1;
-    return juce::String(noteNames[pitchClass]) + juce::String(octave);
-}
+	juce::String noteNameForPitch(int pitch)
+	{
+	    static constexpr const char* noteNames[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+	    const auto pitchClass = ((pitch % 12) + 12) % 12;
+	    const auto octave = (pitch / 12) - 1;
+	    return juce::String(noteNames[pitchClass]) + juce::String(octave);
+	}
+
+	std::optional<int> pitchForTypingKeyCode(int keyCode)
+	{
+	    static constexpr int lowerRowBasePitch = 48;
+	    static constexpr int upperRowBasePitch = 60;
+	    static constexpr std::array<std::pair<int, int>, 39> mapping {{
+	        { 'z', lowerRowBasePitch + 0 }, { 's', lowerRowBasePitch + 1 }, { 'x', lowerRowBasePitch + 2 },
+	        { 'd', lowerRowBasePitch + 3 }, { 'c', lowerRowBasePitch + 4 }, { 'v', lowerRowBasePitch + 5 },
+	        { 'g', lowerRowBasePitch + 6 }, { 'b', lowerRowBasePitch + 7 }, { 'h', lowerRowBasePitch + 8 },
+	        { 'n', lowerRowBasePitch + 9 }, { 'j', lowerRowBasePitch + 10 }, { 'm', lowerRowBasePitch + 11 },
+	        { ',', lowerRowBasePitch + 12 }, { 'l', lowerRowBasePitch + 13 }, { '.', lowerRowBasePitch + 14 },
+	        { ';', lowerRowBasePitch + 15 }, { '/', lowerRowBasePitch + 16 }, { '\'', lowerRowBasePitch + 17 },
+	        { 'q', upperRowBasePitch + 0 }, { '2', upperRowBasePitch + 1 }, { 'w', upperRowBasePitch + 2 },
+	        { '3', upperRowBasePitch + 3 }, { 'e', upperRowBasePitch + 4 }, { 'r', upperRowBasePitch + 5 },
+	        { '5', upperRowBasePitch + 6 }, { 't', upperRowBasePitch + 7 }, { '6', upperRowBasePitch + 8 },
+	        { 'y', upperRowBasePitch + 9 }, { '7', upperRowBasePitch + 10 }, { 'u', upperRowBasePitch + 11 },
+	        { 'i', upperRowBasePitch + 12 }, { '9', upperRowBasePitch + 13 }, { 'o', upperRowBasePitch + 14 },
+	        { '0', upperRowBasePitch + 15 }, { 'p', upperRowBasePitch + 16 }, { '[', upperRowBasePitch + 17 },
+	        { ']', upperRowBasePitch + 18 }, { '+', upperRowBasePitch + 19 }, { '=', upperRowBasePitch + 19 },
+	    }};
+
+	    const auto lowerKeyCode = juce::CharacterFunctions::toLowerCase(static_cast<juce::juce_wchar>(keyCode));
+	    for (const auto& [mappedKey, pitch] : mapping)
+	        if (lowerKeyCode == mappedKey)
+	            return pitch;
+
+	    return std::nullopt;
+	}
 }  // namespace
 
 namespace orion
@@ -104,6 +132,13 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     snapButton.addListener(this);
     addAndMakeVisible(snapButton);
 
+    quantizeButton.setButtonText("Quantize");
+    quantizeButton.setTooltip("Quantize selected notes (or all if none selected) to the Snap grid  -  Option+Q");
+    quantizeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b232b));
+    quantizeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    quantizeButton.addListener(this);
+    addAndMakeVisible(quantizeButton);
+
     scaleLockLabel.setText("Scale Lock", juce::dontSendNotification);
     scaleLockLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
     scaleLockLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
@@ -141,10 +176,12 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     clipName = clipState.name;
     trackColour = trackState.colour;
     clearSelection();
+    liveKeyboardPitches.clear();
     hoverNote.reset();
     noteDragState.reset();
     marqueeState.reset();
     velocityDragState.reset();
+    liveKeyboardPitches.clear();
     undoStack.clear();
     redoStack.clear();
     horizontalZoom = 1.0;
@@ -243,6 +280,25 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     const auto firstVisibleLane = juce::jmax(0, static_cast<int>(std::floor((visibleGrid.getY() - gridArea.getY()) / laneHeight)));
     const auto lastVisibleLane = juce::jmin(displayedLaneCount - 1, static_cast<int>(std::ceil((visibleGrid.getBottom() - gridArea.getY()) / laneHeight)));
 
+    const auto livePlayheadBeat = onRequestPlayheadBeat ? onRequestPlayheadBeat() : 0.0;
+    const auto livePlayingState = onRequestPlayingState ? onRequestPlayingState() : false;
+    const auto clipStart  = activeClip != nullptr ? activeClip->startBeat     : 0.0;
+    const auto clipLength = activeClip != nullptr ? activeClip->lengthInBeats : 8.0;
+    const auto localBeat  = livePlayheadBeat - clipStart;
+    const bool playheadInsideClip = localBeat >= 0.0 && localBeat <= clipLength + 0.0001;
+
+    std::set<int> activePlaybackPitches;
+    if (activeClip != nullptr && livePlayingState && playheadInsideClip)
+    {
+        for (const auto& note : activeClip->midiNotes)
+        {
+            const auto noteEnd = note.startBeat + juce::jmax(0.01, note.lengthInBeats);
+            if (localBeat >= note.startBeat && localBeat < noteEnd)
+                activePlaybackPitches.insert(note.pitch);
+        }
+    }
+    activePlaybackPitches.insert(liveKeyboardPitches.begin(), liveKeyboardPitches.end());
+
     for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
     {
         const auto pitch = laneIndexToPitch(lane);
@@ -254,11 +310,71 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
 
         keyRow = keyRow.getIntersection(keyboardArea);
         const auto blackKey = isBlackKey(pitch);
+        const auto pitchClass = ((pitch % 12) + 12) % 12;
+        const bool isRoot   = pitchClass == scaleRoot;
+        const bool inScale  = isPitchInScale(pitch);
+        const bool isActive = activePlaybackPitches.contains(pitch);
+        auto keyFill = keyRow.reduced(6, 1);
 
-        g.setColour(blackKey ? juce::Colour(0xff0e1318) : juce::Colour(0xfff2f4f6));
-        g.fillRect(keyRow.reduced(8, 1));
-        g.setColour(blackKey ? juce::Colours::white.withAlpha(0.84f) : juce::Colours::black.withAlpha(0.78f));
-        g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
+        if (blackKey && ! isActive)
+        {
+            keyFill = keyFill.withX(keyboardArea.getX() + keyboardArea.getWidth() / 3)
+                             .withWidth(keyboardArea.getWidth() - keyboardArea.getWidth() / 3 - 8);
+        }
+
+        auto keyShape = keyFill.toFloat().reduced(isActive ? 0.0f : 0.6f, isActive ? 0.0f : 0.4f);
+        if (isActive)
+            keyShape = keyShape.withTrimmedRight(1.0f);
+
+        g.setColour(juce::Colours::black.withAlpha(blackKey ? 0.48f : 0.20f));
+        g.fillRoundedRectangle(keyShape.translated(1.4f, 1.0f), blackKey ? 3.0f : 4.0f);
+
+        juce::Colour baseTop = blackKey ? juce::Colour(0xff29313a) : juce::Colour(0xfff8fbfd);
+        juce::Colour baseBottom = blackKey ? juce::Colour(0xff070a0e) : juce::Colour(0xffb8c2cb);
+        if (isRoot || inScale)
+        {
+            const auto tint = trackColour.withAlpha(isRoot ? 0.34f : 0.16f);
+            baseTop = baseTop.interpolatedWith(tint, isRoot ? 0.28f : 0.14f);
+            baseBottom = baseBottom.interpolatedWith(tint, isRoot ? 0.24f : 0.10f);
+        }
+        if (isActive)
+        {
+            baseTop = trackColour.brighter(0.55f);
+            baseBottom = trackColour.darker(0.25f);
+        }
+
+        juce::ColourGradient keyGradient(baseTop,
+                                         keyShape.getX(), keyShape.getY(),
+                                         baseBottom,
+                                         keyShape.getX(), keyShape.getBottom(),
+                                         false);
+        keyGradient.addColour(0.50, blackKey && ! isActive ? baseTop.darker(0.24f) : baseTop.darker(0.05f));
+        g.setGradientFill(keyGradient);
+        g.fillRoundedRectangle(keyShape, isActive ? 4.0f : (blackKey ? 3.0f : 4.0f));
+
+        if (isActive)
+        {
+            juce::ColourGradient pressGlow(trackColour.brighter(0.85f).withAlpha(0.78f),
+                                           keyShape.getX(), keyShape.getY(),
+                                           trackColour.darker(0.10f).withAlpha(0.78f),
+                                           keyShape.getRight(), keyShape.getY(),
+                                           false);
+            g.setGradientFill(pressGlow);
+            g.fillRoundedRectangle(keyShape.reduced(1.0f, 1.0f), 3.5f);
+        }
+
+        g.setColour(isActive ? juce::Colours::white.withAlpha(0.42f)
+                             : juce::Colours::white.withAlpha(blackKey ? 0.12f : 0.68f));
+        g.drawLine(keyShape.getX() + 2.0f, keyShape.getY() + 1.0f,
+                   keyShape.getRight() - 2.0f, keyShape.getY() + 1.0f, isActive ? 1.4f : 1.0f);
+
+        g.setColour(isActive ? juce::Colours::white.withAlpha(0.78f)
+                             : juce::Colours::black.withAlpha(blackKey ? 0.72f : 0.22f));
+        g.drawRoundedRectangle(keyShape, isActive ? 4.0f : (blackKey ? 3.0f : 4.0f), isActive ? 1.6f : 1.0f);
+
+        g.setColour(isActive ? juce::Colours::white
+                             : (blackKey ? juce::Colours::white.withAlpha(0.86f) : juce::Colours::black.withAlpha(0.76f)));
+        g.setFont(juce::FontOptions(isActive ? 13.0f : 12.0f, (isRoot || isActive) ? juce::Font::bold : juce::Font::plain));
         g.drawText(noteNameForPitch(pitch), keyRow.reduced(12, 0), juce::Justification::centredLeft);
     }
 
@@ -277,9 +393,61 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         const auto y = static_cast<int>(std::round(gridArea.getY() + lane * laneHeight));
         auto row = juce::Rectangle<int>(visibleGrid.getX(), y, visibleGrid.getWidth(), static_cast<int>(std::ceil(laneHeight)));
         row = row.getIntersection(visibleGrid);
-        g.setColour(isBlackKey(pitch) ? juce::Colours::black.withAlpha(0.13f) : juce::Colours::white.withAlpha(0.015f));
+
+        // Scale highlight: tonic row strongest, in-scale rows tinted with the track
+        // colour, out-of-scale rows darkened so the usable lanes visually pop.
+        const auto pitchClass = ((pitch % 12) + 12) % 12;
+        if (pitchClass == scaleRoot)
+            g.setColour(trackColour.withAlpha(0.20f));
+        else if (isPitchInScale(pitch))
+            g.setColour(trackColour.withAlpha(0.075f));
+        else
+            g.setColour(juce::Colours::black.withAlpha(isBlackKey(pitch) ? 0.24f : 0.13f));
         g.fillRect(row);
+
+        if (activePlaybackPitches.contains(pitch))
+        {
+            auto laneGlow = row.toFloat().reduced(0.0f, 1.0f);
+            juce::ColourGradient glow(trackColour.brighter(0.65f).withAlpha(0.30f),
+                                      laneGlow.getX(), laneGlow.getCentreY(),
+                                      trackColour.darker(0.45f).withAlpha(0.015f),
+                                      laneGlow.getRight(), laneGlow.getCentreY(),
+                                      false);
+            glow.addColour(0.18, trackColour.withAlpha(0.22f));
+            glow.addColour(0.48, trackColour.withAlpha(0.085f));
+            g.setGradientFill(glow);
+            g.fillRect(laneGlow);
+
+            juce::ColourGradient edge(trackColour.brighter(0.85f).withAlpha(0.42f),
+                                      laneGlow.getX(), laneGlow.getY(),
+                                      trackColour.withAlpha(0.02f),
+                                      laneGlow.getRight(), laneGlow.getY(),
+                                      false);
+            g.setGradientFill(edge);
+            g.fillRect(laneGlow.withHeight(1.4f));
+            g.fillRect(laneGlow.withY(laneGlow.getBottom() - 1.4f).withHeight(1.4f));
+        }
     }
+
+    // Dim the area BEYOND the clip end so the user can see where the pattern stops.
+    const auto activeClipLengthBeats = activeClip != nullptr ? activeClip->lengthInBeats : 0.0;
+    if (activeClipLengthBeats > 0.0)
+    {
+        const auto clipEndX = static_cast<float>(gridArea.getX() + (activeClipLengthBeats * pixelsPerBeat) - scrollX);
+        if (clipEndX < static_cast<float>(visibleGrid.getRight()))
+        {
+            const auto dimX = juce::jmax(static_cast<float>(visibleGrid.getX()), clipEndX);
+            g.setColour(juce::Colours::black.withAlpha(0.45f));
+            g.fillRect(juce::Rectangle<float>(dimX,
+                                              static_cast<float>(visibleGrid.getY()),
+                                              static_cast<float>(visibleGrid.getRight()) - dimX,
+                                              static_cast<float>(visibleGrid.getHeight())));
+        }
+    }
+
+    const auto stepsPerBeat = juce::jmax(1, static_cast<int>(std::round(1.0 / juce::jmax(0.001, snapSizeInBeats))));
+    const auto beatsPerBar  = 4; // visual bar — independent of project's time-sig numerator for now
+    const auto stepsPerBar  = stepsPerBeat * beatsPerBar;
 
     for (int step = 0; step <= steps; ++step)
     {
@@ -287,12 +455,59 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
         if (x < static_cast<float>(visibleGrid.getX() - 8) || x > static_cast<float>(visibleGrid.getRight() + 8))
             continue;
-        g.setColour(step % 4 == 0 ? juce::Colours::white.withAlpha(0.12f) : juce::Colours::white.withAlpha(0.045f));
-        g.drawLine(x, static_cast<float>(visibleGrid.getY()), x, static_cast<float>(visibleGrid.getBottom()), step % 4 == 0 ? 1.8f : 1.0f);
+
+        const bool isBarLine  = (step % stepsPerBar)  == 0;
+        const bool isBeatLine = (step % stepsPerBeat) == 0;
+
+        if (isBarLine)
+            g.setColour(juce::Colours::white.withAlpha(0.32f));
+        else if (isBeatLine)
+            g.setColour(juce::Colours::white.withAlpha(0.14f));
+        else
+            g.setColour(juce::Colours::white.withAlpha(0.045f));
+
+        g.drawLine(x, static_cast<float>(visibleGrid.getY()), x, static_cast<float>(visibleGrid.getBottom()),
+                   isBarLine ? 2.0f : (isBeatLine ? 1.4f : 1.0f));
     }
 
-    const auto livePlayheadBeat = onRequestPlayheadBeat ? onRequestPlayheadBeat() : 0.0;
-    const auto livePlayingState = onRequestPlayingState ? onRequestPlayingState() : false;
+    // Bar numbers along the top of the grid.
+    {
+        const auto rulerHeight = 16.0f;
+        g.setColour(juce::Colours::black.withAlpha(0.35f));
+        g.fillRect(juce::Rectangle<float>(static_cast<float>(visibleGrid.getX()),
+                                          static_cast<float>(visibleGrid.getY()),
+                                          static_cast<float>(visibleGrid.getWidth()),
+                                          rulerHeight));
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.setColour(juce::Colours::white.withAlpha(0.78f));
+        for (int step = 0; step <= steps; step += stepsPerBar)
+        {
+            const auto beat = static_cast<double>(step) * snapSizeInBeats;
+            const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
+            if (x < static_cast<float>(visibleGrid.getX() - 30) || x > static_cast<float>(visibleGrid.getRight() + 4))
+                continue;
+            const auto barNumber = step / stepsPerBar + 1; // 1-based for display
+            g.drawText(juce::String(barNumber),
+                       static_cast<int>(x + 3),
+                       static_cast<int>(visibleGrid.getY() + 1),
+                       40, static_cast<int>(rulerHeight) - 2,
+                       juce::Justification::topLeft);
+        }
+    }
+
+    // Solid clip-end line so the boundary is crystal-clear.
+    if (activeClipLengthBeats > 0.0)
+    {
+        const auto clipEndX = static_cast<float>(gridArea.getX() + (activeClipLengthBeats * pixelsPerBeat) - scrollX);
+        if (clipEndX >= static_cast<float>(visibleGrid.getX() - 4)
+            && clipEndX <= static_cast<float>(visibleGrid.getRight() + 4))
+        {
+            g.setColour(juce::Colour(0xffeb6f3a).withAlpha(0.85f)); // accent
+            g.drawLine(clipEndX, static_cast<float>(visibleGrid.getY()),
+                       clipEndX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
+        }
+    }
+
     if (activeClip != nullptr)
     {
         for (int noteIndex = 0; noteIndex < static_cast<int>(activeClip->midiNotes.size()); ++noteIndex)
@@ -314,21 +529,24 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         }
     }
 
-    const auto clipLength = activeClip != nullptr ? activeClip->lengthInBeats : 8.0;
-    const auto loopedBeat = std::fmod(livePlayheadBeat, juce::jmax(1.0, clipLength));
+    // Playhead in clip-local coordinates: project playhead minus clip start.
+    // Only draw when the project playhead is INSIDE this clip's range — otherwise
+    // the piano-roll cursor used to mirror the project loop wrap-around and slide
+    // silently back to bar 1 as soon as the clip ended.
+    if (playheadInsideClip)
+    {
+        const auto playheadX = static_cast<float>(gridArea.getX())
+            + static_cast<float>((localBeat * pixelsPerBeat) - scrollX);
 
-    const auto playheadX = static_cast<float>(gridArea.getX())
-        + static_cast<float>((loopedBeat * pixelsPerBeat) - scrollX);
+        juce::ColourGradient gradient(playheadColour.withAlpha(0.0f), playheadX - 8.0f, 0.0f,
+                                      playheadColour.withAlpha(0.0f), playheadX + 8.0f, 0.0f, false);
+        gradient.addColour(0.5, playheadColour.withAlpha(livePlayingState ? 0.35f : 0.15f));
+        g.setGradientFill(gradient);
+        g.fillRect(playheadX - 8.0f, static_cast<float>(visibleGrid.getY()), 16.0f, static_cast<float>(visibleGrid.getHeight()));
 
-    // Draw Playhead (Logic style - OVER EVERYTHING)
-    juce::ColourGradient gradient(playheadColour.withAlpha(0.0f), playheadX - 8.0f, 0.0f,
-                                  playheadColour.withAlpha(0.0f), playheadX + 8.0f, 0.0f, false);
-    gradient.addColour(0.5, playheadColour.withAlpha(livePlayingState ? 0.35f : 0.15f));
-    g.setGradientFill(gradient);
-    g.fillRect(playheadX - 8.0f, static_cast<float>(visibleGrid.getY()), 16.0f, static_cast<float>(visibleGrid.getHeight()));
-
-    g.setColour(playheadColour.withAlpha(livePlayingState ? 0.95f : 0.75f));
-    g.drawLine(playheadX, static_cast<float>(visibleGrid.getY()), playheadX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
+        g.setColour(playheadColour.withAlpha(livePlayingState ? 0.95f : 0.75f));
+        g.drawLine(playheadX, static_cast<float>(visibleGrid.getY()), playheadX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
+    }
 
     if (marqueeState.has_value() && marqueeState->movedEnough)
     {
@@ -384,6 +602,8 @@ void MidiEditorOverlayComponent::resized()
     scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 2));
     controlsArea.removeFromLeft(8);
     snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 2));
+    controlsArea.removeFromLeft(6);
+    quantizeButton.setBounds(controlsArea.removeFromLeft(86).reduced(0, 2));
     controlsArea.removeFromLeft(12);
     scaleLockToggle.setBounds(controlsArea.removeFromLeft(22).reduced(0, 4));
     scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 2));
@@ -394,6 +614,15 @@ void MidiEditorOverlayComponent::resized()
 
 bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
 {
+    if (! key.getModifiers().isCommandDown()
+        && ! key.getModifiers().isCtrlDown()
+        && ! key.getModifiers().isAltDown()
+        && pitchForTypingKeyCode(key.getKeyCode()).has_value())
+    {
+        updateLiveKeyboardPitches();
+        return false;
+    }
+
     if ((key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)) && ! undoStack.empty())
     {
         redoStack.push_back(NoteSnapshot { activeClip != nullptr ? activeClip->midiNotes : std::vector<MidiNote> {}, selectedNotes, horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex, snapSizeInBeats, false });
@@ -416,8 +645,19 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
 
     if (key == juce::KeyPress::spaceKey)
     {
-        if (onTogglePlayback)
+        // FL-style: space toggles playback; if it's already playing, stop AND rewind
+        // to the start of THIS clip (not project zero). So the second tap of space
+        // sends the cursor back to the beginning of the pattern.
+        const auto isPlayingNow = onRequestPlayingState && onRequestPlayingState();
+        if (isPlayingNow)
+        {
+            if (onStopAndRewindToClipStart) onStopAndRewindToClipStart();
+            else if (onTogglePlayback)       onTogglePlayback();
+        }
+        else if (onTogglePlayback)
+        {
             onTogglePlayback();
+        }
         return true;
     }
 
@@ -442,6 +682,14 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    // Option+Q — quick quantize. Q alone would collide with the laptop-keyboard
+    // note input (QWERTY row plays notes), and Cmd+Q is the OS quit shortcut.
+    if (key == juce::KeyPress('q', juce::ModifierKeys::altModifier, 0))
+    {
+        quantizeSelectedNotes();
+        return true;
+    }
+
     if (key == juce::KeyPress::returnKey || key == juce::KeyPress::escapeKey)
     {
         closeEditor();
@@ -451,9 +699,17 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
     return false;
 }
 
+bool MidiEditorOverlayComponent::keyStateChanged(bool)
+{
+    updateLiveKeyboardPitches();
+    return false;
+}
+
 void MidiEditorOverlayComponent::focusLost(FocusChangeType)
 {
     ignoreNextMouseDown = true;
+    liveKeyboardPitches.clear();
+    repaint();
 }
 
 void MidiEditorOverlayComponent::mouseMove(const juce::MouseEvent& event)
@@ -707,6 +963,51 @@ void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
         showScaleMenu();
     else if (button == &snapButton)
         showSnapMenu();
+    else if (button == &quantizeButton)
+        quantizeSelectedNotes();
+}
+
+bool MidiEditorOverlayComponent::updateLiveKeyboardPitches()
+{
+    static constexpr std::array<int, 39> keyCodes {
+        'q', '2', 'w', '3', 'e', 'r', '5', 't', '6', 'y', '7', 'u', 'i', '9', 'o', '0', 'p', '[', ']', '+', '=',
+        'z', 's', 'x', 'd', 'c', 'v', 'g', 'b', 'h', 'n', 'j', 'm', ',', 'l', '.', ';', '/', '\''
+    };
+
+    std::set<int> nextPitches;
+    const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
+    if (! modifiers.isCommandDown() && ! modifiers.isCtrlDown() && ! modifiers.isAltDown())
+    {
+        for (const auto keyCode : keyCodes)
+        {
+            if (! juce::KeyPress::isKeyCurrentlyDown(keyCode))
+                continue;
+
+            auto pitch = pitchForTypingKeyCode(keyCode);
+            if (! pitch.has_value())
+                continue;
+
+            auto playablePitch = *pitch;
+            if (activeTrack != nullptr)
+                playablePitch += activeTrack->samplerKeyboardOctaveOffset * 12
+                               + activeTrack->samplerTransposeSemitones;
+
+            if (scaleLockEnabled)
+            {
+                if (! isPitchInScale(playablePitch))
+                    playablePitch = snapPitchToScale(playablePitch);
+            }
+
+            nextPitches.insert(juce::jlimit(lowestPitch, highestPitch, playablePitch));
+        }
+    }
+
+    if (nextPitches == liveKeyboardPitches)
+        return false;
+
+    liveKeyboardPitches = std::move(nextPitches);
+    repaint();
+    return true;
 }
 
 juce::Rectangle<int> MidiEditorOverlayComponent::getTopBarBounds() const noexcept
@@ -980,6 +1281,55 @@ void MidiEditorOverlayComponent::deleteSelectedNotes()
     repaint();
 }
 
+void MidiEditorOverlayComponent::quantizeSelectedNotes()
+{
+    if (activeClip == nullptr || activeClip->midiNotes.empty())
+        return;
+
+    // Simple Ableton-style quick quantize:
+    //   * Grid     — current Snap value
+    //   * Start    — pulled to the NEAREST grid line (round, not floor)
+    //   * Length   — preserved; end rides with start
+    //   * Target   — selected notes; if no selection, ALL notes in the clip.
+    const auto snap    = juce::jmax(0.001, snapSizeInBeats);
+    const auto clipLen = activeClip->lengthInBeats;
+    const bool quantizeAll = selectedNotes.empty();
+
+    auto computeNewStart = [&](const MidiNote& n)
+    {
+        const auto snapped = std::round(n.startBeat / snap) * snap;
+        const auto maxStart = juce::jmax(0.0, clipLen - n.lengthInBeats);
+        return juce::jlimit(0.0, maxStart, snapped);
+    };
+
+    bool anyChange = false;
+    for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
+    {
+        if (! quantizeAll && ! selectedNotes.contains(i))
+            continue;
+        const auto& n = activeClip->midiNotes[static_cast<std::size_t>(i)];
+        if (std::abs(computeNewStart(n) - n.startBeat) > 1.0e-6)
+        {
+            anyChange = true;
+            break;
+        }
+    }
+    if (! anyChange)
+        return;
+
+    pushUndoSnapshot();
+
+    for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
+    {
+        if (! quantizeAll && ! selectedNotes.contains(i))
+            continue;
+        auto& n = activeClip->midiNotes[static_cast<std::size_t>(i)];
+        n.startBeat = computeNewStart(n);
+    }
+
+    repaint();
+}
+
 void MidiEditorOverlayComponent::updateSubtitle()
 {
     scaleButton.setButtonText(getScaleName());
@@ -1064,10 +1414,17 @@ void MidiEditorOverlayComponent::updateVelocityFromPosition(int y)
 
 void MidiEditorOverlayComponent::focusViewportAroundClipNotes()
 {
-    if (activeClip == nullptr || activeClip->midiNotes.empty())
-        return;
-
     const auto visible = getVisibleGridViewport();
+
+    if (activeClip == nullptr || activeClip->midiNotes.empty())
+    {
+        const auto laneHeight = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
+        const auto defaultCenterPitch = 60; // C4: useful middle register for new empty MIDI clips.
+        scrollY = (static_cast<double>(pitchToLane(defaultCenterPitch)) * laneHeight)
+                - (static_cast<double>(visible.getHeight()) * 0.5);
+        scrollX = 0.0;
+        return;
+    }
 
     int minPitch = highestPitch;
     int maxPitch = lowestPitch;

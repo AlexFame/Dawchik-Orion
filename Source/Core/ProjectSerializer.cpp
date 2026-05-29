@@ -78,6 +78,9 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("samplerSourceBpm", track.samplerSourceBpm);
     object->setProperty("samplerSourceDurationSeconds", track.samplerSourceDurationSeconds);
     object->setProperty("samplerDetectedBars", track.samplerDetectedBars);
+    object->setProperty("instrumentPluginId", track.instrumentPluginId);
+    object->setProperty("instrumentPluginName", track.instrumentPluginName);
+    object->setProperty("instrumentStateBase64", track.instrumentStateBase64);
 
     juce::Array<juce::var> clips;
     for (const auto& clip : track.clips)

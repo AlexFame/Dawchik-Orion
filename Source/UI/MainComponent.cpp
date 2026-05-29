@@ -3,13 +3,11 @@
 #include <cmath>
 #include <limits>
 #include <map>
-#include <signalsmith-stretch/signalsmith-stretch.h>
 #include <vector>
 
+#include "../Audio/PlaybackSources.h"
+#include "../Audio/WarpEngine.h"
 #include "../Sampler/SamplerEngine.h"
-#if ORION_HAVE_RUBBERBAND
-#include <rubberband/RubberBandStretcher.h>
-#endif
 
 namespace
 {
@@ -33,888 +31,13 @@ constexpr int browserResizeHandleWidth = 10;
 constexpr int transportBrandWidth = 92;
 constexpr int transportClusterWidth = 314;
 constexpr int transportTempoWidth = 178; // BPM + KEY combined card
-constexpr int transportModeWidth = 266;
+constexpr int transportModeWidth = 200; // METRONOME (56) + 8 + LOOP (56) + 8 + COUNT IN (66) + slack
 constexpr int transportUtilityWidth = 236;
 constexpr int transportSectionGap = 12;
 constexpr int transportControlHeight = 62;
 constexpr int transportSectionHeight = 76;
 constexpr int transportContentVerticalNudge = -3;
 constexpr int samplerBottomPanelHeight = 320;
-constexpr const char* warpBackendCacheVersion = ORION_HAVE_RUBBERBAND ? "rubberband_exp1_drain1" : "signalsmith_fallback";
-
-// Convert (rootSemi 0..11, minor) → display name like "Cm" / "F#" / "Bb minor".
-juce::String formatKeyName(int rootSemi, bool minor, bool fullName = false)
-{
-    static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-    if (rootSemi < 0 || rootSemi > 11) return "?";
-    juce::String s(names[rootSemi]);
-    if (fullName) s += minor ? " minor" : " major";
-    else          s += minor ? "m" : "";
-    return s;
-}
-
-struct AudioWarpAnalysis
-{
-    double durationSeconds { 0.0 };
-    double sourceBpm { 0.0 };
-    int detectedBars { 0 };
-    juce::String bpmSource { "none" };
-    double bpmConfidence { 0.0 };
-    bool bpmGuessed { false };
-    int  sourceKeyRoot { -1 };       // -1 = unknown, otherwise 0..11 (C..B)
-    bool sourceKeyIsMinor { false };
-};
-
-// Parses musical key from a filename. Strict — only accepts standalone token candidates
-// (rejects words like "Bass", "Drum" that start with a note letter). Handles "Cm",
-// "C minor", "C_minor", "Cmin", "Cmaj", "C# minor", "Db", "Fsharp", "Bbm" etc.
-struct ParsedKey { int root { -1 }; bool minor { false }; };
-ParsedKey parseKeyFromFileName(const juce::File& file)
-{
-    auto raw  = file.getFileNameWithoutExtension();
-    auto text = juce::String(' ') + raw.toLowerCase().replaceCharacters("_-.()[]", "       ") + juce::String(' ');
-
-    auto letterToSemi = [](juce::juce_wchar c) -> int
-    {
-        switch (c)
-        {
-            case 'c': return 0;
-            case 'd': return 2;
-            case 'e': return 4;
-            case 'f': return 5;
-            case 'g': return 7;
-            case 'a': return 9;
-            case 'b': return 11;
-        }
-        return -1;
-    };
-    auto isLetter = [](juce::juce_wchar c) { return c >= 'a' && c <= 'z'; };
-
-    ParsedKey best { -1, false };
-    int bestScore = 0;
-
-    for (int i = 1; i + 1 < text.length(); ++i)
-    {
-        const auto prev = text[i - 1];
-        if (prev != ' ' && prev != '\t') continue;
-        const auto c = text[i];
-        const auto semi = letterToSemi(c);
-        if (semi < 0) continue;
-
-        int rootSemi = semi;
-        int pos = i + 1;
-        bool hadAccidental = false;
-
-        if (pos < text.length())
-        {
-            const auto a = text[pos];
-            if (a == '#')
-            {
-                rootSemi = (rootSemi + 1) % 12; ++pos; hadAccidental = true;
-            }
-            else if (a == 'b' && pos + 1 < text.length())
-            {
-                const auto next = text[pos + 1];
-                if (next == 'm' || next == ' ' || next == '\t' || (next >= '0' && next <= '9'))
-                {
-                    rootSemi = (rootSemi + 11) % 12; ++pos; hadAccidental = true;
-                }
-            }
-        }
-
-        int modePos = pos;
-        while (modePos < text.length() && (text[modePos] == ' ' || text[modePos] == '\t')) ++modePos;
-        const bool skippedSpace = modePos > pos;
-
-        bool isMinor = false, modeKnown = false, isValid = false;
-
-        if (modePos >= text.length())
-        {
-            isValid = true;
-        }
-        else
-        {
-            const auto rem = text.substring(modePos, juce::jmin(modePos + 6, text.length()));
-            if      (rem.startsWith("minor")) { isMinor = true;  modeKnown = true; isValid = true; }
-            else if (rem.startsWith("major")) { isMinor = false; modeKnown = true; isValid = true; }
-            else if (rem.startsWith("min"))   { isMinor = true;  modeKnown = true; isValid = true; }
-            else if (rem.startsWith("maj"))   { isMinor = false; modeKnown = true; isValid = true; }
-            else if (! skippedSpace && text[pos] == 'm')
-            {
-                if (pos + 1 >= text.length() || ! isLetter(text[pos + 1]))
-                {
-                    isMinor = true; modeKnown = true; isValid = true;
-                }
-            }
-            else if (skippedSpace)
-            {
-                isValid = true;
-            }
-        }
-
-        if (! isValid) continue;
-
-        const int score = (modeKnown ? 1000 : 100) + (hadAccidental ? 50 : 0) + juce::jmax(0, 100 - i);
-        if (score > bestScore)
-        {
-            bestScore = score;
-            best.root = rootSemi;
-            best.minor = isMinor;
-        }
-    }
-    return best;
-}
-
-double parseBpmFromFileName(const juce::File& file)
-{
-    auto text = file.getFileNameWithoutExtension().toLowerCase();
-    const auto bpmIndex = text.indexOf("bpm");
-    if (bpmIndex < 0)
-    {
-        if (! (text.contains("loop") || text.contains("break") || text.contains("drum") || text.contains("beat")))
-            return 0.0;
-
-        double bestBpm = 0.0;
-        int bestDigitCount = 0;
-        juce::String currentNumber;
-
-        const auto textWithDelimiter = text + " ";
-        for (int i = 0; i < textWithDelimiter.length(); ++i)
-        {
-            const auto character = textWithDelimiter[i];
-            if (juce::CharacterFunctions::isDigit(character))
-            {
-                currentNumber += juce::String::charToString(character);
-                continue;
-            }
-
-            if (currentNumber.isNotEmpty())
-            {
-                const auto candidateBpm = currentNumber.getDoubleValue();
-                if (candidateBpm >= 40.0 && candidateBpm <= 260.0 && currentNumber.length() >= bestDigitCount)
-                {
-                    bestBpm = candidateBpm;
-                    bestDigitCount = currentNumber.length();
-                }
-
-                currentNumber.clear();
-            }
-        }
-
-        return bestBpm;
-    }
-
-    auto start = bpmIndex - 1;
-    while (start >= 0 && (juce::CharacterFunctions::isDigit(text[start]) || text[start] == ' ' || text[start] == '_' || text[start] == '-'))
-        --start;
-
-    auto numberText = text.substring(start + 1, bpmIndex).retainCharacters("0123456789").trim();
-    if (numberText.isEmpty())
-        return 0.0;
-
-    const auto bpm = numberText.getDoubleValue();
-    return (bpm >= 40.0 && bpm <= 260.0) ? bpm : 0.0;
-}
-
-AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator)
-{
-    AudioWarpAnalysis result;
-
-    if (! file.existsAsFile() || projectTempoBpm <= 0.0)
-        return result;
-
-    static juce::AudioFormatManager audioFormatManager;
-    static bool formatsRegistered = false;
-    if (! formatsRegistered)
-    {
-        audioFormatManager.registerBasicFormats();
-        formatsRegistered = true;
-    }
-
-    std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(file));
-    if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
-        return result;
-
-    result.durationSeconds = static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
-
-    // Detect key from filename — common patterns like "Cm_120bpm", "F#maj_loop", "Dbm".
-    const auto parsedKey = parseKeyFromFileName(file);
-    result.sourceKeyRoot    = parsedKey.root;
-    result.sourceKeyIsMinor = parsedKey.minor;
-
-    const auto nameBpm = parseBpmFromFileName(file);
-    if (nameBpm > 0.0)
-    {
-        result.sourceBpm = nameBpm;
-        result.bpmSource = "filename";
-        result.bpmConfidence = 1.0;
-        result.bpmGuessed = false;
-        const auto sourceBeats = result.durationSeconds * (nameBpm / 60.0);
-        const auto roundedBeats = std::round(sourceBeats);
-        const auto beatsPerBar = static_cast<double>(juce::jmax(1, numerator));
-        const auto roundedBars = static_cast<int>(std::round(roundedBeats / beatsPerBar));
-        if (roundedBars > 0 && std::abs(roundedBeats - static_cast<double>(roundedBars) * beatsPerBar) <= 0.25)
-            result.detectedBars = roundedBars;
-        DBG("[Warp] " + file.getFileName() + " | bpmSource=filename | confidence=1.0 | sourceBpm=" + juce::String(nameBpm, 1));
-        return result;
-    }
-
-    constexpr double neutralCenter = 128.0;
-    constexpr int commonLoopBars[] = { 1, 2, 3, 4, 6, 8, 12, 16, 24, 32 };
-    double bestBpm = 0.0;
-    int bestBars = 0;
-    double bestScore = std::numeric_limits<double>::max();
-
-    for (const auto bars : commonLoopBars)
-    {
-        const auto loopBeats = static_cast<double>(bars * juce::jmax(1, numerator));
-        const auto candidateBpm = (loopBeats / result.durationSeconds) * 60.0;
-        if (candidateBpm < 70.0 || candidateBpm > 180.0)
-            continue;
-
-        const auto score = std::abs(candidateBpm - neutralCenter);
-        if (score < bestScore)
-        {
-            bestScore = score;
-            bestBpm = candidateBpm;
-            bestBars = bars;
-        }
-    }
-
-    if (bestBars > 0)
-    {
-        result.sourceBpm = bestBpm;
-        result.detectedBars = bestBars;
-        result.bpmSource = "duration-bars";
-        result.bpmGuessed = true;
-
-        // Confidence: how close the detected beats align to perfect bar boundaries
-        const auto beatsPerBar = static_cast<double>(juce::jmax(1, numerator));
-        const auto sourceBeats = result.durationSeconds * (bestBpm / 60.0);
-        const auto barFraction = std::abs(sourceBeats - std::round(sourceBeats / beatsPerBar) * beatsPerBar);
-        result.bpmConfidence = juce::jlimit(0.0, 1.0, 1.0 - barFraction / beatsPerBar);
-
-        DBG("[Warp] " + file.getFileName()
-            + " | bpmSource=duration-bars | confidence=" + juce::String(result.bpmConfidence, 2)
-            + " | sourceBpm=" + juce::String(bestBpm, 1)
-            + " | bars=" + juce::String(bestBars));
-    }
-    else
-    {
-        // No usable BPM candidate — warp cannot be applied
-        DBG("[Warp] " + file.getFileName() + " | bpmSource=none | confidence=0 | sourceBpm=0");
-    }
-
-    return result;
-}
-
-int findStrongestTransientNearStart(const juce::AudioBuffer<float>& buffer, double sampleRate, double searchSeconds)
-{
-    if (buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0 || sampleRate <= 0.0)
-        return 0;
-
-    const auto searchSamples = juce::jmin(buffer.getNumSamples(), static_cast<int>(std::round(sampleRate * searchSeconds)));
-    int bestSample = 0;
-    float bestEnergy = 0.0f;
-
-    for (int sample = 0; sample < searchSamples; ++sample)
-    {
-        float energy = 0.0f;
-        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-        {
-            const auto value = buffer.getSample(channel, sample);
-            energy += value * value;
-        }
-
-        if (energy > bestEnergy)
-        {
-            bestEnergy = energy;
-            bestSample = sample;
-        }
-    }
-
-    return bestSample;
-}
-
-void rotateBufferLeft(juce::AudioBuffer<float>& buffer, int samplesToRotate)
-{
-    const auto totalSamples = buffer.getNumSamples();
-    if (totalSamples <= 1)
-        return;
-
-    samplesToRotate %= totalSamples;
-    if (samplesToRotate <= 0)
-        return;
-
-    juce::AudioBuffer<float> rotated(buffer.getNumChannels(), totalSamples);
-    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-    {
-        rotated.copyFrom(channel, 0, buffer, channel, samplesToRotate, totalSamples - samplesToRotate);
-        rotated.copyFrom(channel, totalSamples - samplesToRotate, buffer, channel, 0, samplesToRotate);
-    }
-
-    buffer = std::move(rotated);
-}
-
-inline float cubicHermite(float t, float y0, float y1, float y2, float y3) noexcept
-{
-    const auto c1 = 0.5f * (y2 - y0);
-    const auto c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-    const auto c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-    return ((c3 * t + c2) * t + c1) * t + y1;
-}
-
-std::vector<int> detectOnsets(const juce::AudioBuffer<float>& buffer, double sampleRate)
-{
-    std::vector<int> onsets;
-    const auto numSamples = buffer.getNumSamples();
-    const auto numChannels = buffer.getNumChannels();
-    if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
-        return onsets;
-
-    const auto windowSize = juce::jmax(1, static_cast<int>(sampleRate * 0.002));
-    const auto envelopeSize = numSamples / windowSize;
-    if (envelopeSize < 3)
-        return onsets;
-
-    std::vector<float> envelope(static_cast<size_t>(envelopeSize), 0.0f);
-    for (int i = 0; i < envelopeSize; ++i)
-    {
-        float energy = 0.0f;
-        const auto start = i * windowSize;
-        const auto end = juce::jmin(start + windowSize, numSamples);
-        for (int s = start; s < end; ++s)
-            for (int ch = 0; ch < numChannels; ++ch)
-            {
-                const auto v = buffer.getSample(ch, s);
-                energy += v * v;
-            }
-        envelope[static_cast<size_t>(i)] = energy / static_cast<float>((end - start) * numChannels);
-    }
-
-    float maxOnset = 0.0f;
-    std::vector<float> onsetFn(static_cast<size_t>(envelopeSize), 0.0f);
-    for (int i = 1; i < envelopeSize; ++i)
-    {
-        onsetFn[static_cast<size_t>(i)] = juce::jmax(0.0f, envelope[static_cast<size_t>(i)] - envelope[static_cast<size_t>(i - 1)]);
-        maxOnset = juce::jmax(maxOnset, onsetFn[static_cast<size_t>(i)]);
-    }
-
-    if (maxOnset <= 0.0f)
-        return onsets;
-
-    const auto threshold = maxOnset * 0.15f;
-    const auto minGapWindows = juce::jmax(1, static_cast<int>(sampleRate * 0.03 / windowSize));
-    int lastPeak = -minGapWindows;
-
-    for (int i = 1; i < envelopeSize - 1; ++i)
-    {
-        if (onsetFn[static_cast<size_t>(i)] > threshold
-            && onsetFn[static_cast<size_t>(i)] >= onsetFn[static_cast<size_t>(i - 1)]
-            && onsetFn[static_cast<size_t>(i)] >= onsetFn[static_cast<size_t>(i + 1)]
-            && (i - lastPeak) >= minGapWindows)
-        {
-            onsets.push_back(i * windowSize);
-            lastPeak = i;
-        }
-    }
-
-    return onsets;
-}
-
-double detectTransientDensity(const juce::AudioBuffer<float>& buffer, double sampleRate)
-{
-    const auto onsets = detectOnsets(buffer, sampleRate);
-    const auto duration = static_cast<double>(buffer.getNumSamples()) / sampleRate;
-    return (duration > 0.05) ? static_cast<double>(onsets.size()) / duration : 0.0;
-}
-
-// Peak-based detector tuned for kick/snare: 1.5ms window, 45% rise threshold, 80ms min gap.
-std::vector<int> detectStrongTransients(const juce::AudioBuffer<float>& buffer, double sampleRate)
-{
-    std::vector<int> transients;
-    const auto numSamples  = buffer.getNumSamples();
-    const auto numChannels = buffer.getNumChannels();
-    if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
-        return transients;
-
-    const auto windowSize    = juce::jmax(1, static_cast<int>(sampleRate * 0.0015));
-    const auto envelopeSize  = numSamples / windowSize;
-    if (envelopeSize < 3)
-        return transients;
-
-    std::vector<float> envelope(static_cast<size_t>(envelopeSize), 0.0f);
-    for (int i = 0; i < envelopeSize; ++i)
-    {
-        float peak = 0.0f;
-        const auto start = i * windowSize;
-        const auto end   = juce::jmin(start + windowSize, numSamples);
-        for (int s = start; s < end; ++s)
-            for (int ch = 0; ch < numChannels; ++ch)
-                peak = juce::jmax(peak, std::abs(buffer.getSample(ch, s)));
-        envelope[static_cast<size_t>(i)] = peak;
-    }
-
-    float maxRise = 0.0f;
-    std::vector<float> rise(static_cast<size_t>(envelopeSize), 0.0f);
-    for (int i = 1; i < envelopeSize; ++i)
-    {
-        rise[static_cast<size_t>(i)] = juce::jmax(0.0f, envelope[static_cast<size_t>(i)] - envelope[static_cast<size_t>(i - 1)]);
-        maxRise = juce::jmax(maxRise, rise[static_cast<size_t>(i)]);
-    }
-    if (maxRise <= 0.0f)
-        return transients;
-
-    const auto threshold    = maxRise * 0.45f;
-    const auto minPeakLevel = 0.12f;
-    const auto minGapWin    = juce::jmax(1, static_cast<int>(sampleRate * 0.08 / windowSize));
-    int lastPeak = -minGapWin;
-
-    for (int i = 1; i < envelopeSize - 1; ++i)
-    {
-        if (rise[static_cast<size_t>(i)] > threshold
-            && envelope[static_cast<size_t>(i)] >= minPeakLevel
-            && rise[static_cast<size_t>(i)] >= rise[static_cast<size_t>(i - 1)]
-            && rise[static_cast<size_t>(i)] >= rise[static_cast<size_t>(i + 1)]
-            && (i - lastPeak) >= minGapWin)
-        {
-            transients.push_back(i * windowSize);
-            lastPeak = i;
-        }
-    }
-    return transients;
-}
-
-// Crest factor = peak / RMS. High (>10) means percussive gaps between hits (drums).
-// Low (<8) means sustained energy (melodic). Reliable discriminator.
-float computeCrestFactor(const juce::AudioBuffer<float>& buffer)
-{
-    const auto numSamples  = buffer.getNumSamples();
-    const auto numChannels = buffer.getNumChannels();
-    if (numSamples <= 0 || numChannels <= 0)
-        return 1.0f;
-    float peakVal = 0.0f, sumSq = 0.0f;
-    for (int ch = 0; ch < numChannels; ++ch)
-        for (int s = 0; s < numSamples; ++s)
-        {
-            const auto v = std::abs(buffer.getSample(ch, s));
-            peakVal = juce::jmax(peakVal, v);
-            sumSq  += v * v;
-        }
-    const auto rms = std::sqrt(sumSq / static_cast<float>(numSamples * numChannels));
-    return rms > 0.0001f ? peakVal / rms : 1.0f;
-}
-
-// Forward declaration of the underlying RubberBand path.
-juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer<float>& source,
-                                                          int outputSamples,
-                                                          double sampleRate,
-                                                          const std::map<std::size_t, std::size_t>& keyframes,
-                                                          double pitchScale);
-
-// Drum warp: pre-emphasis + keyframed RubberBand + de-emphasis.
-// (1) Apply a HF-boost filter to source. HF transient detail is amplified.
-// (2) RubberBand stretches the pre-emphasised source. Its STFT-smearing affects the
-//     loud HF content less severely (because it's loud → survives smearing relatively).
-// (3) Apply symmetric HF-cut to the output. HF returns to natural level, but the
-//     PROPORTION of transient HF energy is higher than without pre-emphasis.
-// Classic technique from tape recording / audio coding to preserve detail through
-// lossy processing. Headroom is consumed during stage 1 so we attenuate to avoid clipping.
-juce::AudioBuffer<float> drumBeatsTailfillBuffer(const juce::AudioBuffer<float>& source,
-                                                  int outputSamples,
-                                                  double sampleRate)
-{
-    const auto sourceSamples = source.getNumSamples();
-    const auto channels      = source.getNumChannels();
-    if (sourceSamples <= 1 || outputSamples <= 1 || channels <= 0 || sampleRate <= 0.0)
-        return source;
-
-    // Pre-emphasis filter: y[n] = x[n] - alpha * x[n-1], boosts HF before stretching.
-    // alpha = 0.85 at 44.1kHz boosts roughly +6dB above 2.5kHz so HF transient detail
-    // survives RubberBand's STFT smearing. Headroom attenuation prevents clipping
-    // from the boost; de-emphasis afterwards restores natural balance.
-    const auto preAlpha   = 0.85f;
-    const auto headroom   = 0.5f;
-    juce::AudioBuffer<float> emphSource(channels, sourceSamples);
-    for (int ch = 0; ch < channels; ++ch)
-    {
-        const auto srcCh = juce::jmin(ch, source.getNumChannels() - 1);
-        float prev = 0.0f;
-        for (int s = 0; s < sourceSamples; ++s)
-        {
-            const auto x = source.getSample(srcCh, s) * headroom;
-            const auto y = x - preAlpha * prev;
-            emphSource.setSample(ch, s, y);
-            prev = x;
-        }
-    }
-
-    // Stretch with keyframes.
-    const auto transients = detectStrongTransients(source, sampleRate);
-    const auto timeRatio  = static_cast<double>(outputSamples) / static_cast<double>(sourceSamples);
-
-    std::map<std::size_t, std::size_t> keyframes;
-    for (auto t : transients)
-        if (t > 0 && t < sourceSamples)
-            keyframes[static_cast<std::size_t>(t)] =
-                static_cast<std::size_t>(std::round(static_cast<double>(t) * timeRatio));
-
-    auto output = rubberBandStretchBufferToLength(emphSource, outputSamples, sampleRate, keyframes, 1.0);
-    if (output.getNumSamples() < outputSamples || output.getNumChannels() != channels)
-        return output;
-
-    // De-emphasis filter: inverse of pre-emphasis, restores natural HF balance.
-    // y[n] = x[n] + alpha * y[n-1]. Also undoes the headroom attenuation.
-    const auto restore = 1.0f / headroom;
-    for (int ch = 0; ch < channels; ++ch)
-    {
-        float prev = 0.0f;
-        for (int s = 0; s < output.getNumSamples(); ++s)
-        {
-            const auto x = output.getSample(ch, s);
-            const auto y = x + preAlpha * prev;
-            prev = y;
-            output.setSample(ch, s, y * restore);
-        }
-    }
-
-    return output;
-}
-
-juce::AudioBuffer<float> sliceStretchBuffer(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
-{
-    const auto numSamples = source.getNumSamples();
-    const auto numChannels = source.getNumChannels();
-
-    auto onsets = detectOnsets(source, sampleRate);
-    if (onsets.empty() || onsets.front() != 0)
-        onsets.insert(onsets.begin(), 0);
-    if (onsets.back() != numSamples)
-        onsets.push_back(numSamples);
-
-    const auto ratio = static_cast<double>(outputSamples) / static_cast<double>(numSamples);
-    constexpr int fadeLen = 64;
-
-    juce::AudioBuffer<float> output(numChannels, outputSamples);
-    output.clear();
-
-    for (size_t i = 0; i + 1 < onsets.size(); ++i)
-    {
-        const auto srcStart = onsets[i];
-        const auto sliceLen = onsets[i + 1] - srcStart;
-        if (sliceLen <= 0)
-            continue;
-
-        const auto dstStart = juce::jlimit(0, outputSamples, static_cast<int>(std::round(static_cast<double>(srcStart) * ratio)));
-        const auto nextDst = (i + 2 < onsets.size())
-            ? juce::jlimit(0, outputSamples, static_cast<int>(std::round(static_cast<double>(onsets[i + 1]) * ratio)))
-            : outputSamples;
-        const auto space = nextDst - dstStart;
-        if (space <= 0)
-            continue;
-
-        const auto copyLen = juce::jmin(sliceLen, space, outputSamples - dstStart);
-        if (copyLen <= 0)
-            continue;
-
-        for (int ch = 0; ch < numChannels; ++ch)
-            output.copyFrom(ch, dstStart, source, ch, srcStart, copyLen);
-
-        const auto actualFade = juce::jmin(fadeLen, copyLen);
-        if (actualFade > 1)
-        {
-            const auto fadeStart = dstStart + copyLen - actualFade;
-            for (int f = 0; f < actualFade; ++f)
-            {
-                const auto gain = 1.0f - static_cast<float>(f) / static_cast<float>(actualFade);
-                for (int ch = 0; ch < numChannels; ++ch)
-                    output.setSample(ch, fadeStart + f, output.getSample(ch, fadeStart + f) * gain);
-            }
-        }
-    }
-
-    DBG("[Warp] Slice mode: " + juce::String(static_cast<int>(onsets.size())) + " slices, ratio=" + juce::String(ratio, 3));
-    return output;
-}
-
-juce::AudioBuffer<float> stretchBufferToLength(const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate)
-{
-    if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
-        return source;
-
-    if (std::abs(outputSamples - source.getNumSamples()) <= 1)
-        return source;
-
-    // Auto-detect: use slice-based warp for transient-heavy content
-    const auto onsets = detectOnsets(source, sampleRate);
-    const auto duration = static_cast<double>(source.getNumSamples()) / sampleRate;
-    const auto density = (duration > 0.05) ? static_cast<double>(onsets.size()) / duration : 0.0;
-    const auto ratio = static_cast<double>(outputSamples) / static_cast<double>(source.getNumSamples());
-    const bool useSlice = onsets.size() >= 3 && density > 4.0;
-
-    DBG("[Warp-Stretch] sourceSamples=" + juce::String(source.getNumSamples())
-        + " targetSamples=" + juce::String(outputSamples)
-        + " ratio=" + juce::String(ratio, 4)
-        + " onsets=" + juce::String(static_cast<int>(onsets.size()))
-        + " density=" + juce::String(density, 2) + "/sec"
-        + " path=" + juce::String(useSlice ? "SLICE" : "SIGNALSMITH"));
-
-    if (useSlice)
-        return sliceStretchBuffer(source, outputSamples, sampleRate);
-
-    const auto channels = source.getNumChannels();
-    juce::AudioBuffer<float> stretched(channels, outputSamples);
-    stretched.clear();
-
-    signalsmith::stretch::SignalsmithStretch<float> stretcher;
-    // Shorter analysis window (80ms vs default 120ms) for tighter transient
-    // reproduction on kicks/snares. Interval kept proportional for overlap.
-    const auto blockSamples = static_cast<int>(sampleRate * 0.08);
-    const auto intervalSamples = static_cast<int>(sampleRate * 0.02);
-    stretcher.configure(channels, blockSamples, intervalSamples);
-    stretcher.setTransposeFactor(1.0f);
-
-    std::vector<const float*> inputChannels(static_cast<std::size_t>(channels));
-    std::vector<float*> outputChannels(static_cast<std::size_t>(channels));
-    for (int channel = 0; channel < channels; ++channel)
-    {
-        inputChannels[static_cast<std::size_t>(channel)] = source.getReadPointer(channel);
-        outputChannels[static_cast<std::size_t>(channel)] = stretched.getWritePointer(channel);
-    }
-
-    if (! stretcher.exact(inputChannels.data(), source.getNumSamples(), outputChannels.data(), outputSamples))
-        return source;
-
-    return stretched;
-}
-
-#if ORION_HAVE_RUBBERBAND
-juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer<float>& source,
-                                                          int outputSamples,
-                                                          double sampleRate,
-                                                          const std::map<std::size_t, std::size_t>& keyframes = {},
-                                                          double pitchScale = 1.0)
-{
-    if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
-        return source;
-
-    // Bypass the stretcher only when neither time nor pitch is being changed.
-    if (std::abs(outputSamples - source.getNumSamples()) <= 1 && std::abs(pitchScale - 1.0) < 0.0001)
-        return source;
-
-    try
-    {
-        const auto channels = source.getNumChannels();
-        const auto sourceSamples = source.getNumSamples();
-        const auto timeRatio = static_cast<double>(outputSamples) / static_cast<double>(sourceSamples);
-
-        RubberBand::RubberBandStretcher stretcher(
-            static_cast<std::size_t>(std::round(sampleRate)),
-            static_cast<std::size_t>(channels),
-            RubberBand::RubberBandStretcher::OptionProcessOffline
-                | RubberBand::RubberBandStretcher::OptionEngineFiner
-                | RubberBand::RubberBandStretcher::OptionTransientsCrisp
-                | RubberBand::RubberBandStretcher::OptionDetectorCompound
-                | RubberBand::RubberBandStretcher::OptionChannelsTogether,
-            timeRatio,
-            pitchScale);
-
-        constexpr int blockSize = 16384;
-        stretcher.setExpectedInputDuration(static_cast<std::size_t>(sourceSamples));
-        stretcher.setMaxProcessSize(static_cast<std::size_t>(blockSize));
-        stretcher.setTimeRatio(timeRatio);
-        stretcher.setPitchScale(pitchScale);
-
-        // Lock transient positions to the warp grid — this is how Ableton's Beats/Complex
-        // modes preserve attacks. RubberBand stretches the gaps between keyframes only;
-        // the transient samples themselves are aligned exactly to their target positions.
-        if (! keyframes.empty())
-            stretcher.setKeyFrameMap(keyframes);
-
-        std::vector<const float*> inputChannels(static_cast<std::size_t>(channels));
-        std::vector<std::vector<float>> collected(static_cast<std::size_t>(channels));
-        for (auto& channel : collected)
-            channel.reserve(static_cast<std::size_t>(juce::jmax(outputSamples, sourceSamples)));
-
-        auto assignInputChannels = [&source, &inputChannels, channels](int startSample)
-        {
-            for (int channel = 0; channel < channels; ++channel)
-                inputChannels[static_cast<std::size_t>(channel)] = source.getReadPointer(channel, startSample);
-        };
-
-        auto drainAvailableOutput = [&]()
-        {
-            while (true)
-            {
-                const auto available = stretcher.available();
-                if (available <= 0)
-                    break;
-
-                const auto framesToRead = static_cast<int>(juce::jmin<std::size_t>(available, static_cast<std::size_t>(blockSize)));
-                juce::AudioBuffer<float> chunk(channels, framesToRead);
-                chunk.clear();
-
-                std::vector<float*> outputChannels(static_cast<std::size_t>(channels));
-                for (int channel = 0; channel < channels; ++channel)
-                    outputChannels[static_cast<std::size_t>(channel)] = chunk.getWritePointer(channel);
-
-                const auto retrieved = stretcher.retrieve(outputChannels.data(), static_cast<std::size_t>(framesToRead));
-                if (retrieved == 0)
-                    break;
-
-                const auto retrievedFrames = static_cast<int>(retrieved);
-                for (int channel = 0; channel < channels; ++channel)
-                {
-                    auto& destination = collected[static_cast<std::size_t>(channel)];
-                    const auto* sourceData = chunk.getReadPointer(channel);
-                    destination.insert(destination.end(), sourceData, sourceData + retrievedFrames);
-                }
-            }
-        };
-
-        for (int position = 0; position < sourceSamples; position += blockSize)
-        {
-            const auto frames = juce::jmin(blockSize, sourceSamples - position);
-            assignInputChannels(position);
-            stretcher.study(inputChannels.data(), static_cast<std::size_t>(frames), position + frames >= sourceSamples);
-        }
-
-        for (int position = 0; position < sourceSamples; position += blockSize)
-        {
-            const auto frames = juce::jmin(blockSize, sourceSamples - position);
-            assignInputChannels(position);
-            stretcher.process(inputChannels.data(), static_cast<std::size_t>(frames), position + frames >= sourceSamples);
-            drainAvailableOutput();
-        }
-
-        drainAvailableOutput();
-
-        const auto writtenSamples = collected.empty() ? 0 : static_cast<int>(collected.front().size());
-        const auto returnedSamples = writtenSamples >= outputSamples ? outputSamples : writtenSamples;
-        juce::AudioBuffer<float> stretched(channels, returnedSamples);
-        for (int channel = 0; channel < channels; ++channel)
-        {
-            if (returnedSamples > 0)
-                stretched.copyFrom(channel, 0, collected[static_cast<std::size_t>(channel)].data(), returnedSamples);
-        }
-
-        DBG("[Warp-RubberBand] sourceSamples=" + juce::String(sourceSamples)
-            + " targetSamples=" + juce::String(outputSamples)
-            + " outputSamples=" + juce::String(stretched.getNumSamples())
-            + " writtenSamples=" + juce::String(writtenSamples)
-            + " timeRatio=" + juce::String(timeRatio, 6)
-            + " pitchScale=1.000000");
-
-        if (writtenSamples != outputSamples)
-            DBG("[Warp-RubberBand] drain length mismatch; not padding silent tail. targetSamples="
-                + juce::String(outputSamples)
-                + " writtenSamples=" + juce::String(writtenSamples));
-
-        return stretched;
-    }
-    catch (...)
-    {
-        DBG("[Warp-RubberBand] failed; falling back to Signalsmith");
-        return stretchBufferToLength(source, outputSamples, sampleRate);
-    }
-}
-#endif
-
-enum class LoopType { drum, melodic };
-
-// Multi-signal loop classifier. Path keywords are the strongest signal;
-// audio analysis (crest + transients) is the fallback for unnamed/ambiguous files.
-LoopType inferLoopType(const juce::String& sourcePath,
-                       const juce::AudioBuffer<float>& source,
-                       double sampleRate)
-{
-    const auto pathLower = sourcePath.toLowerCase();
-
-    static const std::vector<juce::String> drumKeywords {
-        "drum", "kick", "snare", "break", "808", "hihat", "hi-hat", "hi_hat",
-        "perc", "clap", "tom", "ride", "cymbal", "rim", "shaker", "tamb",
-        "conga", "bongo"
-    };
-    static const std::vector<juce::String> melodicKeywords {
-        "melody", "melodic", "lead", "pad", "synth", "piano", "guitar",
-        "violin", "string", "flute", "horn", "sax", "chord", "vocal", "vox",
-        "keys", "arp", "bell", "rhodes"
-    };
-
-    bool drumHit = false, melodicHit = false;
-    for (const auto& kw : drumKeywords)
-        if (pathLower.contains(kw)) { drumHit = true; break; }
-    for (const auto& kw : melodicKeywords)
-        if (pathLower.contains(kw)) { melodicHit = true; break; }
-
-    // Path keyword is the strongest signal — if the file is named clearly, trust the name.
-    if (drumHit && ! melodicHit)  { DBG("[Warp] inferLoopType: drum (path)");    return LoopType::drum; }
-    if (melodicHit && ! drumHit)  { DBG("[Warp] inferLoopType: melodic (path)"); return LoopType::melodic; }
-
-    // Ambiguous (both or neither matched): fall back to audio analysis.
-    const auto strongTransients = detectStrongTransients(source, sampleRate);
-    if (strongTransients.size() < 2)
-    {
-        DBG("[Warp] inferLoopType: melodic (no transients)");
-        return LoopType::melodic;
-    }
-
-    const auto duration = sampleRate > 0.0 ? static_cast<double>(source.getNumSamples()) / sampleRate : 0.0;
-    const auto density  = duration > 0.1   ? static_cast<double>(strongTransients.size()) / duration : 0.0;
-    if (density < 1.0 || density > 8.0)
-    {
-        DBG("[Warp] inferLoopType: melodic (density=" + juce::String(density, 2) + ")");
-        return LoopType::melodic;
-    }
-
-    const auto crest = computeCrestFactor(source);
-    DBG("[Warp] inferLoopType: density=" + juce::String(density, 2)
-        + " crest=" + juce::String(crest, 1)
-        + " -> " + juce::String(crest >= 7.0f ? "drum" : "melodic"));
-    return (crest >= 7.0f) ? LoopType::drum : LoopType::melodic;
-}
-
-juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
-                                                                      int outputSamples,
-                                                                      double sampleRate,
-                                                                      const juce::String& sourcePath = {},
-                                                                      double pitchScale = 1.0)
-{
-    if (inferLoopType(sourcePath, source, sampleRate) == LoopType::drum)
-    {
-        // Drum path doesn't support pitch shift yet (tonal preservation for drums is iffy
-        // anyway). Just stretch via the drum algorithm and ignore pitchScale for now.
-        juce::ignoreUnused(pitchScale);
-        return drumBeatsTailfillBuffer(source, outputSamples, sampleRate);
-    }
-
-    // Melodic: RubberBand with optional pitch shift for key matching.
-#if ORION_HAVE_RUBBERBAND
-    auto stretched = rubberBandStretchBufferToLength(source, outputSamples, sampleRate, {}, pitchScale);
-    if (stretched.getNumSamples() > 0 && stretched.getNumChannels() == source.getNumChannels())
-        return stretched;
-
-    DBG("[Warp-RubberBand] invalid output; falling back to Signalsmith");
-#endif
-    return stretchBufferToLength(source, outputSamples, sampleRate);
-}
-
-juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
-                                                       double sourceBpm,
-                                                       double projectTempoBpm,
-                                                       double sampleRate,
-                                                       const juce::String& sourcePath = {})
-{
-    if (source.getNumSamples() <= 1 || sourceBpm <= 0.0 || projectTempoBpm <= 0.0)
-        return source;
-
-    const auto tempoRatio = sourceBpm / projectTempoBpm;
-    if (std::abs(tempoRatio - 1.0) < 0.001)
-        return source;
-
-    const auto outputSamples = juce::jmax(1, static_cast<int>(std::round(static_cast<double>(source.getNumSamples()) * tempoRatio)));
-    return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate, sourcePath);
-}
 
 juce::String compactInspectorFileName(const juce::File& file, const juce::String& fallbackName)
 {
@@ -1061,10 +184,36 @@ private:
         }
         else if (role == "browser")
         {
-            auto icon = area.reduced(area.getWidth() * 0.24f, area.getHeight() * 0.2f);
-            g.drawRoundedRectangle(icon.reduced(0.5f), 2.0f, 1.8f);
-            g.drawLine(icon.getX(), icon.getY() + icon.getHeight() * 0.33f, icon.getRight(), icon.getY() + icon.getHeight() * 0.33f, 1.4f);
-            g.drawLine(icon.getX() + icon.getWidth() * 0.5f, icon.getY(), icon.getX() + icon.getWidth() * 0.5f, icon.getBottom(), 1.4f);
+            // Ableton-style folder icon: a body with a tab on the top-left. Filled when
+            // toggled on (browser open), outlined when off (browser collapsed).
+            auto icon = area.reduced(area.getWidth() * 0.18f, area.getHeight() * 0.20f);
+            const auto tabHeight  = icon.getHeight() * 0.22f;
+            const auto tabWidth   = icon.getWidth()  * 0.40f;
+            const auto tabSlope   = icon.getWidth()  * 0.08f;
+            const auto corner     = 1.5f;
+
+            juce::Path folder;
+            // Tab (top-left)
+            folder.startNewSubPath(icon.getX(), icon.getY() + tabHeight);
+            folder.lineTo(icon.getX(), icon.getY() + corner);
+            folder.quadraticTo(icon.getX(), icon.getY(), icon.getX() + corner, icon.getY());
+            folder.lineTo(icon.getX() + tabWidth, icon.getY());
+            folder.lineTo(icon.getX() + tabWidth + tabSlope, icon.getY() + tabHeight);
+            // Top edge of the body
+            folder.lineTo(icon.getRight() - corner, icon.getY() + tabHeight);
+            folder.quadraticTo(icon.getRight(), icon.getY() + tabHeight,
+                               icon.getRight(), icon.getY() + tabHeight + corner);
+            // Right edge
+            folder.lineTo(icon.getRight(), icon.getBottom() - corner);
+            folder.quadraticTo(icon.getRight(), icon.getBottom(),
+                               icon.getRight() - corner, icon.getBottom());
+            // Bottom edge
+            folder.lineTo(icon.getX() + corner, icon.getBottom());
+            folder.quadraticTo(icon.getX(), icon.getBottom(),
+                               icon.getX(), icon.getBottom() - corner);
+            folder.closeSubPath();
+
+            g.fillPath(folder);
         }
         else if (role == "save")
         {
@@ -1097,536 +246,6 @@ TransportButtonLookAndFeel transportButtonLookAndFeel;
 
 namespace orion
 {
-class MainComponent::BufferPreviewSource final : public juce::PositionableAudioSource
-{
-public:
-    BufferPreviewSource(juce::AudioBuffer<float> previewBuffer, double sourceSampleRate)
-        : buffer(std::move(previewBuffer)),
-          sampleRate(sourceSampleRate)
-    {
-    }
-
-    void prepareToPlay(int, double) override {}
-    void releaseResources() override {}
-
-    void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
-    {
-        info.clearActiveBufferRegion();
-
-        if (buffer.getNumSamples() == 0 || info.numSamples <= 0)
-            return;
-
-        const auto remaining = juce::jmax(0, buffer.getNumSamples() - static_cast<int>(positionSamples));
-        const auto samplesToCopy = juce::jmin(info.numSamples, remaining);
-        if (samplesToCopy <= 0)
-            return;
-
-        for (int channel = 0; channel < info.buffer->getNumChannels(); ++channel)
-        {
-            const auto sourceChannel = juce::jmin(channel, buffer.getNumChannels() - 1);
-            info.buffer->copyFrom(channel, info.startSample, buffer, sourceChannel, static_cast<int>(positionSamples), samplesToCopy);
-        }
-
-        positionSamples += samplesToCopy;
-    }
-
-    void setNextReadPosition(juce::int64 newPosition) override
-    {
-        positionSamples = juce::jlimit<juce::int64>(0, buffer.getNumSamples(), newPosition);
-    }
-
-    juce::int64 getNextReadPosition() const override
-    {
-        return positionSamples;
-    }
-
-    juce::int64 getTotalLength() const override
-    {
-        return buffer.getNumSamples();
-    }
-
-    bool isLooping() const override
-    {
-        return false;
-    }
-
-    double getSampleRate() const noexcept
-    {
-        return sampleRate;
-    }
-
-private:
-    juce::AudioBuffer<float> buffer;
-    double sampleRate { 44100.0 };
-    juce::int64 positionSamples { 0 };
-};
-
-class MainComponent::ArrangementPlaybackSource final : public juce::AudioSource
-{
-public:
-    ArrangementPlaybackSource(ProjectState& state, TransportEngine& engine, juce::AudioFormatManager& formatManager)
-        : project(state),
-          transport(engine),
-          audioFormatManager(formatManager),
-          samplerEngine(audioFormatManager,
-                        [](const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate, const juce::String& sourcePath)
-                        {
-                            return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate, sourcePath);
-                        })
-    {
-    }
-
-    void prepareToPlay(int, double newSampleRate) override
-    {
-        outputSampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
-    }
-
-    void releaseResources() override {}
-
-    void syncToTransportPosition() noexcept
-    {
-        currentTimelineBeat = transport.getPlayheadBeat();
-        wasPlaying = false;
-    }
-
-    void samplerNoteOn(const juce::String& sourcePath,
-                       int midiNote,
-                       int velocity,
-                       int rootMidiNote,
-                       double gainDb,
-                       SamplerPlaybackMode playbackMode,
-                       int sliceIndex,
-                       int sliceCount,
-                       bool warpEnabled,
-                       double sourceBpm)
-    {
-        samplerEngine.noteOn(sourcePath,
-                             midiNote,
-                             velocity,
-                             rootMidiNote,
-                             gainDb,
-                             playbackMode,
-                             sliceIndex,
-                             sliceCount,
-                             warpEnabled,
-                             sourceBpm,
-                             project.getTempoBpm());
-    }
-
-    void samplerNoteOff(int midiNote, SamplerPlaybackMode playbackMode)
-    {
-        samplerEngine.noteOff(midiNote, playbackMode);
-    }
-
-    void allSamplerNotesOff()
-    {
-        samplerEngine.allNotesOff();
-    }
-
-    void prepareWarpCacheForCurrentTempo()
-    {
-        const auto beatsPerSecond = project.getTempoBpm() / 60.0;
-        if (beatsPerSecond <= 0.0)
-            return;
-
-        for (const auto& track : project.getTracks())
-        {
-            for (const auto& clip : track.clips)
-            {
-                if (clip.type != ClipType::audio || ! clip.warpEnabled || clip.sourcePath.isEmpty() || clip.lengthInBeats <= 0.0)
-                    continue;
-
-                if (const auto* originalAudioData = getAudioFileData(clip.sourcePath))
-                    juce::ignoreUnused(getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, true));
-            }
-        }
-    }
-
-    void renderOfflineBlock(juce::AudioBuffer<float>& outputBuffer,
-                            int startSample,
-                            int numSamples,
-                            double blockStartBeat,
-                            double renderSampleRate)
-    {
-        if (startSample < 0 || numSamples <= 0 || renderSampleRate <= 0.0)
-            return;
-
-        const auto availableSamples = outputBuffer.getNumSamples() - startSample;
-        if (availableSamples <= 0)
-            return;
-
-        const auto samplesToRender = juce::jmin(numSamples, availableSamples);
-        renderAudioIntoBuffer(outputBuffer, startSample, samplesToRender, blockStartBeat, renderSampleRate, false, false);
-    }
-
-    void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
-    {
-        info.clearActiveBufferRegion();
-
-        if (outputSampleRate <= 0.0 || info.numSamples <= 0)
-            return;
-
-        if (! transport.isPlaying())
-        {
-            currentTimelineBeat = transport.getPlayheadBeat();
-            wasPlaying = false;
-            samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
-            return;
-        }
-
-        const auto beatsPerSecond = project.getTempoBpm() / 60.0;
-        if (beatsPerSecond <= 0.0)
-            return;
-
-        const auto loopActive = transport.isLoopEnabled() && project.hasLoopRange();
-        const auto loopStartBeat = project.getLoopStartBeat();
-        const auto loopEndBeat = project.getLoopEndBeat();
-        const auto loopSpanBeats = juce::jmax(1.0, loopEndBeat - loopStartBeat);
-        if (! loopActive && project.getContentEndInBeats() <= 0.0)
-        {
-            samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
-            return;
-        }
-
-        if (! wasPlaying)
-        {
-            currentTimelineBeat = transport.getPlayheadBeat();
-            wasPlaying = true;
-        }
-
-        const auto beatAdvancePerSample = beatsPerSecond / outputSampleRate;
-        renderAudioIntoBuffer(*info.buffer, info.startSample, info.numSamples, currentTimelineBeat, outputSampleRate, loopActive, ! loopActive);
-        samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
-
-        currentTimelineBeat += static_cast<double>(info.numSamples) * beatAdvancePerSample;
-        while (loopActive && currentTimelineBeat >= loopEndBeat)
-            currentTimelineBeat = loopStartBeat + std::fmod(currentTimelineBeat - loopStartBeat, loopSpanBeats);
-        if (! loopActive)
-        {
-            const auto repeatEndBeat = project.getContentEndInBeats();
-            while (repeatEndBeat > 0.0 && currentTimelineBeat >= repeatEndBeat)
-                currentTimelineBeat = std::fmod(currentTimelineBeat, repeatEndBeat);
-        }
-    }
-
-private:
-    struct AudioFileData
-    {
-        juce::AudioBuffer<float> buffer;
-        double sampleRate { 44100.0 };
-    };
-
-    void renderAudioIntoBuffer(juce::AudioBuffer<float>& targetBuffer,
-                               int startSample,
-                               int numSamples,
-                               double blockStartBeat,
-                               double renderSampleRate,
-                               bool wrapToLoop,
-                               bool wrapToProjectEnd)
-    {
-        const auto beatsPerSecond = project.getTempoBpm() / 60.0;
-        if (beatsPerSecond <= 0.0 || renderSampleRate <= 0.0 || numSamples <= 0)
-            return;
-
-        const auto loopStartBeat = project.getLoopStartBeat();
-        const auto loopEndBeat = project.getLoopEndBeat();
-        const auto loopSpanBeats = juce::jmax(1.0, loopEndBeat - loopStartBeat);
-        const auto repeatEndBeat = project.getContentEndInBeats();
-        const auto wrapToProject = wrapToProjectEnd && ! wrapToLoop && repeatEndBeat > 0.0;
-        const auto beatAdvancePerSample = beatsPerSecond / renderSampleRate;
-        const auto& tracks = project.getTracks();
-
-        bool anySoloActive = false;
-        for (const auto& soloTrack : tracks)
-        {
-            if (soloTrack.solo)
-            {
-                anySoloActive = true;
-                break;
-            }
-
-            for (const auto& soloClip : soloTrack.clips)
-            {
-                if (soloClip.solo)
-                {
-                    anySoloActive = true;
-                    break;
-                }
-            }
-
-            if (anySoloActive)
-                break;
-        }
-
-        for (const auto& track : tracks)
-        {
-            if (track.muted)
-                continue;
-
-            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
-            for (const auto& clip : track.clips)
-            {
-                if (clip.muted)
-                    continue;
-                if (anySoloActive && ! track.solo && ! clip.solo)
-                    continue;
-
-                if (clip.type == ClipType::midi)
-                {
-                    samplerEngine.renderMidiClip(targetBuffer,
-                                                 startSample,
-                                                 numSamples,
-                                                 blockStartBeat,
-                                                 renderSampleRate,
-                                                 beatsPerSecond,
-                                                 loopStartBeat,
-                                                 loopEndBeat,
-                                                 repeatEndBeat,
-                                                 wrapToLoop,
-                                                 wrapToProject,
-                                                 track,
-                                                 clip);
-                    continue;
-                }
-
-                if (clip.type != ClipType::audio || clip.sourcePath.isEmpty())
-                    continue;
-
-                const auto* originalAudioData = getAudioFileData(clip.sourcePath);
-                if (originalAudioData == nullptr || originalAudioData->buffer.getNumSamples() <= 0 || originalAudioData->sampleRate <= 0.0)
-                    continue;
-
-                const auto clipStartBeat = clip.startBeat;
-                const auto clipEndBeat = clip.startBeat + clip.lengthInBeats;
-                const auto linearGain = juce::Decibels::decibelsToGain(static_cast<float>(clip.gainDb)) * trackGain;
-                const auto* audioData = originalAudioData;
-                if (clip.warpEnabled && clip.lengthInBeats > 0.0)
-                {
-                    if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
-                        audioData = warpedAudioData;
-                    else
-                        continue;
-                }
-
-                for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
-                {
-                    auto timelineBeat = blockStartBeat + static_cast<double>(sampleIndex) * beatAdvancePerSample;
-
-                    if (wrapToLoop)
-                    {
-                        while (timelineBeat >= loopEndBeat)
-                            timelineBeat = loopStartBeat + std::fmod(timelineBeat - loopStartBeat, loopSpanBeats);
-                    }
-                    else if (wrapToProject)
-                    {
-                        while (timelineBeat >= repeatEndBeat)
-                            timelineBeat = std::fmod(timelineBeat, repeatEndBeat);
-                    }
-
-                    if (! wrapToLoop && ! wrapToProject && timelineBeat >= repeatEndBeat)
-                        continue;
-
-                    if (timelineBeat < clipStartBeat || timelineBeat >= clipEndBeat)
-                        continue;
-
-                    const auto clipBeatOffset = timelineBeat - clipStartBeat;
-                    const auto clipSeconds = clipBeatOffset / beatsPerSecond;
-                    const auto sourceSamplePosition = clipSeconds * audioData->sampleRate;
-
-                    const auto sourceIndex = static_cast<int>(sourceSamplePosition);
-                    if (sourceIndex < 0 || sourceIndex >= audioData->buffer.getNumSamples())
-                        continue;
-
-                    const auto sourceFraction = static_cast<float>(sourceSamplePosition - static_cast<double>(sourceIndex));
-                    const auto lastSample = audioData->buffer.getNumSamples() - 1;
-                    const auto i0 = juce::jmax(0, sourceIndex - 1);
-                    const auto i1 = sourceIndex;
-                    const auto i2 = juce::jmin(sourceIndex + 1, lastSample);
-                    const auto i3 = juce::jmin(sourceIndex + 2, lastSample);
-                    for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
-                    {
-                        const auto sourceChannel = juce::jmin(channel, audioData->buffer.getNumChannels() - 1);
-                        const auto y0 = audioData->buffer.getSample(sourceChannel, i0);
-                        const auto y1 = audioData->buffer.getSample(sourceChannel, i1);
-                        const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
-                        const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
-                        const auto sampleValue = cubicHermite(sourceFraction, y0, y1, y2, y3) * linearGain;
-                        targetBuffer.addSample(channel, startSample + sampleIndex, sampleValue * 0.75f);
-                    }
-                }
-            }
-        }
-    }
-
-    const AudioFileData* getAudioFileData(const juce::String& path)
-    {
-        const auto key = path.toStdString();
-        if (const auto it = audioCache.find(key); it != audioCache.end())
-            return it->second.get();
-
-        juce::File file(path);
-        if (! file.existsAsFile())
-            return nullptr;
-
-        std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(file));
-        if (reader == nullptr || reader->lengthInSamples <= 0 || reader->sampleRate <= 0.0 || reader->numChannels <= 0)
-            return nullptr;
-
-        auto data = std::make_unique<AudioFileData>();
-        data->sampleRate = reader->sampleRate;
-        data->buffer.setSize(static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
-        reader->read(&data->buffer, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
-
-        const auto* dataPtr = data.get();
-        audioCache.emplace(key, std::move(data));
-        return dataPtr;
-    }
-
-    // Semitone offset to transpose the clip from its detected source key into the
-    // current project key. Picks the shortest direction (max 6 semitones either way).
-    int computeKeyShiftSemitones(const TimelineClip& clip) const noexcept
-    {
-        if (! clip.keyShiftEnabled) return 0;
-        if (clip.sourceKeyRoot < 0)  return 0;
-        int diff = project.getKeyRoot() - clip.sourceKeyRoot;
-        while (diff > 6)  diff -= 12;
-        while (diff < -6) diff += 12;
-        return diff;
-    }
-
-    const AudioFileData* getWarpedAudioFileData(const TimelineClip& clip,
-                                                const AudioFileData& originalData,
-                                                double beatsPerSecond,
-                                                bool allowBuild)
-    {
-        const auto warpLengthInBeats = clip.warpTargetLengthInBeats > 0.0 ? clip.warpTargetLengthInBeats : clip.lengthInBeats;
-        if (beatsPerSecond <= 0.0 || originalData.sampleRate <= 0.0 || warpLengthInBeats <= 0.0)
-            return nullptr;
-
-        const auto targetSamples   = juce::jmax(1, static_cast<int>(std::round((warpLengthInBeats / beatsPerSecond) * originalData.sampleRate)));
-        const auto semitonesShift  = computeKeyShiftSemitones(clip);
-        const auto pitchScale      = std::pow(2.0, static_cast<double>(semitonesShift) / 12.0);
-        const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples)
-                       + "|p" + std::to_string(semitonesShift)
-                       + "|" + warpBackendCacheVersion;
-        if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
-        {
-            DBG("[Warp-Cache] HIT key=" + juce::String(key));
-            return it->second.get();
-        }
-
-        if (! allowBuild)
-            return nullptr;
-
-        DBG("[Warp-Cache] MISS key=" + juce::String(key) + " building... pitchSemi=" + juce::String(semitonesShift));
-
-        auto data = std::make_unique<AudioFileData>();
-        data->sampleRate = originalData.sampleRate;
-        data->buffer = stretchBufferToLengthWithExperimentalBackend(originalData.buffer, targetSamples, originalData.sampleRate, clip.sourcePath, pitchScale);
-
-        const auto* dataPtr = data.get();
-        warpedAudioCache.emplace(key, std::move(data));
-        return dataPtr;
-    }
-
-    ProjectState& project;
-    TransportEngine& transport;
-    juce::AudioFormatManager& audioFormatManager;
-    SamplerEngine samplerEngine;
-    double outputSampleRate { 44100.0 };
-    double currentTimelineBeat { 0.0 };
-    bool wasPlaying { false };
-    std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
-    std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
-};
-
-class MainComponent::ClickTrackSource final : public juce::AudioSource
-{
-public:
-    ClickTrackSource(ProjectState& state,
-                     TransportEngine& engine,
-                     juce::TextButton& metronomeToggle)
-        : project(state),
-          transport(engine),
-          metronomeButton(metronomeToggle)
-    {
-    }
-
-    void prepareToPlay(int, double newSampleRate) override
-    {
-        sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
-    }
-
-    void releaseResources() override {}
-
-    void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
-    {
-        if (info.buffer == nullptr || info.numSamples <= 0)
-            return;
-
-        const auto shouldTick = metronomeButton.getToggleState() || transport.isCountInActive();
-        if (! shouldTick || (! transport.isPlaying() && ! transport.isCountInActive()) || sampleRate <= 0.0)
-        {
-            lastBeatIndex = transport.isCountInActive() ? static_cast<int>(std::floor(transport.getClickBeat()))
-                                                        : static_cast<int>(std::floor(transport.getPlayheadBeat()));
-            currentAmplitude = 0.0f;
-            return;
-        }
-
-        const auto beatsPerSecond = project.getTempoBpm() / 60.0;
-        if (beatsPerSecond <= 0.0)
-            return;
-
-        const auto beatAdvancePerSample = beatsPerSecond / sampleRate;
-        auto beatPosition = transport.getClickBeat();
-        const auto loopActive = transport.isLoopEnabled() && project.hasLoopRange() && ! transport.isCountInActive();
-        const auto loopStartBeat = project.getLoopStartBeat();
-        const auto loopEndBeat = project.getLoopEndBeat();
-        const auto loopSpanBeats = juce::jmax(1.0, loopEndBeat - loopStartBeat);
-
-        for (int sampleIndex = 0; sampleIndex < info.numSamples; ++sampleIndex)
-        {
-            if (loopActive)
-            {
-                while (beatPosition >= loopEndBeat)
-                    beatPosition = loopStartBeat + std::fmod(beatPosition - loopStartBeat, loopSpanBeats);
-            }
-
-            const auto beatIndex = static_cast<int>(std::floor(beatPosition + 0.0001));
-            if (beatIndex != lastBeatIndex)
-            {
-                lastBeatIndex = beatIndex;
-                clickPhase = 0.0;
-                const auto beatInBar = beatIndex % juce::jmax(1, project.getNumerator());
-                clickFrequency = (beatInBar == 0) ? 1760.0 : 1320.0;
-                currentAmplitude = (beatInBar == 0) ? 0.42f : 0.28f;
-            }
-
-            float clickSample = 0.0f;
-            if (currentAmplitude > 0.0005f)
-            {
-                clickSample = static_cast<float>(std::sin(clickPhase) * currentAmplitude);
-                clickPhase += juce::MathConstants<double>::twoPi * clickFrequency / sampleRate;
-                currentAmplitude *= 0.9962f;
-            }
-
-            for (int channel = 0; channel < info.buffer->getNumChannels(); ++channel)
-                info.buffer->addSample(channel, info.startSample + sampleIndex, clickSample);
-
-            beatPosition += beatAdvancePerSample;
-        }
-    }
-
-private:
-    ProjectState& project;
-    TransportEngine& transport;
-    juce::TextButton& metronomeButton;
-    double sampleRate { 44100.0 };
-    double clickPhase { 0.0 };
-    double clickFrequency { 1320.0 };
-    float currentAmplitude { 0.0f };
-    int lastBeatIndex { -1 };
-};
 
 class SettingsContent final : public juce::Component
 {
@@ -1800,6 +419,13 @@ MainComponent::MainComponent()
     statusLabel.setFont(juce::FontOptions(16.0f, juce::Font::bold));
     addAndMakeVisible(statusLabel);
 
+    pluginScanNameLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.72f));
+    pluginScanNameLabel.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+    pluginScanNameLabel.setJustificationType(juce::Justification::centred);
+    pluginScanNameLabel.setInterceptsMouseClicks(false, false);
+    pluginScanNameLabel.setVisible(false);
+    addAndMakeVisible(pluginScanNameLabel);
+
     tempoLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
     addAndMakeVisible(tempoLabel);
 
@@ -1954,6 +580,7 @@ MainComponent::MainComponent()
     playButton.setComponentID("play");
     stopButton.setComponentID("stop");
     recordButton.setComponentID("record");
+    recordButton.addMouseListener(this, false);
     rewindButton.setComponentID("undo");
     undoButton.setComponentID("undo");
     redoButton.setComponentID("redo");
@@ -1978,8 +605,14 @@ MainComponent::MainComponent()
         addAndMakeVisible(*button);
     }
 
-    for (auto* toggleButton : { &metronomeButton, &loopButton, &countInButton })
+    for (auto* toggleButton : { &metronomeButton, &loopButton, &countInButton, &browserButton })
         toggleButton->setClickingTogglesState(true);
+    // Replaced by the small triangle arrow in the top-left corner.
+    browserButton.setVisible(false);
+
+    browserCollapseArrow.setToggleState(browserPanelVisible, juce::dontSendNotification);
+    browserCollapseArrow.addListener(this);
+    addAndMakeVisible(browserCollapseArrow);
     recordButton.setClickingTogglesState(true);
     metronomeButton.setToggleState(false, juce::dontSendNotification);
     loopButton.setToggleState(false, juce::dontSendNotification);
@@ -1996,7 +629,8 @@ MainComponent::MainComponent()
     addAndMakeVisible(samplerPanel);
     audioFormatManager.registerBasicFormats();
     arrangementPlaybackSource = std::make_unique<ArrangementPlaybackSource>(projectState, transportEngine, audioFormatManager);
-    clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine, metronomeButton);
+    clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine,
+                                                          [this]() { return metronomeButton.getToggleState(); });
     audioDeviceManager.initialise(0, 2, nullptr, true);
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
     masterMixerSource.addInputSource(&previewTransportSource, false);
@@ -2016,6 +650,15 @@ MainComponent::MainComponent()
     browserPanel.onActivateItem = [this](const BrowserItem& item)
     {
         loadBrowserItemIntoSampler(item);
+    };
+    browserPanel.onCloseRequested = [this]
+    {
+        // Wired to the × button inside the browser header — collapses the panel and
+        // lets the playlist expand into the freed horizontal space.
+        browserPanelVisible = false;
+        browserPanel.setVisible(false);
+        resized();
+        repaint();
     };
     samplerPanel.onClose = [this]()
     {
@@ -2046,29 +689,75 @@ MainComponent::MainComponent()
                                    double sourceBpm)
     {
         if (arrangementPlaybackSource != nullptr)
-            arrangementPlaybackSource->samplerNoteOn(sourcePath,
-                                                     midiNote,
-                                                     velocity,
-                                                     rootMidiNote,
-                                                     gainDb,
-                                                     playbackMode,
-                                                     sliceIndex,
-                                                     sliceCount,
-                                                     warpEnabled,
-                                                     sourceBpm);
+        {
+            const auto activeTrack = samplerPanel.getActiveTrackIndex();
+            if (activeTrack >= 0 && arrangementPlaybackSource->hasTrackInstrument(activeTrack))
+                arrangementPlaybackSource->instrumentLiveNoteOn(activeTrack, midiNote, velocity);
+            else
+                arrangementPlaybackSource->samplerNoteOn(sourcePath,
+                                                         midiNote,
+                                                         velocity,
+                                                         rootMidiNote,
+                                                         gainDb,
+                                                         playbackMode,
+                                                         sliceIndex,
+                                                         sliceCount,
+                                                         warpEnabled,
+                                                         sourceBpm);
+        }
+        recordNoteOn(midiNote, velocity);
     };
     samplerPanel.onNoteOff = [this](int midiNote, SamplerPlaybackMode playbackMode)
     {
         if (arrangementPlaybackSource != nullptr)
-            arrangementPlaybackSource->samplerNoteOff(midiNote, playbackMode);
+        {
+            const auto activeTrack = samplerPanel.getActiveTrackIndex();
+            if (activeTrack >= 0 && arrangementPlaybackSource->hasTrackInstrument(activeTrack))
+                arrangementPlaybackSource->instrumentLiveNoteOff(activeTrack, midiNote);
+            else
+                arrangementPlaybackSource->samplerNoteOff(midiNote, playbackMode);
+        }
+        recordNoteOff(midiNote);
     };
     samplerPanel.onAllNotesOff = [this]()
     {
         if (arrangementPlaybackSource != nullptr)
+        {
             arrangementPlaybackSource->allSamplerNotesOff();
+            arrangementPlaybackSource->allInstrumentNotesOff();
+        }
     };
     midiEditorOverlay.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
     midiEditorOverlay.onTogglePlayback = [this]() { toggleTransportFromUi(); };
+    midiEditorOverlay.onStopAndRewindToClipStart = [this]()
+    {
+        // Stop playback and set the playhead to the open clip's start beat.
+        finalizeRecordingClip();
+        if (const auto* clip = getSelectedTimelineClip())
+        {
+            if (arrangementPlaybackSource != nullptr)
+            {
+                arrangementPlaybackSource->allSamplerNotesOff();
+                arrangementPlaybackSource->allInstrumentNotesOff();
+            }
+            transportController.stop(
+                [this]() { stopBrowserPreview(true); },
+                [this]() { if (arrangementPlaybackSource != nullptr) arrangementPlaybackSource->syncToTransportPosition(); });
+            transportEngine.setPlayheadBeat(clip->startBeat);
+            if (arrangementPlaybackSource != nullptr)
+            {
+                arrangementPlaybackSource->allSamplerNotesOff();
+                arrangementPlaybackSource->allInstrumentNotesOff();
+                arrangementPlaybackSource->syncToTransportPosition();
+            }
+            updateTransportLabels();
+            arrangementTimeline.repaint();
+        }
+        else
+        {
+            stopTransportFromUi();
+        }
+    };
     midiEditorOverlay.onRequestPlayheadBeat = [this]() { return transportEngine.getPlayheadBeat(); };
     midiEditorOverlay.onRequestPlayingState = [this]() { return transportEngine.isPlaying(); };
     arrangementTimeline.onMidiClipDoubleClick = [this](int trackIndex, int clipIndex)
@@ -2098,12 +787,15 @@ MainComponent::MainComponent()
             {
                 const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
                 // FL-style sampler arm: any selection of a MIDI track with a sampler
-                // arms it, whether the user clicked a clip OR just the track header.
-                if (track.isMidiTrack && track.samplerSourcePath.isNotEmpty())
+                // OR a hosted VST instrument arms it for keyboard play, whether the
+                // user clicked a clip OR just the track header.
+                const bool hasSampler    = track.samplerSourcePath.isNotEmpty();
+                const bool hasInstrument = track.instrumentPluginId.isNotEmpty();
+                if (track.isMidiTrack && (hasSampler || hasInstrument))
                 {
-                    // Only re-open the visible panel when a clip was clicked (matches
-                    // double-click expectation for opening). Bare header click just arms.
-                    if (clipIndex >= 0)
+                    // Only pop the visible sampler panel for sampler tracks when a clip
+                    // was clicked. Instrument-only tracks arm silently (no sampler UI).
+                    if (clipIndex >= 0 && hasSampler)
                     {
                         samplerPanel.openTrackIndex(trackIndex);
                         resized();
@@ -2157,7 +849,16 @@ MainComponent::MainComponent()
     };
     arrangementTimeline.onTrackHeaderDoubleClick = [this](int trackIndex)
     {
-        openSamplerForTrackIfAvailable(trackIndex);
+        // Double-clicking an instrument track opens its plugin editor; otherwise
+        // fall back to the sampler panel for sampled tracks.
+        if (arrangementPlaybackSource != nullptr && arrangementPlaybackSource->hasTrackInstrument(trackIndex))
+            openInstrumentEditor(trackIndex);
+        else
+            openSamplerForTrackIfAvailable(trackIndex);
+    };
+    arrangementTimeline.onTrackHeaderRightClick = [this](int trackIndex)
+    {
+        showTrackInstrumentMenu(trackIndex);
     };
 
     resetToPlaylistView();
@@ -2175,6 +876,10 @@ MainComponent::~MainComponent()
     {
         button->setLookAndFeel(nullptr);
     }
+
+    // Editor windows borrow plugin instances owned by the playback source — close
+    // them before that source (and its instruments) is destroyed.
+    closeAllInstrumentEditors();
 
     stopBrowserPreview(true);
     masterMixerSource.removeAllInputs();
@@ -2250,6 +955,19 @@ void MainComponent::paint(juce::Graphics& g)
                    static_cast<float>(x), static_cast<float>(centeredTransportCluster.getBottom() - 6), 1.0f);
     }
 
+    if (pluginScanVisible)
+    {
+        auto scanArea = getLocalBounds().reduced(26);
+        scanArea = scanArea.withY(topStrip.getBottom() - 15).withHeight(11);
+        const auto barArea = scanArea.removeFromBottom(4).toFloat();
+
+        g.setColour(juce::Colours::black.withAlpha(0.22f));
+        g.fillRoundedRectangle(barArea, 2.0f);
+        g.setColour(accentColour.withAlpha(0.95f));
+        g.fillRoundedRectangle(barArea.withWidth(barArea.getWidth() * static_cast<float>(juce::jlimit(0.0, 1.0, pluginScanProgress))),
+                               2.0f);
+    }
+
     const auto bpmHalf = centeredBpmCard.withTrimmedRight(centeredBpmCard.getWidth() / 2);
     const auto keyHalf = cachedKeyCardBounds;
 
@@ -2280,32 +998,37 @@ void MainComponent::paint(juce::Graphics& g)
         g.drawText("KEY", keyCaptionBounds, juce::Justification::centredTop);
     }
 
-    auto workArea = bounds.withTrimmedTop(20);
-    auto browserPanelBounds = workArea.removeFromLeft(browserPanelWidth);
+    // Reclaim as much vertical space as possible for the playlist (Studio One-style).
+    // Old layout reserved 20px above the cards, plus a 66px "Playlist" header inside,
+    // plus 18px paddings — all gone now. The cards hug the work area edges tightly.
+    auto workArea = bounds.withTrimmedTop(8);
+    juce::Rectangle<int> browserPanelBounds;
+    if (browserPanelVisible)
+        browserPanelBounds = workArea.removeFromLeft(browserPanelWidth);
     auto arrangementPanel = workArea;
 
     g.setColour(panelColour);
-    for (const auto panel : { browserPanelBounds, arrangementPanel })
+    auto paintPanel = [&](juce::Rectangle<int> panel)
     {
-        g.fillRoundedRectangle(panel.toFloat(), 20.0f);
-        g.setColour(panelStroke);
-        g.drawRoundedRectangle(panel.toFloat(), 20.0f, 1.0f);
+        if (panel.isEmpty())
+            return;
         g.setColour(panelColour);
+        g.fillRoundedRectangle(panel.toFloat(), 14.0f);
+        g.setColour(panelStroke);
+        g.drawRoundedRectangle(panel.toFloat(), 14.0f, 1.0f);
+    };
+    if (browserPanelVisible)
+        paintPanel(browserPanelBounds);
+    paintPanel(arrangementPanel);
+
+    if (browserPanelVisible)
+    {
+        const auto resizeHandleBounds = getBrowserResizeHandleBounds();
+        g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.18f : 0.08f));
+        g.fillRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f);
+        g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.42f : 0.18f));
+        g.drawRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f, 1.0f);
     }
-
-    const auto resizeHandleBounds = getBrowserResizeHandleBounds();
-    g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.18f : 0.08f));
-    g.fillRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f);
-    g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.42f : 0.18f));
-    g.drawRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f, 1.0f);
-
-    auto arrangementHeader = arrangementPanel.reduced(18);
-    g.setColour(juce::Colours::white.withAlpha(0.92f));
-    g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
-    g.drawText("Playlist", arrangementHeader.removeFromTop(28), juce::Justification::centredLeft);
-    g.setColour(mutedText);
-    g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
-    g.drawText("Double-click a MIDI clip to open Piano Roll full screen", arrangementHeader.removeFromTop(20), juce::Justification::centredLeft);
 }
 
 void MainComponent::resized()
@@ -2329,6 +1052,11 @@ void MainComponent::resized()
     auto leftBrandContent = leftBrand.withSizeKeepingCentre(leftBrand.getWidth(), 56);
     headerLabel.setBounds(leftBrandContent.removeFromTop(34));
     statusLabel.setBounds(leftBrandContent.removeFromTop(20));
+
+    auto scanTopArea = getLocalBounds().reduced(8).removeFromTop(118).reduced(18, 0);
+    auto scanLabelArea = scanTopArea.withY(scanTopArea.getBottom() - 27).withHeight(12);
+    pluginScanNameLabel.setBounds(scanLabelArea);
+    pluginScanNameLabel.setVisible(pluginScanVisible);
 
     auto centeredTransportCluster = transportCluster.withSizeKeepingCentre(transportCluster.getWidth(), transportSectionHeight);
     auto centeredBpmCard = bpmCard.withSizeKeepingCentre(bpmCard.getWidth(), transportSectionHeight);
@@ -2378,8 +1106,9 @@ void MainComponent::resized()
     loopButton.setBounds(modeButtons.removeFromLeft(56));
     modeButtons.removeFromLeft(8);
     countInButton.setBounds(modeButtons.removeFromLeft(66));
-    modeButtons.removeFromLeft(8);
-    browserButton.setBounds(modeButtons.removeFromLeft(56));
+    // BROWSER button removed from the toolbar — the small triangle in the top-left
+    // corner is now the only browser toggle.
+    browserButton.setBounds({});
 
     auto utilityButtons = centeredRightUtility.withSizeKeepingCentre(centeredRightUtility.getWidth(), transportControlHeight)
                               .translated(0, transportContentVerticalNudge)
@@ -2391,16 +1120,27 @@ void MainComponent::resized()
     settingsButton.setBounds(utilityButtons.removeFromLeft(74));
     scanPluginsButton.setBounds({});
 
-    auto workArea = bounds.withTrimmedTop(20);
-    auto browserPanelBounds = workArea.removeFromLeft(browserPanelWidth);
+    // Matches paint() — minimal margins so the playlist fills the work area.
+    auto workArea = bounds.withTrimmedTop(8);
+
+    // Small collapse arrow at the top-left of the work area, just below the transport
+    // bar. Always visible, ~14×14 px, sits next to the browser/playlist boundary so it's
+    // obvious what it controls.
+    browserCollapseArrow.setBounds(workArea.getX() + 14,
+                                   workArea.getY() + 12,
+                                   14, 14);
+    browserCollapseArrow.toFront(false);
+
+    juce::Rectangle<int> browserPanelBounds;
+    if (browserPanelVisible)
+        browserPanelBounds = workArea.removeFromLeft(browserPanelWidth);
     auto arrangementPanel = workArea;
 
     auto playlistArea = arrangementPanel;
-    playlistArea.removeFromLeft(18);
-    playlistArea.removeFromRight(18);
-    playlistArea.removeFromTop(18);
-    playlistArea.removeFromTop(42);
-    playlistArea.removeFromBottom(18);
+    playlistArea.removeFromLeft(8);
+    playlistArea.removeFromRight(8);
+    playlistArea.removeFromTop(8);
+    playlistArea.removeFromBottom(8);
 
     const auto samplerOpen = samplerPanel.isVisible();
     const auto closedArrangementArea = playlistArea;
@@ -2410,8 +1150,16 @@ void MainComponent::resized()
 
     arrangementTimeline.setBounds(arrangementArea);
 
-    auto browserInner = browserPanelBounds.reduced(16);
-    browserPanel.setBounds(browserInner);
+    if (browserPanelVisible)
+    {
+        auto browserInner = browserPanelBounds.reduced(16);
+        browserPanel.setBounds(browserInner);
+        browserPanel.setVisible(true);
+    }
+    else
+    {
+        browserPanel.setVisible(false);
+    }
 
     tempoLabel.setBounds({});
     meterLabel.setBounds({});
@@ -2481,6 +1229,23 @@ void MainComponent::mouseExit(const juce::MouseEvent&)
 
 void MainComponent::mouseDown(const juce::MouseEvent& event)
 {
+    // Right-click on the REC transport button opens a context menu for the
+    // "record with metronome" option (one-bar count-in + click during recording).
+    if (event.eventComponent == &recordButton && event.mods.isPopupMenu())
+    {
+        juce::PopupMenu menu;
+        const auto withMetro = projectState.isRecordWithMetronome();
+        menu.addItem(1, "Record with metronome", true, withMetro);
+        menu.addItem(2, "Record without metronome", true, ! withMetro);
+        menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(&recordButton),
+            [this](int result)
+            {
+                if (result == 1) projectState.setRecordWithMetronome(true);
+                else if (result == 2) projectState.setRecordWithMetronome(false);
+            });
+        return;
+    }
+
     if (event.getNumberOfClicks() >= 2 && bpmValueLabel.getBounds().contains(event.getPosition()))
     {
         beginTempoEditing();
@@ -2534,13 +1299,16 @@ void MainComponent::mouseUp(const juce::MouseEvent&)
 
 bool MainComponent::keyPressed(const juce::KeyPress& key)
 {
+    if (midiEditorOverlay.isVisible() && midiEditorOverlay.keyPressed(key))
+        return true;
+
     if (samplerPanel.isVisible() && (key == juce::KeyPress::escapeKey || key == juce::KeyPress::returnKey))
     {
         samplerPanel.closePanel();
         return true;
     }
 
-    if (samplerPanel.isVisible() && samplerPanel.keyPressed(key))
+    if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyPressed(key))
         return true;
 
     if (key == juce::KeyPress::returnKey)
@@ -2570,7 +1338,10 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
 bool MainComponent::keyStateChanged(bool isKeyDown)
 {
-    if (samplerPanel.isVisible() && samplerPanel.keyStateChanged(isKeyDown))
+    if (midiEditorOverlay.isVisible())
+        midiEditorOverlay.keyStateChanged(isKeyDown);
+
+    if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyStateChanged(isKeyDown))
         return true;
 
     return false;
@@ -2588,6 +1359,98 @@ void MainComponent::resetToPlaylistView()
 void MainComponent::timerCallback()
 {
     updateTransportLabels();
+
+    // While recording, drive the live UI feedback:
+    //  (a) auto-start a recording clip the moment count-in ends and real playback begins
+    //  (b) grow the recording clip's length in real time so the user sees a visual bar
+    //      sweeping across the track as audio/MIDI is captured.
+    const auto playing      = transportEngine.isPlaying();
+    const auto countingIn   = transportEngine.isCountInActive();
+    const auto recordArmed  = transportEngine.isRecordArmed();
+    const auto canRecordNow = playing && ! countingIn && recordArmed;
+
+    // Find a record-armed MIDI track. If none was explicitly R-armed, fall back to
+    // the currently selected MIDI track (or the sampler-armed one) — that way the
+    // user just presses REC + PLAY without having to also tap R on the track.
+    auto& tracks = projectState.getTracks();
+    int armedTrack = -1;
+    for (std::size_t i = 0; i < tracks.size(); ++i)
+        if (tracks[i].isMidiTrack && tracks[i].recordArmed) { armedTrack = static_cast<int>(i); break; }
+
+    if (armedTrack < 0)
+    {
+        // Fallback 1: selected clip's track if it's MIDI.
+        if (selectedArrangementClip.has_value())
+        {
+            const auto idx = selectedArrangementClip->first;
+            if (idx >= 0 && idx < static_cast<int>(tracks.size()) && tracks[static_cast<std::size_t>(idx)].isMidiTrack)
+                armedTrack = idx;
+        }
+        // Fallback 2: any selected MIDI track header.
+        if (armedTrack < 0)
+        {
+            const auto sel = arrangementTimeline.getSelectedTrackIndex();
+            if (sel.has_value() && *sel >= 0 && *sel < static_cast<int>(tracks.size())
+                && tracks[static_cast<std::size_t>(*sel)].isMidiTrack)
+                armedTrack = *sel;
+        }
+    }
+
+    if (canRecordNow && armedTrack >= 0)
+    {
+        // (a) Open a recording clip the instant real playback starts (after count-in),
+        // even before any note is played, so the user immediately sees "recording" feedback.
+        if (! recordingSession.has_value() || recordingSession->trackIndex != armedTrack)
+        {
+            finalizeRecordingClip();
+            const auto playheadBeat = transportEngine.getPlayheadBeat();
+            const auto clipStart    = std::floor(playheadBeat);
+            auto& track = tracks[static_cast<std::size_t>(armedTrack)];
+            track.clips.push_back(TimelineClip {
+                "Recording",
+                ClipType::midi,
+                clipStart,
+                juce::jmax(0.25, playheadBeat - clipStart),
+                track.colour.brighter(0.1f),
+                {}, "", 0.0, false, false,
+                0.0, 0.0, 0,
+                false, false, 0.0,
+                -1, false, true
+            });
+            track.clips.back().recording = true;
+            RecordingSession session;
+            session.trackIndex    = armedTrack;
+            session.clipIndex     = static_cast<int>(track.clips.size()) - 1;
+            session.clipStartBeat = clipStart;
+            recordingSession      = std::move(session);
+        }
+
+        // (b) Live-grow the clip so it sweeps with the playhead — but snap the visible
+        // length UP to the next bar boundary instead of crawling beat-by-beat. The clip
+        // then renders as a whole-bar block (FL-style) and never ends mid-bar.
+        if (recordingSession->trackIndex < static_cast<int>(tracks.size()))
+        {
+            auto& clips = tracks[static_cast<std::size_t>(recordingSession->trackIndex)].clips;
+            if (recordingSession->clipIndex < static_cast<int>(clips.size()))
+            {
+                auto& clip       = clips[static_cast<std::size_t>(recordingSession->clipIndex)];
+                const auto rawLen      = juce::jmax(0.25, transportEngine.getPlayheadBeat() - recordingSession->clipStartBeat);
+                const auto beatsPerBar = static_cast<double>(juce::jmax(1, projectState.getNumerator()));
+                const auto bars        = std::ceil(rawLen / beatsPerBar);
+                const auto snappedLen  = juce::jmax(beatsPerBar, bars * beatsPerBar);
+                if (snappedLen > clip.lengthInBeats)
+                {
+                    clip.lengthInBeats = snappedLen;
+                    arrangementTimeline.repaint();
+                }
+            }
+        }
+    }
+    else if (! playing && recordingSession.has_value())
+    {
+        // Playback stopped externally (loop end / user stop / count-in cancel) — finalise.
+        finalizeRecordingClip();
+    }
 }
 
 void MainComponent::buttonClicked(juce::Button* button)
@@ -2620,8 +1483,18 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         updateTransportLabels();
     }
-    else if (button == &browserButton)
-        browserPanel.chooseRootFolder();
+    else if (button == &browserButton || button == &browserCollapseArrow)
+    {
+        // Both controls are sticky toggles; the state we just received IS the new desired
+        // visibility. Mirror it onto whichever toggle the user didn't click so they stay
+        // in sync.
+        browserPanelVisible = button->getToggleState();
+        browserButton.setToggleState(browserPanelVisible, juce::dontSendNotification);
+        browserCollapseArrow.setToggleState(browserPanelVisible, juce::dontSendNotification);
+        browserPanel.setVisible(browserPanelVisible);
+        resized();
+        repaint();
+    }
     else if (button == &saveButton)
     {
         saveProjectInteractively();
@@ -2801,6 +1674,269 @@ bool MainComponent::openSamplerForTrackIfAvailable(int trackIndex)
     return true;
 }
 
+void MainComponent::showTrackInstrumentMenu(int trackIndex)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+
+    auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    if (! track.isMidiTrack)
+        return;  // only MIDI tracks host instruments
+
+    const bool hasInstrument = track.instrumentPluginId.isNotEmpty();
+    const auto loadablePlugins = pluginManager.getAllDescriptions();
+
+    juce::PopupMenu menu;
+    if (hasInstrument)
+    {
+        menu.addSectionHeader(track.instrumentPluginName.isNotEmpty() ? track.instrumentPluginName
+                                                                      : juce::String("Instrument"));
+        menu.addItem(1, "Open instrument editor");
+        menu.addItem(2, "Remove instrument");
+        menu.addSeparator();
+    }
+
+    juce::PopupMenu loadMenu;
+    if (loadablePlugins.isEmpty())
+    {
+        if (pluginManager.isScanning())
+            loadMenu.addItem(9999, "Scanning...", false, false);
+        else
+            loadMenu.addItem(3, "Scan VST plugins...");
+    }
+    else
+    {
+        int id = 1000;
+        for (const auto& desc : loadablePlugins)
+        {
+            auto label = desc.name + "  (" + desc.pluginFormatName + ")";
+            if (! desc.isInstrument)
+                label += " - effect";
+            loadMenu.addItem(id++, label);
+        }
+    }
+    menu.addSubMenu(hasInstrument ? "Replace instrument" : "Load instrument", loadMenu);
+    menu.addSeparator();
+    menu.addItem(3, pluginManager.isScanning() ? "Scanning..." : "Rescan VST plugins...",
+                 ! pluginManager.isScanning());
+
+    const auto pluginList = loadablePlugins;
+    menu.showMenuAsync(juce::PopupMenu::Options(),
+        [this, trackIndex, pluginList](int result)
+        {
+            if (result == 0)
+                return;
+            if (result == 1) { openInstrumentEditor(trackIndex); return; }
+            if (result == 2) { removeInstrumentFromTrack(trackIndex); return; }
+            if (result == 3) { scanPluginsInteractively(); return; }
+            if (result >= 1000 && result < 9999)
+            {
+                const auto index = result - 1000;
+                if (index >= 0 && index < pluginList.size())
+                    loadInstrumentOnTrack(trackIndex, pluginList.getReference(index));
+            }
+        });
+}
+
+void MainComponent::scanPluginsInteractively(std::function<void()> onFinished)
+{
+    if (pluginManager.isScanning())
+        return;
+
+    pluginScanVisible = true;
+    pluginScanProgress = 0.0;
+    pluginScanNameLabel.setText("Starting VST scan...", juce::dontSendNotification);
+    pluginScanNameLabel.setVisible(true);
+    statusLabel.setText("Scanning for VST plugins...", juce::dontSendNotification);
+    resized();
+    repaint();
+
+    pluginManager.scanForPlugins(
+        [this](const juce::String& name, double progress)
+        {
+            pluginScanProgress = progress;
+
+            if (name.isNotEmpty())
+            {
+                const auto displayName = juce::File(name).getFileName().isNotEmpty()
+                    ? juce::File(name).getFileName()
+                    : name;
+                pluginScanNameLabel.setText(displayName, juce::dontSendNotification);
+                statusLabel.setText("Scanning: " + displayName, juce::dontSendNotification);
+            }
+
+            repaint();
+        },
+        [this, onFinished]()
+        {
+            const auto count = pluginManager.getAllDescriptions().size();
+            statusLabel.setText("Found " + juce::String(count) + " plugin(s)", juce::dontSendNotification);
+            pluginScanProgress = 1.0;
+            pluginScanNameLabel.setText("Scan complete", juce::dontSendNotification);
+            repaint();
+            juce::Timer::callAfterDelay(1200, [safeThis = juce::Component::SafePointer<MainComponent>(this)]
+            {
+                if (safeThis == nullptr)
+                    return;
+
+                safeThis->pluginScanVisible = false;
+                safeThis->pluginScanNameLabel.setVisible(false);
+                safeThis->resized();
+                safeThis->repaint();
+            });
+            if (onFinished)
+                onFinished();
+        });
+}
+
+void MainComponent::loadInstrumentOnTrack(int trackIndex, const juce::PluginDescription& description)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || arrangementPlaybackSource == nullptr)
+        return;
+
+    juce::String error;
+    auto instance = pluginManager.createInstance(description, 44100.0, 512, error);
+    if (instance == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "Could not load plugin",
+                                               error.isNotEmpty() ? error : juce::String("Unknown error."));
+        return;
+    }
+
+    auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    track.instrumentPluginId    = description.createIdentifierString();
+    track.instrumentPluginName  = description.name;
+    track.instrumentStateBase64 = {};
+
+    closeInstrumentEditor(trackIndex);
+    arrangementPlaybackSource->setTrackInstrument(trackIndex, std::move(instance));
+
+    samplerPanel.openTrackIndex(trackIndex);
+    samplerPanel.setVisible(false);
+    statusLabel.setText(description.isInstrument
+                            ? "Instrument loaded: " + description.name
+                            : "Effect loaded: " + description.name + " (keyboard notes need an instrument)",
+                        juce::dontSendNotification);
+    arrangementTimeline.repaint();
+    openInstrumentEditor(trackIndex);
+}
+
+void MainComponent::removeInstrumentFromTrack(int trackIndex)
+{
+    closeInstrumentEditor(trackIndex);
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->clearTrackInstrument(trackIndex);
+
+    auto& tracks = projectState.getTracks();
+    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size()))
+    {
+        auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        track.instrumentPluginId    = {};
+        track.instrumentPluginName  = {};
+        track.instrumentStateBase64 = {};
+    }
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::openInstrumentEditor(int trackIndex)
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+
+    auto* instance = arrangementPlaybackSource->getTrackInstrument(trackIndex);
+    if (instance == nullptr)
+        return;
+
+    if (auto it = instrumentEditorWindows.find(trackIndex);
+        it != instrumentEditorWindows.end() && it->second != nullptr)
+    {
+        it->second->toFront(true);
+        return;
+    }
+
+    auto& tracks = projectState.getTracks();
+    juce::String title = "Instrument";
+    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size()))
+    {
+        const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        title = track.name + " - " + track.instrumentPluginName;
+    }
+
+    instrumentEditorWindows[trackIndex] = std::make_unique<PluginEditorWindow>(
+        *instance,
+        title,
+        [this, trackIndex]() { closeInstrumentEditor(trackIndex); },
+        [this](const juce::KeyPress& key) { return keyPressed(key); },
+        [this](bool isKeyDown) { return keyStateChanged(isKeyDown); });
+}
+
+void MainComponent::closeInstrumentEditor(int trackIndex)
+{
+    instrumentEditorWindows.erase(trackIndex);
+}
+
+void MainComponent::closeAllInstrumentEditors()
+{
+    instrumentEditorWindows.clear();
+}
+
+void MainComponent::captureAllInstrumentStates()
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+
+    auto& tracks = projectState.getTracks();
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+    {
+        auto* instance = arrangementPlaybackSource->getTrackInstrument(i);
+        if (instance == nullptr)
+            continue;
+
+        juce::MemoryBlock block;
+        instance->getStateInformation(block);
+        tracks[static_cast<std::size_t>(i)].instrumentStateBase64 = block.toBase64Encoding();
+    }
+}
+
+void MainComponent::restoreInstrumentsFromProject()
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+
+    closeAllInstrumentEditors();
+    auto& tracks = projectState.getTracks();
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+    {
+        arrangementPlaybackSource->clearTrackInstrument(i);
+
+        auto& track = tracks[static_cast<std::size_t>(i)];
+        if (track.instrumentPluginId.isEmpty())
+            continue;
+
+        const auto desc = pluginManager.findDescription(track.instrumentPluginId);
+        if (! desc.has_value())
+            continue;  // plugin not installed/scanned right now — keep id for a later rescan
+
+        juce::String error;
+        auto instance = pluginManager.createInstance(*desc, 44100.0, 512, error);
+        if (instance == nullptr)
+            continue;
+
+        if (track.instrumentStateBase64.isNotEmpty())
+        {
+            juce::MemoryBlock block;
+            if (block.fromBase64Encoding(track.instrumentStateBase64) && block.getSize() > 0)
+                instance->setStateInformation(block.getData(), static_cast<int>(block.getSize()));
+        }
+
+        arrangementPlaybackSource->setTrackInstrument(i, std::move(instance));
+    }
+    arrangementTimeline.repaint();
+}
+
 void MainComponent::stopBrowserPreview(bool resetPosition)
 {
     previewTransportSource.stop();
@@ -2810,8 +1946,14 @@ void MainComponent::stopBrowserPreview(bool resetPosition)
 
 void MainComponent::toggleTransportFromUi()
 {
+    // Always do a one-bar count-in before recording starts so the user has a
+    // tempo reference before the first note. Count-in is also honoured when the
+    // user enabled it manually for non-recording playback. The user can opt out
+    // of the metronome on record via right-click on the REC button.
+    const auto useCountIn = countInButton.getToggleState()
+        || (transportEngine.isRecordArmed() && projectState.isRecordWithMetronome());
     transportController.togglePlayback(
-        countInButton.getToggleState(),
+        useCountIn,
         [this]() { stopBrowserPreview(true); },
         [this]()
         {
@@ -2828,6 +1970,9 @@ void MainComponent::toggleTransportFromUi()
 
 void MainComponent::stopTransportFromUi()
 {
+    finalizeRecordingClip(); // close any in-flight MIDI recording session
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->allInstrumentNotesOff(); // flush any hung instrument notes
     transportController.stop(
         [this]() { stopBrowserPreview(true); },
         [this]()
@@ -2836,6 +1981,97 @@ void MainComponent::stopTransportFromUi()
                 arrangementPlaybackSource->syncToTransportPosition();
         });
     updateTransportLabels();
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::recordNoteOn(int pitch, int velocity)
+{
+    // Don't capture notes while count-in is still ticking — only after real playback starts.
+    if (! transportEngine.isPlaying() || transportEngine.isCountInActive() || ! transportEngine.isRecordArmed())
+        return;
+    if (! recordingSession.has_value())
+        return; // timerCallback opens the session on the first tick after count-in
+
+    const auto playheadBeat = transportEngine.getPlayheadBeat();
+    const auto beatInClip   = juce::jmax(0.0, playheadBeat - recordingSession->clipStartBeat);
+    recordingSession->pendingNotes[pitch] = { velocity, beatInClip };
+}
+
+void MainComponent::recordNoteOff(int pitch)
+{
+    if (! recordingSession.has_value()) return;
+
+    auto it = recordingSession->pendingNotes.find(pitch);
+    if (it == recordingSession->pendingNotes.end()) return;
+
+    const auto playheadBeat = transportEngine.getPlayheadBeat();
+    const auto endBeatInClip = juce::jmax(it->second.startBeatInClip + 0.05,
+                                          playheadBeat - recordingSession->clipStartBeat);
+    const auto lengthBeats = endBeatInClip - it->second.startBeatInClip;
+
+    auto& tracks = projectState.getTracks();
+    if (recordingSession->trackIndex < static_cast<int>(tracks.size()))
+    {
+        auto& clips = tracks[static_cast<std::size_t>(recordingSession->trackIndex)].clips;
+        if (recordingSession->clipIndex < static_cast<int>(clips.size()))
+        {
+            auto& clip = clips[static_cast<std::size_t>(recordingSession->clipIndex)];
+            clip.midiNotes.push_back(MidiNote { pitch, it->second.startBeatInClip, lengthBeats, it->second.velocity });
+            if (endBeatInClip + 0.5 > clip.lengthInBeats)
+                clip.lengthInBeats = std::ceil(endBeatInClip + 0.25); // expand to next quarter
+        }
+    }
+
+    recordingSession->pendingNotes.erase(it);
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::finalizeRecordingClip()
+{
+    if (! recordingSession.has_value()) return;
+
+    // Close any notes that are still held when recording ends.
+    const auto playheadBeat = transportEngine.getPlayheadBeat();
+    auto& tracks = projectState.getTracks();
+
+    if (recordingSession->trackIndex < static_cast<int>(tracks.size()))
+    {
+        auto& clips = tracks[static_cast<std::size_t>(recordingSession->trackIndex)].clips;
+        if (recordingSession->clipIndex < static_cast<int>(clips.size()))
+        {
+            auto& clip = clips[static_cast<std::size_t>(recordingSession->clipIndex)];
+            for (const auto& [pitch, pending] : recordingSession->pendingNotes)
+            {
+                const auto endBeatInClip = juce::jmax(pending.startBeatInClip + 0.05,
+                                                      playheadBeat - recordingSession->clipStartBeat);
+                clip.midiNotes.push_back(MidiNote {
+                    pitch,
+                    pending.startBeatInClip,
+                    endBeatInClip - pending.startBeatInClip,
+                    pending.velocity
+                });
+                if (endBeatInClip + 0.5 > clip.lengthInBeats)
+                    clip.lengthInBeats = std::ceil(endBeatInClip + 0.25);
+            }
+            // If the recording captured nothing, drop the empty clip so we don't pollute the timeline.
+            if (clip.midiNotes.empty())
+            {
+                clips.erase(clips.begin() + recordingSession->clipIndex);
+            }
+            else
+            {
+                clip.recording = false;
+                // Round the clip length UP to the next bar boundary so playback always
+                // covers a full bar — matches FL's behaviour where the pattern length
+                // snaps to the bar grid even if you stopped recording mid-bar.
+                const auto beatsPerBar = static_cast<double>(juce::jmax(1, projectState.getNumerator()));
+                const auto bars        = std::ceil(clip.lengthInBeats / beatsPerBar);
+                clip.lengthInBeats     = juce::jmax(beatsPerBar, bars * beatsPerBar);
+            }
+        }
+    }
+
+    recordingSession.reset();
     arrangementTimeline.repaint();
 }
 
@@ -2868,6 +2104,9 @@ void MainComponent::toggleLoopFromUi()
 
 void MainComponent::saveProjectInteractively()
 {
+    // Pull the latest plugin state into the project before it is serialized.
+    captureAllInstrumentStates();
+
     auto saveToTarget = [this](const juce::File& targetFile)
     {
         juce::String errorMessage;
@@ -3330,6 +2569,9 @@ const TimelineClip* MainComponent::getSelectedTimelineClip() const noexcept
 
 juce::Rectangle<int> MainComponent::getBrowserResizeHandleBounds() const noexcept
 {
+    if (! browserPanelVisible)
+        return {}; // no draggable handle when the browser is collapsed
+
     auto bounds = getLocalBounds().reduced(8);
     bounds.removeFromTop(112);
     auto workArea = bounds;

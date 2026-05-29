@@ -57,8 +57,10 @@ target_sources(
         Source/Audio/ExportService.cpp
         Source/Audio/TransportController.cpp
         Source/Audio/TransportEngine.cpp
+        Source/Audio/WarpEngine.cpp
         Source/Core/ProjectSerializer.cpp
         Source/Core/ProjectState.cpp
+        Source/Plugins/PluginManager.cpp
         Source/Sampler/SamplerEngine.cpp
         Source/Sampler/SamplerPanelComponent.cpp
         Source/UI/ArrangementTimelineComponent.cpp
@@ -80,6 +82,7 @@ target_compile_definitions(
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_PLUGINHOST_VST3=1
         ORION_HAVE_RUBBERBAND=${ORION_HAVE_RUBBERBAND}
 )
 
@@ -104,6 +107,44 @@ target_link_libraries(
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
+)
+
+juce_add_console_app(OrionPluginScanner PRODUCT_NAME "Orion Plugin Scanner")
+
+target_sources(
+    OrionPluginScanner
+    PRIVATE
+        Source/Tools/PluginScanner.cpp
+)
+
+target_compile_definitions(
+    OrionPluginScanner
+    PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_PLUGINHOST_VST3=1
+)
+
+target_link_libraries(
+    OrionPluginScanner
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_processors
+        juce::juce_core
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags
+)
+
+add_dependencies(Orion OrionPluginScanner)
+add_custom_command(
+    TARGET Orion
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:OrionPluginScanner>
+            $<TARGET_FILE_DIR:Orion>/OrionPluginScanner
 )
 
 juce_add_console_app(OrionWarpCompare PRODUCT_NAME "Orion Warp Compare")

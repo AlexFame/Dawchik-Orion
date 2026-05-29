@@ -1,0 +1,65 @@
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_audio_formats/juce_audio_formats.h>
+
+// Audio analysis + time/pitch-warp engine.
+//
+// This module used to live inline inside MainComponent.cpp. It is pure DSP /
+// filename-metadata logic with no dependency on the UI, so it lives in Audio/.
+// Only the handful of functions/structs actually used elsewhere are exposed
+// here; the lower-level helpers (onset detection, RubberBand glue, drum/melodic
+// classifier, etc.) stay private to WarpEngine.cpp.
+namespace orion
+{
+// Cache-busting tag baked into warped-audio cache keys. Changes whenever the
+// stretch backend changes so stale cached renders are not reused.
+extern const char* const warpBackendCacheVersion;
+
+// Convert (rootSemi 0..11, minor) -> display name like "Cm" / "F#" / "Bb minor".
+juce::String formatKeyName(int rootSemi, bool minor, bool fullName = false);
+
+struct AudioWarpAnalysis
+{
+    double durationSeconds { 0.0 };
+    double sourceBpm { 0.0 };
+    int detectedBars { 0 };
+    juce::String bpmSource { "none" };
+    double bpmConfidence { 0.0 };
+    bool bpmGuessed { false };
+    int  sourceKeyRoot { -1 };       // -1 = unknown, otherwise 0..11 (C..B)
+    bool sourceKeyIsMinor { false };
+};
+
+// Best-effort BPM extracted purely from a file's name (e.g. "Loop_120bpm").
+// Returns 0.0 when nothing usable is found.
+double parseBpmFromFileName(const juce::File& file);
+
+// Reads a file's header + name to estimate tempo / key / bar count for warping.
+AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator);
+
+// 4-point cubic Hermite interpolation used by the arrangement playback resampler.
+inline float cubicHermite(float t, float y0, float y1, float y2, float y3) noexcept
+{
+    const auto c1 = 0.5f * (y2 - y0);
+    const auto c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+    const auto c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+    return ((c3 * t + c2) * t + c1) * t + y1;
+}
+
+// Stretch `source` to `outputSamples` length (and optionally pitch-shift by
+// `pitchScale`) using the best available backend, automatically choosing a
+// drum-optimised or melodic path based on content/filename.
+juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
+                                                                      int outputSamples,
+                                                                      double sampleRate,
+                                                                      const juce::String& sourcePath = {},
+                                                                      double pitchScale = 1.0);
+
+// Convenience wrapper: tempo-fit a preview buffer from `sourceBpm` to `projectTempoBpm`.
+juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
+                                                      double sourceBpm,
+                                                      double projectTempoBpm,
+                                                      double sampleRate,
+                                                      const juce::String& sourcePath = {});
+}  // namespace orion

@@ -71,7 +71,7 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                                    const TrackState& track,
                                    const TimelineClip& clip)
 {
-    if (track.samplerSourcePath.isEmpty() || clip.type != ClipType::midi || clip.muted || clip.midiNotes.empty())
+    if (track.samplerSourcePath.isEmpty() || clip.type != ClipType::midi || clip.muted || clip.recording || clip.midiNotes.empty())
         return;
 
     const auto* sampleData = getSampleData(track.samplerSourcePath);
@@ -122,7 +122,12 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
         for (const auto& note : clip.midiNotes)
         {
             auto noteEndBeat = note.startBeat + juce::jmax(0.01, note.lengthInBeats);
-            if (track.samplerMode == SamplerPlaybackMode::oneShot)
+            // In Classic and OneShot modes the sample plays through to its natural end
+            // regardless of the MIDI note duration — matches the keyboard-live behaviour
+            // (noteOff is intentionally a no-op for those modes). Only Slice mode keeps
+            // the note bounded by the slice / next-trigger.
+            if (track.samplerMode == SamplerPlaybackMode::classic
+                || track.samplerMode == SamplerPlaybackMode::oneShot)
             {
                 const auto sourceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
                     * beatsPerSecond / getPitchRatio(note.pitch, track.samplerRootMidiNote);

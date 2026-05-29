@@ -36,7 +36,9 @@ bool TransportEngine::isRecordArmed() const noexcept
 
 double TransportEngine::getPlayheadBeat() const noexcept
 {
-    const auto loopActive = loopEnabled && project.hasLoopRange();
+    // During recording, ignore the loop range too — the user is laying down a take
+    // that should run forward freely until they hit Stop.
+    const auto loopActive = loopEnabled && project.hasLoopRange() && ! recordArmed;
     const auto loopStart = project.getLoopStartBeat();
     const auto loopEnd = project.getLoopEndBeat();
     const auto loopSpan = juce::jmax(1.0, loopEnd - loopStart);
@@ -55,11 +57,18 @@ double TransportEngine::getPlayheadBeat() const noexcept
             return currentBeat;
         }
 
-        const auto repeatEndBeat = project.getContentEndInBeats();
-        if (repeatEndBeat > 0.0)
+        // While recording, do NOT wrap at the content end. The "content end" equals the
+        // recording clip's end (since it's often the only clip), so wrapping would dump
+        // the playhead back to 0 and the next note-on would land on top of an earlier one.
+        // Recording must run forward freely until the user presses Stop.
+        if (! recordArmed)
         {
-            while (currentBeat >= repeatEndBeat)
-                currentBeat = std::fmod(currentBeat, repeatEndBeat);
+            const auto repeatEndBeat = project.getContentEndInBeats();
+            if (repeatEndBeat > 0.0)
+            {
+                while (currentBeat >= repeatEndBeat)
+                    currentBeat = std::fmod(currentBeat, repeatEndBeat);
+            }
         }
 
         return juce::jlimit(0.0, project.getProjectLengthInBeats(), currentBeat);
@@ -169,7 +178,8 @@ void TransportEngine::timerCallback()
 
     const auto beatsPerSecond = project.getTempoBpm() / 60.0;
     const auto beatAdvance = (elapsedMs / 1000.0) * beatsPerSecond;
-    const auto loopActive = loopEnabled && project.hasLoopRange();
+    // Loop range is ignored while record-armed — see comment in getPlayheadBeat().
+    const auto loopActive = loopEnabled && project.hasLoopRange() && ! recordArmed;
     const auto loopStart = project.getLoopStartBeat();
     const auto loopEnd = project.getLoopEndBeat();
     const auto loopSpan = juce::jmax(1.0, loopEnd - loopStart);
@@ -199,8 +209,10 @@ void TransportEngine::timerCallback()
         while (playheadBeat >= loopEnd)
             playheadBeat = loopStart + std::fmod(playheadBeat - loopStart, loopSpan);
     }
-    else if (playheadBeat >= project.getContentEndInBeats())
+    else if (! recordArmed && playheadBeat >= project.getContentEndInBeats())
     {
+        // Same rule as getPlayheadBeat(): no content-end wraparound while record-armed,
+        // otherwise an empty project's recording would overwrite itself in a 1-clip loop.
         const auto repeatEndBeat = project.getContentEndInBeats();
         playheadBeat = repeatEndBeat > 0.0 ? std::fmod(playheadBeat, repeatEndBeat) : 0.0;
         paused = false;

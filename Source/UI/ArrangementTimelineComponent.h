@@ -23,6 +23,7 @@ public:
     std::function<void(int, int)> onMidiClipDoubleClick;
     std::function<void(int, int)> onClipSelectionChanged;
     std::function<void(int)> onTrackHeaderDoubleClick;
+    std::function<void(int)> onTrackHeaderRightClick;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
