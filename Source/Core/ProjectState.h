@@ -110,8 +110,10 @@ public:
 
     int getNumerator() const noexcept;
     int getDenominator() const noexcept;
+    void setTimeSignature(int numerator, int denominator) noexcept;
 
     double getLoopLengthInBeats() const noexcept;
+    void setLoopLengthInBeats(double newLength) noexcept;
     double getProjectLengthInBeats() const noexcept;
     double getContentEndInBeats() const noexcept;
     bool hasLoopRange() const noexcept;

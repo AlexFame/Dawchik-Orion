@@ -75,6 +75,8 @@ private:
     void rewindTransportFromUi();
     void toggleLoopFromUi();
     void saveProjectInteractively();
+    void openProjectInteractively();
+    void loadProjectFromFile(const juce::File& file);
     void exportProjectInteractively();
     void openSettingsDialog();
     void refreshAudioClipWarpLengths();
@@ -170,6 +172,7 @@ private:
         }
     };
     BrowserCollapseArrow browserCollapseArrow;
+    juce::TextButton openButton;
     juce::TextButton saveButton;
     juce::TextButton exportButton;
     juce::TextButton settingsButton;
@@ -182,6 +185,7 @@ private:
     std::unique_ptr<ArrangementPlaybackSource> arrangementPlaybackSource;
     std::unique_ptr<ClickTrackSource> clickTrackSource;
     std::unique_ptr<juce::FileChooser> saveFileChooser;
+    std::unique_ptr<juce::FileChooser> openFileChooser;
     std::unique_ptr<juce::FileChooser> exportFileChooser;
     juce::File currentProjectFile;
     juce::File currentPreviewFile;

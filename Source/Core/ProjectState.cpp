@@ -65,9 +65,20 @@ int ProjectState::getDenominator() const noexcept
     return timeSigDenominator;
 }
 
+void ProjectState::setTimeSignature(int numerator, int denominator) noexcept
+{
+    timeSigNumerator = juce::jlimit(1, 32, numerator);
+    timeSigDenominator = juce::jlimit(1, 32, denominator);
+}
+
 double ProjectState::getLoopLengthInBeats() const noexcept
 {
     return loopLengthInBeats;
+}
+
+void ProjectState::setLoopLengthInBeats(double newLength) noexcept
+{
+    loopLengthInBeats = juce::jmax(1.0, newLength);
 }
 
 double ProjectState::getProjectLengthInBeats() const noexcept

@@ -49,6 +49,9 @@ public:
     bool redo();
     void addAudioTrack();
     void addMidiTrack();
+    // Clears selection, hover and undo/redo history. Call after a project is
+    // loaded so stale indices and snapshots from the previous project are dropped.
+    void resetForNewProject();
 
 private:
     struct SelectedClip

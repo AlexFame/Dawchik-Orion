@@ -32,7 +32,7 @@ constexpr int transportBrandWidth = 92;
 constexpr int transportClusterWidth = 314;
 constexpr int transportTempoWidth = 178; // BPM + KEY combined card
 constexpr int transportModeWidth = 200; // METRONOME (56) + 8 + LOOP (56) + 8 + COUNT IN (66) + slack
-constexpr int transportUtilityWidth = 236;
+constexpr int transportUtilityWidth = 300;
 constexpr int transportSectionGap = 12;
 constexpr int transportControlHeight = 62;
 constexpr int transportSectionHeight = 76;
@@ -573,6 +573,7 @@ MainComponent::MainComponent()
     countInButton.setButtonText("COUNT IN");
     browserButton.setButtonText("BROWSER");
     scanPluginsButton.setButtonText("Scan VST3");
+    openButton.setButtonText("OPEN");
     saveButton.setButtonText("SAVE");
     exportButton.setButtonText("EXPORT");
     settingsButton.setButtonText("SETTINGS");
@@ -588,13 +589,14 @@ MainComponent::MainComponent()
     loopButton.setComponentID("loop");
     countInButton.setComponentID("countin");
     browserButton.setComponentID("browser");
+    openButton.setComponentID("open");
     saveButton.setComponentID("save");
     exportButton.setComponentID("export");
     settingsButton.setComponentID("settings");
 
     for (auto* button : { &playButton, &stopButton, &recordButton, &rewindButton, &undoButton, &redoButton,
                           &metronomeButton, &loopButton, &countInButton, &browserButton, &scanPluginsButton,
-                          &saveButton, &exportButton, &settingsButton })
+                          &openButton, &saveButton, &exportButton, &settingsButton })
     {
         button->setLookAndFeel(&transportButtonLookAndFeel);
         button->setColour(juce::TextButton::buttonColourId, transportButtonColour);
@@ -872,7 +874,7 @@ MainComponent::~MainComponent()
 {
     for (auto* button : { &playButton, &stopButton, &recordButton, &rewindButton, &undoButton, &redoButton,
                           &metronomeButton, &loopButton, &countInButton, &browserButton, &scanPluginsButton,
-                          &saveButton, &exportButton, &settingsButton })
+                          &openButton, &saveButton, &exportButton, &settingsButton })
     {
         button->setLookAndFeel(nullptr);
     }
@@ -1113,6 +1115,8 @@ void MainComponent::resized()
     auto utilityButtons = centeredRightUtility.withSizeKeepingCentre(centeredRightUtility.getWidth(), transportControlHeight)
                               .translated(0, transportContentVerticalNudge)
                               .reduced(8, 0);
+    openButton.setBounds(utilityButtons.removeFromLeft(56));
+    utilityButtons.removeFromLeft(8);
     saveButton.setBounds(utilityButtons.removeFromLeft(56));
     utilityButtons.removeFromLeft(8);
     exportButton.setBounds(utilityButtons.removeFromLeft(66));
@@ -1494,6 +1498,10 @@ void MainComponent::buttonClicked(juce::Button* button)
         browserPanel.setVisible(browserPanelVisible);
         resized();
         repaint();
+    }
+    else if (button == &openButton)
+    {
+        openProjectInteractively();
     }
     else if (button == &saveButton)
     {
@@ -2128,10 +2136,10 @@ void MainComponent::saveProjectInteractively()
     }
 
     auto defaultDirectory = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    auto defaultTarget = defaultDirectory.getChildFile("Untitled.orion.json");
+    auto defaultTarget = defaultDirectory.getChildFile("Untitled.orion");
     saveFileChooser = std::make_unique<juce::FileChooser>("Save Orion Project",
                                                           defaultTarget,
-                                                          "*.orion.json");
+                                                          "*.orion");
 
     auto chooserFlags = juce::FileBrowserComponent::saveMode
                       | juce::FileBrowserComponent::canSelectFiles
@@ -2149,11 +2157,77 @@ void MainComponent::saveProjectInteractively()
                                          return;
                                      }
 
-                                     if (! selectedFile.hasFileExtension("orion.json"))
-                                         selectedFile = selectedFile.withFileExtension(".orion.json");
+                                     if (! selectedFile.hasFileExtension("orion"))
+                                         selectedFile = selectedFile.withFileExtension(".orion");
 
                                      saveToTarget(selectedFile);
                                  });
+}
+
+void MainComponent::openProjectInteractively()
+{
+    auto defaultDirectory = currentProjectFile.existsAsFile()
+                                ? currentProjectFile.getParentDirectory()
+                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+    // Accept the new ".orion" extension and the legacy ".orion.json" so older
+    // projects still open.
+    openFileChooser = std::make_unique<juce::FileChooser>("Open Orion Project",
+                                                          defaultDirectory,
+                                                          "*.orion;*.orion.json");
+
+    auto chooserFlags = juce::FileBrowserComponent::openMode
+                      | juce::FileBrowserComponent::canSelectFiles;
+
+    openFileChooser->launchAsync(chooserFlags,
+                                 [this](const juce::FileChooser& chooser)
+                                 {
+                                     auto selectedFile = chooser.getResult();
+                                     openFileChooser.reset();
+
+                                     if (selectedFile == juce::File())
+                                     {
+                                         statusLabel.setText("Open cancelled", juce::dontSendNotification);
+                                         return;
+                                     }
+
+                                     loadProjectFromFile(selectedFile);
+                                 });
+}
+
+void MainComponent::loadProjectFromFile(const juce::File& file)
+{
+    // Make sure nothing is playing/recording while we swap the project out from
+    // under the audio engine.
+    stopTransportFromUi();
+
+    juce::String errorMessage;
+    if (! ProjectSerializer::loadFromFile(projectState, file, &errorMessage))
+    {
+        statusLabel.setText("Open failed: " + errorMessage, juce::dontSendNotification);
+        return;
+    }
+
+    currentProjectFile = file;
+
+    // Re-instantiate hosted VST instruments from the loaded track state, and drop
+    // any selection/history that referred to the previous project.
+    restoreInstrumentsFromProject();
+    arrangementTimeline.resetForNewProject();
+    selectedArrangementClip.reset();
+
+    // Recompute derived audio-clip lengths, refresh transport + inspector UI.
+    refreshAudioClipWarpLengths();
+    refreshClipInspector();
+    loopButton.setToggleState(transportEngine.isLoopEnabled(), juce::dontSendNotification);
+    updateTransportLabels();
+
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->syncToTransportPosition();
+
+    rewindTransportFromUi();
+    resetToPlaylistView();
+    statusLabel.setText("Opened: " + file.getFileName(), juce::dontSendNotification);
 }
 
 void MainComponent::exportProjectInteractively()

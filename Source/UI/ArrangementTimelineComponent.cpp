@@ -411,6 +411,21 @@ bool ArrangementTimelineComponent::redo()
     return true;
 }
 
+void ArrangementTimelineComponent::resetForNewProject()
+{
+    selectedClip.reset();
+    lastClickedClip.reset();
+    selectedTrackIndex.reset();
+    selectedClips.clear();
+    dragState.reset();
+    loopSelectionState.reset();
+    hoverClip.reset();
+    undoStack.clear();
+    redoStack.clear();
+    scrollX = 0.0;
+    repaint();
+}
+
 void ArrangementTimelineComponent::addAudioTrack()
 {
     pushUndoSnapshot();
