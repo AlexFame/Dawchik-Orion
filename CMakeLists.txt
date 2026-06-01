@@ -54,7 +54,9 @@ target_sources(
         Source/main.cpp
         Source/App/MainWindow.cpp
         Source/App/OrionApplication.cpp
+        Source/Audio/AudioInputRecorder.cpp
         Source/Audio/ExportService.cpp
+        Source/Audio/OrionStretchEngine.cpp
         Source/Audio/TransportController.cpp
         Source/Audio/TransportEngine.cpp
         Source/Audio/WarpEngine.cpp
@@ -64,10 +66,15 @@ target_sources(
         Source/Sampler/SamplerEngine.cpp
         Source/Sampler/SamplerPanelComponent.cpp
         Source/UI/ArrangementTimelineComponent.cpp
+        Source/UI/BottomStatusBarComponent.cpp
         Source/UI/BrowserPanelComponent.cpp
+        Source/UI/ClipEditorComponent.cpp
         Source/UI/MainComponent.cpp
         Source/UI/MidiEditorOverlayComponent.cpp
         Source/UI/MixerPanelComponent.cpp
+        Source/UI/SelectionInspectorComponent.cpp
+        Source/UI/SidebarNavComponent.cpp
+        Source/UI/TransportBarComponent.cpp
 )
 
 target_include_directories(

@@ -47,7 +47,7 @@ struct TimelineClip
     ClipType type { ClipType::audio };
     double startBeat { 0.0 };
     double lengthInBeats { 4.0 };
-    juce::Colour colour { juce::Colour(0xffeb6f3a) };
+    juce::Colour colour { juce::Colour(0xffe8401f) };
     std::vector<MidiNote> midiNotes;
     std::vector<PitchSlide> pitchSlides;
     juce::String sourcePath;
@@ -65,6 +65,9 @@ struct TimelineClip
     bool sourceKeyIsMinor { false };
     // When true, audio clips are auto-pitch-shifted to match the project key.
     bool keyShiftEnabled { true };
+    int transposeSemitones { 0 };
+    double sampleStartRatio { 0.0 };
+    double sampleEndRatio { 1.0 };
     // Transient UI/audio state: a clip currently being recorded is visible on
     // the timeline but must not play back until the take is finalized.
     bool recording { false };
@@ -74,7 +77,7 @@ struct TrackState
 {
     juce::String name;
     bool isMidiTrack { false };
-    juce::Colour colour { juce::Colour(0xffeb6f3a) };
+    juce::Colour colour { juce::Colour(0xffe8401f) };
     bool muted { false };
     bool solo { false };
     bool recordArmed { false };

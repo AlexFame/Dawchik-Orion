@@ -6,10 +6,10 @@
 
 namespace
 {
-const auto panelBackground = juce::Colour(0xff151c23);
+const auto panelBackground = juce::Colour(0xff161616);
 const auto panelStroke     = juce::Colour(0xff31404d);
-const auto stripBackground = juce::Colour(0xff1c252e);
-const auto accentColour    = juce::Colour(0xffeb6f3a);
+const auto stripBackground = juce::Colour(0xff1e1e1e);
+const auto accentColour    = juce::Colour(0xffe8401f);
 const auto mutedText       = juce::Colours::white.withAlpha(0.62f);
 
 constexpr double minGainDb = -60.0;

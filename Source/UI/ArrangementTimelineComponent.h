@@ -21,6 +21,7 @@ public:
     ~ArrangementTimelineComponent() override;
 
     std::function<void(int, int)> onMidiClipDoubleClick;
+    std::function<void(int, int)> onAudioClipDoubleClick;
     std::function<void(int, int)> onClipSelectionChanged;
     std::function<void(int)> onTrackHeaderDoubleClick;
     std::function<void(int)> onTrackHeaderRightClick;
@@ -86,7 +87,8 @@ private:
         solo,
         record,
         inspector,
-        volume
+        volume,
+        volumeValue
     };
 
     struct TrackHeaderHit
@@ -132,8 +134,16 @@ private:
     struct InspectorResizeState
     {
         bool active { false };
+        int trackIndex { -1 };
         int mouseDownY { 0 };
         int originalHeight { 0 };
+    };
+
+    struct TrackHeaderWidthResizeState
+    {
+        bool active { false };
+        int mouseDownX { 0 };
+        int originalWidth { 0 };
     };
 
     struct SelectionBoxState
@@ -172,7 +182,7 @@ private:
     void restoreSnapshot(const TimelineSnapshot& snapshot);
     bool hasTimelineChangedSince(const TimelineSnapshot& snapshot) const noexcept;
     void clampScrollOffsets();
-    void adjustZoom(double horizontalDelta, std::optional<juce::Point<int>> focusPoint);
+    void adjustZoom(double horizontalDelta, double verticalDelta, std::optional<juce::Point<int>> focusPoint);
     // Zooms out (only when needed) so the given end-beat is visible with some margin.
     // Used after dropping a clip so the user immediately sees its full extent.
     void ensureBeatVisible(double endBeat);
@@ -194,7 +204,10 @@ private:
     void createMidiClipAt(int trackIndex, double startBeat);
     void deleteSelectedTrack();
     juce::Rectangle<int> getAddTrackButtonBounds() const noexcept;
+    juce::Rectangle<int> getTrackVolumeValueBounds(int trackIndex) const noexcept;
     void updateTrackVolumeFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x);
+    void showTrackVolumeEditor(int trackIndex);
+    void commitTrackVolumeEditor(bool applyChanges);
 
     struct AudioPeaks
     {
@@ -215,19 +228,25 @@ private:
     std::optional<LoopSelectionState> loopSelectionState;
     PlayheadDragState playheadDragState;
     InspectorResizeState inspectorResizeState;
+    TrackHeaderWidthResizeState trackHeaderWidthResizeState;
     SelectionBoxState selectionBoxState;
     TrackVolumeDragState trackVolumeDragState;
+    juce::TextEditor trackVolumeInlineEditor;
+    std::optional<int> volumeEditorTrackIndex;
     std::optional<ClipHit> hoverClip;
     std::vector<TimelineSnapshot> undoStack;
     std::vector<TimelineSnapshot> redoStack;
     
     double pixelsPerBeat { 6.0 };
+    double verticalZoom { 1.0 };
     double scrollX { 0.0 };
     double scrollY { 0.0 };
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };
-    int selectedTrackExpandedHeight { 104 };
+    int trackHeaderWidth { 214 };
+    std::map<int, int> customTrackHeights;
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
-    juce::Colour browserDropPreviewColour { juce::Colour(0xffeb6f3a) };
+    juce::Colour browserDropPreviewColour { juce::Colour(0xffe8401f) };
+    bool browserDropCreatesNewTrack { false };
 };
 }  // namespace orion

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -19,9 +18,14 @@
 #include "../Plugins/PluginManager.h"
 #include "../Sampler/SamplerPanelComponent.h"
 #include "ArrangementTimelineComponent.h"
+#include "BottomStatusBarComponent.h"
 #include "BrowserPanelComponent.h"
+#include "ClipEditorComponent.h"
 #include "MidiEditorOverlayComponent.h"
 #include "MixerPanelComponent.h"
+#include "SelectionInspectorComponent.h"
+#include "SidebarNavComponent.h"
+#include "TransportBarComponent.h"
 
 namespace orion
 {
@@ -31,9 +35,11 @@ class BufferPreviewSource;
 class ArrangementPlaybackSource;
 class ClickTrackSource;
 class MasterStripSource;
+class AudioInputRecorder;
 
 class MainComponent final : public juce::Component,
                             public juce::DragAndDropContainer,
+                            private juce::MenuBarModel,
                             private juce::Timer,
                             private juce::Button::Listener
 {
@@ -54,6 +60,10 @@ public:
     void resetToPlaylistView();
 
 private:
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName) override;
+    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
+
     void timerCallback() override;
     void buttonClicked(juce::Button* button) override;
     void updateTransportLabels();
@@ -78,6 +88,7 @@ private:
     void rewindTransportFromUi();
     void toggleLoopFromUi();
     void toggleMixerFromUi();
+    void toggleClipEditorFromUi();
     void saveProjectInteractively();
     void openProjectInteractively();
     void loadProjectFromFile(const juce::File& file);
@@ -85,6 +96,14 @@ private:
     void openSettingsDialog();
     void refreshAudioClipWarpLengths();
     void refreshClipInspector();
+    void refreshClipEditor();
+    void setClipEditorLocalPreviewPosition(double sourceRatio);
+    bool startClipEditorPreview();
+    void stopClipEditorPreview(bool resetToStart);
+    void updateClipEditorPreviewPlayhead();
+    bool setClipEditorPreviewPlaybackPosition(double sourceRatio);
+    void rebuildClipEditorWaveform(const juce::String& sourcePath);
+    void normalizeSelectedAudioClip();
     void setClipInspectorVisible(bool shouldShow);
     void applyGainFromInspectorText();
     void applyTempoFromTransportText();
@@ -100,11 +119,26 @@ private:
     TransportController transportController;
     ArrangementTimelineComponent arrangementTimeline;
     BrowserPanelComponent browserPanel;
+    SidebarNavComponent sidebarNav;
+    SelectionInspectorComponent selectionInspector;
+    TransportBarComponent transportBar;
+    BottomStatusBarComponent bottomStatusBar;
     MidiEditorOverlayComponent midiEditorOverlay;
+    ClipEditorComponent clipEditorPanel;
     SamplerPanelComponent samplerPanel;
     MixerPanelComponent mixerPanel;
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
+    std::map<std::string, std::pair<std::vector<float>, std::vector<float>>> clipEditorWaveformCache;
+    // Cache of fully-prepared (trimmed + pitch-shifted) clip-editor preview buffers,
+    // keyed by source|startSample|numSamples|semitones|backend, so re-triggering or
+    // returning to a previous pitch is instant instead of re-stretching every time.
+    std::map<std::string, std::shared_ptr<juce::AudioBuffer<float>>> clipEditorPreviewCache;
+    // Heavy pitch-stretch for a NEW preview pitch runs on this background thread so
+    // the UI never freezes; a generation counter discards stale builds.
+    juce::ThreadPool clipEditorPreviewPool { 1 };
+    std::atomic<int> clipEditorPreviewBuildGen { 0 };
+    double clipEditorPreviewResumeSeconds { -1.0 };
 
     juce::Label headerLabel;
     juce::Label statusLabel;
@@ -188,9 +222,13 @@ private:
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;
     std::unique_ptr<BufferPreviewSource> previewBufferSource;
+    juce::AudioTransportSource clipEditorPreviewTransportSource;
+    std::unique_ptr<BufferPreviewSource> clipEditorPreviewBufferSource;
     std::unique_ptr<ArrangementPlaybackSource> arrangementPlaybackSource;
     std::unique_ptr<ClickTrackSource> clickTrackSource;
     std::unique_ptr<MasterStripSource> masterStripSource;
+    std::unique_ptr<AudioInputRecorder> audioInputRecorder;
+    bool audioRecorderCallbackAttached { false };
     double masterGainDb { 0.0 };
     // Decayed per-track output levels (0..1) for the timeline + mixer meters.
     // MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks
@@ -206,6 +244,14 @@ private:
     juce::File currentPreviewFile;
     double currentPreviewTempoBpm { 0.0 };
     std::optional<std::pair<int, int>> selectedArrangementClip;
+    std::optional<std::pair<int, int>> clipEditorPreviewClip;
+    std::map<std::pair<int, int>, std::pair<double, double>> clipEditorSelectionRanges;
+    double clipEditorPreviewStartRatio { 0.0 };
+    double clipEditorPreviewEndRatio { 1.0 };
+    double clipEditorPreviewPlayheadRatio { 0.0 };
+    double clipEditorLocalPreviewStartRatio { 0.0 };
+    double clipEditorLocalPreviewEndRatio { 1.0 };
+    double clipEditorLocalPreviewDurationSeconds { 0.0 };
 
     // Live MIDI recording state — captures keys pressed on the laptop keyboard
     // while transport is playing AND record-armed AND a MIDI track is R-armed.
@@ -223,9 +269,22 @@ private:
     };
     std::optional<RecordingSession> recordingSession;
 
+    struct AudioRecordingSession
+    {
+        int trackIndex { -1 };
+        int clipIndex { -1 };
+        double clipStartBeat { 0.0 };
+        double sampleRate { 44100.0 };
+        juce::File file;
+    };
+    std::optional<AudioRecordingSession> audioRecordingSession;
+
     void recordNoteOn(int pitch, int velocity);
     void recordNoteOff(int pitch);
     void finalizeRecordingClip();
+    void startAudioRecordingClip(int trackIndex);
+    void finalizeAudioRecordingClip();
+    juce::File getAudioRecordingDirectory() const;
     int browserPanelWidth { 300 };
     int exportSampleRate { 44100 };
     // When false the browser panel is hidden and the playlist expands to fill the window.

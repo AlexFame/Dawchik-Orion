@@ -1,16 +1,21 @@
 #include "MidiEditorOverlayComponent.h"
 
+#include "OrionTheme.h"
+
 #include <algorithm>
 #include <limits>
 
 namespace
 {
-const auto overlayBackground = juce::Colour(0xee090d11);
-const auto panelBackground = juce::Colour(0xff131a20);
-const auto panelStroke = juce::Colour(0xff2a3743);
-const auto mutedText = juce::Colours::white.withAlpha(0.64f);
-const auto playheadColour = juce::Colour(0xfff5c451);
-const auto velocityLaneBackground = juce::Colour(0xff151c23);
+const auto overlayBackground = orion::theme::core::canvas.withAlpha(0.96f);
+const auto panelBackground = orion::theme::surface::primary;
+const auto panelStroke = orion::theme::line::normal;
+const auto mutedText = orion::theme::text::tertiary.withAlpha(0.88f);
+const auto playheadColour = orion::theme::warm::red;
+const auto velocityLaneBackground = orion::theme::core::deepSpace;
+const auto pianoGridBase = orion::theme::core::deepSpace;
+const auto pianoGridScaleRow = orion::theme::surface::elevated.withAlpha(0.55f);
+const auto pianoGridBlackRow = orion::theme::core::canvas.withAlpha(0.52f);
 constexpr int resizeHandleWidth = 10;
 constexpr double minimumNoteLengthInBeats = 0.25;
 constexpr int minimumNoteWidthPx = 4;
@@ -93,6 +98,12 @@ constexpr std::array<SnapSetting, 5> snapSettings {{
 	    const auto octave = (pitch / 12) - 1;
 	    return juce::String(noteNames[pitchClass]) + juce::String(octave);
 	}
+
+    juce::Colour midiAccentForTrack(juce::Colour trackColour, bool selected = false)
+    {
+        return trackColour.withSaturation(selected ? 0.94f : 0.88f)
+                          .brighter(selected ? 0.08f : 0.02f);
+    }
 }  // namespace
 
 namespace orion
@@ -103,7 +114,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     setVisible(false);
     startTimerHz(120);
 
-    titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    titleLabel.setColour(juce::Label::textColourId, theme::text::primary);
     titleLabel.setFont(juce::FontOptions(24.0f, juce::Font::bold));
     addAndMakeVisible(titleLabel);
 
@@ -111,7 +122,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     subtitleLabel.setFont(juce::FontOptions(13.0f, juce::Font::plain));
     addAndMakeVisible(subtitleLabel);
 
-    contextLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.88f));
+    contextLabel.setColour(juce::Label::textColourId, theme::text::primary.withAlpha(0.90f));
     contextLabel.setFont(juce::FontOptions(15.0f, juce::Font::bold));
     contextLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(contextLabel);
@@ -126,46 +137,46 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     scaleLabel.setText("Scale", juce::dontSendNotification);
     snapLabel.setText("Snap", juce::dontSendNotification);
 
-    scaleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b232b));
-    scaleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    scaleButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    scaleButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     scaleButton.addListener(this);
     addAndMakeVisible(scaleButton);
 
-    snapButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b232b));
-    snapButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    snapButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    snapButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     snapButton.addListener(this);
     addAndMakeVisible(snapButton);
 
     quantizeButton.setButtonText("Quantize");
     quantizeButton.setTooltip("Quantize selected notes (or all if none selected) to the Snap grid  -  Option+Q");
-    quantizeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b232b));
-    quantizeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    quantizeButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    quantizeButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     quantizeButton.addListener(this);
     addAndMakeVisible(quantizeButton);
 
     slidePenButton.setButtonText("Slide Pen");
     slidePenButton.setClickingTogglesState(true);
     slidePenButton.setTooltip("Draw pitch slides directly in the piano roll");
-    slidePenButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b232b));
-    slidePenButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffeb6f3a));
-    slidePenButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    slidePenButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    slidePenButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    slidePenButton.setColour(juce::TextButton::buttonOnColourId, theme::warm::red);
+    slidePenButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    slidePenButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
     slidePenButton.addListener(this);
     addAndMakeVisible(slidePenButton);
 
     slideVisibilityButton.setButtonText(getSlideVisibilityName());
     slideVisibilityButton.setTooltip("Cycle slide visibility: Ghost, Active, Off");
-    slideVisibilityButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b232b));
-    slideVisibilityButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    slideVisibilityButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    slideVisibilityButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     slideVisibilityButton.addListener(this);
     addAndMakeVisible(slideVisibilityButton);
 
     scaleLockLabel.setText("Scale Lock", juce::dontSendNotification);
-    scaleLockLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
+    scaleLockLabel.setColour(juce::Label::textColourId, theme::text::secondary.withAlpha(0.82f));
     scaleLockLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
     addAndMakeVisible(scaleLockLabel);
 
-    scaleLockToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    scaleLockToggle.setColour(juce::ToggleButton::textColourId, theme::text::primary);
     scaleLockToggle.setToggleState(scaleLockEnabled, juce::dontSendNotification);
     scaleLockToggle.onClick = [this]
     {
@@ -179,8 +190,8 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     focusToggle.setVisible(false);
 
     closeButton.setButtonText("Back To Arrangement");
-    closeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffeb6f3a));
-    closeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    closeButton.setColour(juce::TextButton::buttonColourId, theme::warm::red);
+    closeButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     closeButton.addListener(this);
     addAndMakeVisible(closeButton);
 }
@@ -288,14 +299,18 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     const auto gridArea = getGridBounds();
     const auto velocityLane = getVelocityLaneBounds();
 
-    g.setColour(panelBackground);
+    juce::ColourGradient topBarGradient(theme::core::deepSpace, topBar.getX(), topBar.getCentreY(),
+                                        theme::warm::red.darker(0.82f).withAlpha(0.72f), topBar.getRight(), topBar.getCentreY(), false);
+    topBarGradient.addColour(0.42, theme::core::studio);
+    g.setGradientFill(topBarGradient);
     g.fillRoundedRectangle(topBar.toFloat(), 20.0f);
+    g.setColour(panelBackground);
     g.fillRoundedRectangle(keyboardArea.toFloat(), 18.0f);
     g.fillRoundedRectangle(visibleGrid.toFloat(), 18.0f);
     g.setColour(velocityLaneBackground);
     g.fillRoundedRectangle(velocityLane.toFloat(), 16.0f);
 
-    g.setColour(panelStroke);
+    g.setColour(panelStroke.withAlpha(0.92f));
     g.drawRoundedRectangle(topBar.toFloat(), 20.0f, 1.0f);
     g.drawRoundedRectangle(keyboardArea.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(visibleGrid.toFloat(), 18.0f, 1.0f);
@@ -335,8 +350,20 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     const auto kbF       = keyboardArea.toFloat().reduced(1.0f);
     const float blackW   = kbF.getWidth() * 0.72f;                 // black-key length
     const auto laneTopY  = [&](int lane) { return static_cast<float>(gridArea.getY() + lane * laneHeight); };
+    // Keyboard highlight uses the physical key shape. The grid highlight below stays
+    // lane-sized, so note rows remain precise while the piano keys still feel real.
+    const auto physicalLaneBounds = [&](int lane, float x, float width)
+    {
+        const auto pitch = laneIndexToPitch(lane);
+        const auto top = laneTopY(lane);
+        const auto h = static_cast<float>(laneHeight);
+        const float yTop = (! isBlackKey(pitch) && isBlackKey(pitch + 1)) ? top - h * 0.5f : top;
+        const float yBottom = (! isBlackKey(pitch) && isBlackKey(pitch - 1)) ? top + h * 1.5f : top + h;
+        return juce::Rectangle<float>(x, yTop, width, yBottom - yTop);
+    };
 
-    // (1) Continuous white surface — no gaps or background between white keys.
+    // Physical keyboard: white key bed + black key overlay. The grid rows below
+    // use matching vertical extents, so the pretty piano shape does not lie alone.
     {
         juce::ColourGradient bed(juce::Colour(0xffd7dbdf), kbF.getX(), kbF.getCentreY(),
                                  juce::Colour(0xffffffff), kbF.getRight(), kbF.getCentreY(), false);
@@ -351,8 +378,6 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         g.fillRoundedRectangle(kbF, 17.0f);
     }
 
-    // (2) White key boundaries only. No row separators: draw the real white-key
-    //     edges, then let black keys overlay and hide the left side where needed.
     for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
     {
         const auto pitch = laneIndexToPitch(lane);
@@ -365,81 +390,80 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         if (y < kbF.getY() + 2.0f || y > kbF.getBottom() - 2.0f)
             continue;
 
-        g.setColour(juce::Colours::black.withAlpha(0.46f));
+        g.setColour(theme::core::canvas.withAlpha(0.54f));
         g.drawLine(kbF.getX(), y, kbF.getRight(), y, 1.35f);
-        g.setColour(juce::Colours::white.withAlpha(0.35f));
+        g.setColour(theme::text::primary.withAlpha(0.32f));
         g.drawLine(kbF.getX() + 1.0f, y + 1.0f, kbF.getRight() - 1.0f, y + 1.0f, 1.0f);
     }
 
-    // Active white keys: draw a depressed white-key segment over the continuous bed.
     for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
     {
         const auto pitch = laneIndexToPitch(lane);
         if (isBlackKey(pitch) || ! activePlaybackPitches.contains(pitch))
             continue;
 
-        const auto top = laneTopY(lane);
-        const auto h = static_cast<float>(laneHeight);
-        const float yTop = isBlackKey(pitch + 1) ? top - h * 0.5f : top;
-        const float yBottom = isBlackKey(pitch - 1) ? top + h * 1.5f : top + h;
-        auto pressed = juce::Rectangle<float>(kbF.getX() + 1.0f, yTop + 1.0f, kbF.getWidth() - 3.0f, yBottom - yTop - 2.0f)
-                           .getIntersection(kbF.reduced(1.0f));
-        if (pressed.isEmpty())
+        auto keyRect = physicalLaneBounds(lane, kbF.getX(), kbF.getWidth()).getIntersection(kbF);
+        if (keyRect.isEmpty())
             continue;
 
-        const bool mousePressed = mousePreviewPitch.has_value() && *mousePreviewPitch == pitch;
-        pressed = pressed.translated(mousePressed ? 2.4f : 1.2f, mousePressed ? 0.8f : 0.4f)
-                         .withTrimmedRight(mousePressed ? 3.2f : 1.8f);
+        const auto mousePressed = mousePreviewPitch.has_value() && *mousePreviewPitch == pitch;
+        const auto keyAccent = midiAccentForTrack(trackColour, true);
+        const auto shadow = keyRect.translated(mousePressed ? 2.4f : 1.4f, mousePressed ? 1.2f : 0.6f)
+                                   .withTrimmedRight(mousePressed ? 2.4f : 1.2f)
+                                   .reduced(1.0f, 1.0f);
 
-        g.setColour(juce::Colours::black.withAlpha(mousePressed ? 0.34f : 0.25f));
-        g.fillRoundedRectangle(pressed.translated(-1.2f, -0.8f), 5.0f);
+        g.setColour(theme::core::canvas.withAlpha(mousePressed ? 0.34f : 0.25f));
+        g.fillRoundedRectangle(shadow, 5.0f);
 
-        juce::ColourGradient press(trackColour.brighter(0.78f).withAlpha(mousePressed ? 0.88f : 0.72f),
-                                   pressed.getX(), pressed.getY(),
-                                   trackColour.darker(0.25f).withAlpha(mousePressed ? 0.92f : 0.76f),
-                                   pressed.getRight(), pressed.getY(),
+        g.saveState();
+        juce::Path keyboardClip;
+        keyboardClip.addRoundedRectangle(kbF, 17.0f);
+        g.reduceClipRegion(keyboardClip);
+
+        juce::ColourGradient press(keyAccent.brighter(0.28f).withAlpha(mousePressed ? 0.94f : 0.80f),
+                                   keyRect.getX(), keyRect.getY(),
+                                   keyAccent.darker(0.28f).withAlpha(mousePressed ? 0.96f : 0.82f),
+                                   keyRect.getRight(), keyRect.getY(),
                                    false);
-        press.addColour(0.55, trackColour.withAlpha(mousePressed ? 0.74f : 0.58f));
+        press.addColour(0.55, keyAccent.withAlpha(mousePressed ? 0.82f : 0.68f));
         g.setGradientFill(press);
-        g.fillRoundedRectangle(pressed, 5.0f);
+        g.fillRect(keyRect);
 
+        const auto insetArea = keyRect.reduced(mousePressed ? 2.0f : 1.2f, mousePressed ? 1.4f : 0.9f);
         juce::ColourGradient inset(juce::Colours::black.withAlpha(mousePressed ? 0.32f : 0.22f),
-                                   pressed.getX(), pressed.getY(),
+                                   insetArea.getX(), insetArea.getY(),
                                    juce::Colours::transparentBlack,
-                                   pressed.getX(), pressed.getBottom(),
+                                   insetArea.getX(), insetArea.getBottom(),
                                    false);
         g.setGradientFill(inset);
-        g.fillRoundedRectangle(pressed, 5.0f);
+        g.fillRect(insetArea);
 
-        g.setColour(juce::Colours::white.withAlpha(mousePressed ? 0.30f : 0.22f));
-        g.drawLine(pressed.getX() + 4.0f, pressed.getBottom() - 2.0f,
-                   pressed.getRight() - 4.0f, pressed.getBottom() - 2.0f, 1.2f);
-        g.setColour(juce::Colours::black.withAlpha(0.36f));
-        g.drawRoundedRectangle(pressed, 5.0f, 1.0f);
+        g.setColour(theme::text::primary.withAlpha(mousePressed ? 0.30f : 0.22f));
+        g.drawLine(keyRect.getX() + 4.0f, keyRect.getBottom() - 2.0f,
+                   keyRect.getRight() - 4.0f, keyRect.getBottom() - 2.0f, 1.2f);
+        g.restoreState();
     }
 
-    // (3) Black keys: raised overlay sitting on top of the white bed.
     for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
     {
         const auto pitch = laneIndexToPitch(lane);
         if (! isBlackKey(pitch))
             continue;
+
         const auto top = laneTopY(lane);
-        const float h  = static_cast<float>(laneHeight);
-        // Black key: a dark bar emerging from the left edge with a ROUNDED front
-        // (right) end. Single colour + shadow only — no grey face.
+        const auto h = static_cast<float>(laneHeight);
         juce::Rectangle<float> bk(kbF.getX() - 2.0f, top + 1.5f, blackW + 2.0f, h - 3.0f);
         if (bk.getBottom() < kbF.getY() || bk.getY() > kbF.getBottom())
             continue;
 
         const bool isActive = activePlaybackPitches.contains(pitch);
         const bool mousePressed = mousePreviewPitch.has_value() && *mousePreviewPitch == pitch;
+        const auto keyAccent = midiAccentForTrack(trackColour, true);
         if (isActive)
-        {
             bk = bk.translated(mousePressed ? 2.8f : 1.6f, mousePressed ? 1.4f : 0.8f)
                    .withTrimmedRight(mousePressed ? 2.8f : 1.4f)
                    .reduced(0.0f, mousePressed ? 0.5f : 0.2f);
-        }
+
         const float r = juce::jmin(7.0f, bk.getHeight() * 0.5f);
         auto roundFront = [r](juce::Rectangle<float> q)
         {
@@ -447,24 +471,21 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
             p.addRoundedRectangle(q.getX(), q.getY(), q.getWidth(), q.getHeight(), r, r, false, true, false, true);
             return p;
         };
-        const auto kp = roundFront(bk);
 
-        // Soft drop shadow so the key reads as raised above the white bed.
-        g.setColour(juce::Colours::black.withAlpha(isActive ? 0.22f : 0.42f));
+        const auto kp = roundFront(bk);
+        g.setColour(theme::core::canvas.withAlpha(isActive ? 0.22f : 0.42f));
         g.fillPath(roundFront(bk.translated(isActive ? 0.7f : 1.5f, isActive ? 1.0f : 2.5f)));
 
-        // One solid dark colour with only a gentle top→bottom sheen.
-        const juce::Colour topC = isActive ? trackColour.brighter(0.40f) : juce::Colour(0xff2b2b30);
-        const juce::Colour botC = isActive ? trackColour.darker(0.20f)   : juce::Colour(0xff141416);
+        const juce::Colour topC = isActive ? keyAccent.brighter(0.18f) : theme::surface::hover.darker(0.18f);
+        const juce::Colour botC = isActive ? keyAccent.darker(0.28f) : theme::core::voidBlack;
         juce::ColourGradient body(topC, bk.getX(), bk.getY(), botC, bk.getX(), bk.getBottom(), false);
         g.setGradientFill(body);
         g.fillPath(kp);
 
-        // Faint top gloss + soft outline.
-        g.setColour(juce::Colours::white.withAlpha(isActive ? 0.18f : 0.14f));
+        g.setColour(theme::text::primary.withAlpha(isActive ? 0.18f : 0.14f));
         g.drawLine(bk.getX() + r, bk.getY() + (isActive ? bk.getHeight() - 2.0f : 1.3f),
                    bk.getRight() - r, bk.getY() + (isActive ? bk.getHeight() - 2.0f : 1.3f), 1.0f);
-        g.setColour(juce::Colours::black.withAlpha(0.5f));
+        g.setColour(theme::core::canvas.withAlpha(0.5f));
         g.strokePath(kp, juce::PathStrokeType(1.0f));
     }
 
@@ -482,9 +503,9 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         const auto active = activePlaybackPitches.contains(pitch);
         const auto pitchClass = ((pitch % 12) + 12) % 12;
         const auto root = pitchClass == scaleRoot;
-        g.setColour(active ? juce::Colours::white.withAlpha(0.96f)
-                           : (black ? juce::Colours::white.withAlpha(0.62f)
-                                    : juce::Colours::black.withAlpha(0.46f)));
+        g.setColour(active ? theme::text::primary.withAlpha(0.96f)
+                           : (black ? theme::text::secondary.withAlpha(0.62f)
+                                    : theme::text::inverse.withAlpha(0.50f)));
         g.setFont(juce::FontOptions(active ? 10.5f : 9.0f, (active || root) ? juce::Font::bold : juce::Font::plain));
         g.drawText(noteNameForPitch(pitch), keyRow.reduced(9, 0), juce::Justification::centredLeft);
     }
@@ -494,50 +515,104 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     for (int lane = firstVisibleLane; lane <= lastVisibleLane + 1; ++lane)
     {
         const auto y = static_cast<float>(gridArea.getY() + lane * laneHeight);
-        g.setColour(juce::Colours::white.withAlpha(0.06f));
+        g.setColour(theme::line::subtle.withAlpha(0.16f));
         g.drawLine(static_cast<float>(visibleGrid.getX()), y, static_cast<float>(visibleGrid.getRight()), y, 1.0f);
+    }
+
+    g.setColour(pianoGridBase);
+    g.fillRect(visibleGrid);
+
+    // Uniform lane rect helper — must match the click→pitch mapping (yToPitch) and
+    // the note rectangles, so everything lines up on the grid.
+    const auto laneRowRect = [&](int lane)
+    {
+        return juce::Rectangle<float>(
+                   static_cast<float>(visibleGrid.getX()),
+                   static_cast<float>(gridArea.getY() + lane * laneHeight),
+                   static_cast<float>(visibleGrid.getWidth()),
+                   static_cast<float>(laneHeight))
+                   .getIntersection(visibleGrid.toFloat());
+    };
+
+    // 1) Black-key rows first (darker base).
+    for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
+    {
+        const auto pitch = laneIndexToPitch(lane);
+        if (! isBlackKey(pitch))
+            continue;
+        const auto row = laneRowRect(lane);
+        if (row.isEmpty())
+            continue;
+        g.setColour(pianoGridBlackRow);
+        g.fillRect(row);
+    }
+
+    // 2) In-scale rows ON TOP — so scale notes that fall on BLACK keys (e.g. D#, G#,
+    //    A# in C minor) are highlighted too, not hidden under the black-row fill.
+    for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
+    {
+        const auto pitch = laneIndexToPitch(lane);
+        if (! isPitchInScale(pitch))
+            continue;
+        const auto row = laneRowRect(lane);
+        if (row.isEmpty())
+            continue;
+        g.setColour(pianoGridScaleRow);
+        g.fillRect(row);
     }
 
     for (int lane = firstVisibleLane; lane <= lastVisibleLane; ++lane)
     {
         const auto pitch = laneIndexToPitch(lane);
-        const auto y = static_cast<int>(std::round(gridArea.getY() + lane * laneHeight));
-        auto row = juce::Rectangle<int>(visibleGrid.getX(), y, visibleGrid.getWidth(), static_cast<int>(std::ceil(laneHeight)));
-        row = row.getIntersection(visibleGrid);
-
-        // Scale highlight: tonic row strongest, in-scale rows tinted with the track
-        // colour, out-of-scale rows darkened so the usable lanes visually pop.
-        const auto pitchClass = ((pitch % 12) + 12) % 12;
-        if (pitchClass == scaleRoot)
-            g.setColour(trackColour.withAlpha(0.20f));
-        else if (isPitchInScale(pitch))
-            g.setColour(trackColour.withAlpha(0.075f));
-        else
-            g.setColour(juce::Colours::black.withAlpha(isBlackKey(pitch) ? 0.24f : 0.13f));
-        g.fillRect(row);
+        auto row = juce::Rectangle<float>(
+                       static_cast<float>(visibleGrid.getX()),
+                       static_cast<float>(gridArea.getY() + lane * laneHeight),
+                       static_cast<float>(visibleGrid.getWidth()),
+                       static_cast<float>(laneHeight))
+                       .getIntersection(visibleGrid.toFloat());
+        if (row.isEmpty())
+            continue;
 
         if (activePlaybackPitches.contains(pitch))
         {
-            auto laneGlow = row.toFloat().reduced(0.0f, 1.0f);
-            juce::ColourGradient glow(trackColour.brighter(0.65f).withAlpha(0.30f),
+            auto laneGlow = row.reduced(0.0f, 1.0f);
+            const auto keyAccent = midiAccentForTrack(trackColour, true);
+            juce::ColourGradient glow(keyAccent.brighter(0.22f).withAlpha(0.30f),
                                       laneGlow.getX(), laneGlow.getCentreY(),
-                                      trackColour.darker(0.45f).withAlpha(0.015f),
+                                      keyAccent.darker(0.42f).withAlpha(0.015f),
                                       laneGlow.getRight(), laneGlow.getCentreY(),
                                       false);
-            glow.addColour(0.18, trackColour.withAlpha(0.22f));
-            glow.addColour(0.48, trackColour.withAlpha(0.085f));
+            glow.addColour(0.18, keyAccent.withAlpha(0.22f));
+            glow.addColour(0.48, keyAccent.withAlpha(0.085f));
             g.setGradientFill(glow);
             g.fillRect(laneGlow);
 
-            juce::ColourGradient edge(trackColour.brighter(0.85f).withAlpha(0.42f),
+            juce::ColourGradient edge(keyAccent.brighter(0.26f).withAlpha(0.42f),
                                       laneGlow.getX(), laneGlow.getY(),
-                                      trackColour.withAlpha(0.02f),
+                                      keyAccent.withAlpha(0.02f),
                                       laneGlow.getRight(), laneGlow.getY(),
                                       false);
             g.setGradientFill(edge);
             g.fillRect(laneGlow.withHeight(1.4f));
             g.fillRect(laneGlow.withY(laneGlow.getBottom() - 1.4f).withHeight(1.4f));
         }
+    }
+
+    // Draw horizontal pitch-cell boundaries after row fills so each note cell reads
+    // clearly without making the piano roll feel like a bright spreadsheet.
+    for (int lane = firstVisibleLane; lane <= lastVisibleLane + 1; ++lane)
+    {
+        const auto y = static_cast<float>(gridArea.getY() + lane * laneHeight);
+        if (y < static_cast<float>(visibleGrid.getY() - 1) || y > static_cast<float>(visibleGrid.getBottom() + 1))
+            continue;
+
+        const auto pitchBelow = laneIndexToPitch(juce::jlimit(0, displayedLaneCount - 1, lane));
+        const auto octaveBoundary = (pitchBelow % 12) == 0;
+        g.setColour(octaveBoundary ? theme::line::strong.withAlpha(0.34f)
+                                   : theme::line::normal.withAlpha(0.24f));
+        g.drawLine(static_cast<float>(visibleGrid.getX()), y,
+                   static_cast<float>(visibleGrid.getRight()), y,
+                   octaveBoundary ? 1.2f : 1.0f);
     }
 
     // Dim the area BEYOND the clip end so the user can see where the pattern stops.
@@ -548,7 +623,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         if (clipEndX < static_cast<float>(visibleGrid.getRight()))
         {
             const auto dimX = juce::jmax(static_cast<float>(visibleGrid.getX()), clipEndX);
-            g.setColour(juce::Colours::black.withAlpha(0.45f));
+            g.setColour(theme::core::canvas.withAlpha(0.52f));
             g.fillRect(juce::Rectangle<float>(dimX,
                                               static_cast<float>(visibleGrid.getY()),
                                               static_cast<float>(visibleGrid.getRight()) - dimX,
@@ -571,11 +646,11 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         const bool isBeatLine = (step % stepsPerBeat) == 0;
 
         if (isBarLine)
-            g.setColour(juce::Colours::white.withAlpha(0.32f));
+            g.setColour(theme::line::strong.withAlpha(0.64f));
         else if (isBeatLine)
-            g.setColour(juce::Colours::white.withAlpha(0.14f));
+            g.setColour(theme::line::normal.withAlpha(0.44f));
         else
-            g.setColour(juce::Colours::white.withAlpha(0.045f));
+            g.setColour(theme::line::subtle.withAlpha(0.26f));
 
         g.drawLine(x, static_cast<float>(visibleGrid.getY()), x, static_cast<float>(visibleGrid.getBottom()),
                    isBarLine ? 2.0f : (isBeatLine ? 1.4f : 1.0f));
@@ -584,13 +659,13 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     // Bar numbers along the top of the grid.
     {
         const auto rulerHeight = 16.0f;
-        g.setColour(juce::Colours::black.withAlpha(0.35f));
+        g.setColour(theme::core::canvas.withAlpha(0.42f));
         g.fillRect(juce::Rectangle<float>(static_cast<float>(visibleGrid.getX()),
                                           static_cast<float>(visibleGrid.getY()),
                                           static_cast<float>(visibleGrid.getWidth()),
                                           rulerHeight));
         g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-        g.setColour(juce::Colours::white.withAlpha(0.78f));
+        g.setColour(theme::text::secondary.withAlpha(0.86f));
         for (int step = 0; step <= steps; step += stepsPerBar)
         {
             const auto beat = static_cast<double>(step) * snapSizeInBeats;
@@ -613,7 +688,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         if (clipEndX >= static_cast<float>(visibleGrid.getX() - 4)
             && clipEndX <= static_cast<float>(visibleGrid.getRight() + 4))
         {
-            g.setColour(juce::Colour(0xffeb6f3a).withAlpha(0.85f)); // accent
+            g.setColour(theme::warm::red.withAlpha(0.88f));
             g.drawLine(clipEndX, static_cast<float>(visibleGrid.getY()),
                        clipEndX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
         }
@@ -629,12 +704,15 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
             const auto noteBounds = getNoteBounds(note);
             const auto isSelected = isNoteSelected(noteIndex);
 
-            g.setColour(trackColour.withSaturation(isSelected ? 0.92f : 0.82f));
+            const auto noteColour = midiAccentForTrack(trackColour, isSelected);
+            g.setColour(noteColour);
             g.fillRoundedRectangle(noteBounds.toFloat(), 6.0f);
+            g.setColour(noteColour.darker(0.45f).withAlpha(0.68f));
+            g.drawRoundedRectangle(noteBounds.toFloat().reduced(0.5f), 5.5f, 1.0f);
 
             if (isSelected)
             {
-                g.setColour(juce::Colours::white.withAlpha(0.75f));
+                g.setColour(theme::text::primary.withAlpha(0.80f));
                 g.drawRoundedRectangle(noteBounds.toFloat(), 6.0f, 1.4f);
             }
         }
@@ -667,11 +745,11 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
             const auto shadowAlpha = ghosted ? 0.16f : 0.42f;
             const auto highlightAlpha = ghosted ? 0.16f : 0.54f;
 
-            g.setColour(juce::Colours::black.withAlpha(shadowAlpha));
+            g.setColour(theme::core::canvas.withAlpha(shadowAlpha));
             g.strokePath(path, juce::PathStrokeType(selected ? 8.0f : 6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-            g.setColour((selected ? juce::Colour(0xff5bd6ff) : juce::Colour(0xffeb6f3a)).withAlpha(bodyAlpha));
+            g.setColour((selected ? theme::cool::aqua : theme::warm::red).withAlpha(bodyAlpha));
             g.strokePath(path, juce::PathStrokeType(selected ? 4.0f : 3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-            g.setColour(juce::Colours::white.withAlpha(selected ? 0.72f : highlightAlpha));
+            g.setColour(theme::text::primary.withAlpha(selected ? 0.72f : highlightAlpha));
             g.strokePath(path, juce::PathStrokeType(1.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
             if (selected)
@@ -682,11 +760,11 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
                     const auto y = pitchToCentreY(point.pitch);
                     juce::Rectangle<float> handle(x - slideHandleRadiusPx, y - slideHandleRadiusPx,
                                                   slideHandleRadiusPx * 2.0f, slideHandleRadiusPx * 2.0f);
-                    g.setColour(juce::Colours::black.withAlpha(0.45f));
+                    g.setColour(theme::core::canvas.withAlpha(0.45f));
                     g.fillEllipse(handle.translated(1.0f, 1.0f));
-                    g.setColour(juce::Colour(0xff5bd6ff));
+                    g.setColour(theme::cool::aqua);
                     g.fillEllipse(handle);
-                    g.setColour(juce::Colours::white.withAlpha(0.82f));
+                    g.setColour(theme::text::primary.withAlpha(0.82f));
                     g.drawEllipse(handle.reduced(1.0f), 1.2f);
                 };
 
@@ -728,9 +806,9 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     if (marqueeState.has_value() && marqueeState->movedEnough)
     {
         const auto clippedMarquee = marqueeState->bounds.getIntersection(visibleGrid);
-        g.setColour(juce::Colours::white.withAlpha(0.12f));
+        g.setColour(theme::cool::cyan.withAlpha(0.12f));
         g.fillRect(clippedMarquee);
-        g.setColour(juce::Colours::white.withAlpha(0.62f));
+        g.setColour(theme::cool::cyan.withAlpha(0.62f));
         g.drawRect(clippedMarquee, 1);
     }
 
@@ -743,7 +821,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
         if (x < static_cast<float>(velocityLane.getX() - 8) || x > static_cast<float>(velocityLane.getRight() + 8))
             continue;
-        g.setColour(step % 4 == 0 ? juce::Colours::white.withAlpha(0.10f) : juce::Colours::white.withAlpha(0.035f));
+        g.setColour(step % 4 == 0 ? theme::line::normal.withAlpha(0.24f) : theme::line::subtle.withAlpha(0.12f));
         g.drawLine(x, static_cast<float>(velocityLane.getY()), x, static_cast<float>(velocityLane.getBottom()), step % 4 == 0 ? 1.4f : 1.0f);
     }
 
@@ -1276,7 +1354,9 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
         // Scale lock: snap new notes to the closest in-scale pitch when enabled.
         if (scaleLockEnabled && ! isPitchInScale(pitch))
             pitch = snapPitchToScale(pitch);
-        activeClip->midiNotes.push_back(MidiNote { pitch, snappedBeat, 1.0, 100 });
+        // FL-style: a freshly placed note takes the current grid/snap length.
+        const auto newLength = juce::jmax(minimumNoteLengthInBeats, snapSizeInBeats);
+        activeClip->midiNotes.push_back(MidiNote { pitch, snappedBeat, newLength, 100 });
         selectSingleNote(static_cast<int>(activeClip->midiNotes.size()) - 1);
     }
 
@@ -1303,6 +1383,17 @@ void MidiEditorOverlayComponent::mouseWheelMove(const juce::MouseEvent& event, c
     if (nowMs < ignoreWheelUntilMs && totalDelta < 0.045f)
         return;
 
+    // Hold Cmd/Ctrl to zoom into the point under the cursor (for mouse-wheel users).
+    if (event.mods.isCommandDown() || event.mods.isCtrlDown())
+    {
+        const auto zoomDelta = static_cast<double>(wheel.deltaY) * 1.35;
+        if (std::abs(zoomDelta) > 0.0001)
+            adjustZoom(zoomDelta, zoomDelta, event.getPosition());
+        return;
+    }
+
+    // Plain two-finger scroll / wheel = PAN (vertical + horizontal), like a native
+    // Mac trackpad. Pinch (mouseMagnify) is what zooms into the cursor.
     if (std::abs(wheel.deltaX) > 0.0001f || std::abs(wheel.deltaY) > 0.0001f)
     {
         scrollX -= static_cast<double>(wheel.deltaX) * 600.0;
@@ -1324,24 +1415,26 @@ void MidiEditorOverlayComponent::mouseMagnify(const juce::MouseEvent& event, flo
     if (std::abs(pendingMagnifyDelta - 1.0) < 0.003)
         return;
 
+    // Exact zoom-to-cursor: keep the SAME beat (x) and SAME lane (y) under the
+    // pointer fixed. Anchoring by beat/lane (not by content-size ratios) stays
+    // correct even when the grid is shorter than the viewport.
     const auto visible = getVisibleGridViewport();
-    const auto oldContentWidth = static_cast<double>(visible.getWidth()) * horizontalZoom;
-    const auto oldContentHeight = juce::jmax(static_cast<double>(visible.getHeight()),
-                                             static_cast<double>(getDisplayedLaneCount() * baseLaneHeightPx) * verticalZoom);
-    const auto focusXInView = juce::jlimit(0.0, static_cast<double>(visible.getWidth()), static_cast<double>(event.getPosition().x - visible.getX()));
-    const auto focusYInView = juce::jlimit(0.0, static_cast<double>(visible.getHeight()), static_cast<double>(event.getPosition().y - visible.getY()));
-    const auto focusXRatio = oldContentWidth > 0.0 ? (scrollX + focusXInView) / oldContentWidth : 0.5;
-    const auto focusYRatio = oldContentHeight > 0.0 ? (scrollY + focusYInView) / oldContentHeight : 0.5;
+    const double focusXInView = static_cast<double>(event.getPosition().x - visible.getX());
+    const double focusYInView = static_cast<double>(event.getPosition().y - visible.getY());
+
+    const double ppbOld  = getPixelsPerBeat();
+    const double laneOld = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
+    const double beatUnderCursor = (scrollX + focusXInView) / juce::jmax(1.0e-6, ppbOld);
+    const double laneUnderCursor = (scrollY + focusYInView) / juce::jmax(1.0, laneOld);
 
     horizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, horizontalZoom * pendingMagnifyDelta);
     verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, verticalZoom * pendingMagnifyDelta);
-
-    const auto newContentWidth = static_cast<double>(visible.getWidth()) * horizontalZoom;
-    const auto newContentHeight = juce::jmax(static_cast<double>(visible.getHeight()),
-                                             static_cast<double>(getDisplayedLaneCount() * baseLaneHeightPx) * verticalZoom);
-    scrollX = (focusXRatio * newContentWidth) - focusXInView;
-    scrollY = (focusYRatio * newContentHeight) - focusYInView;
     pendingMagnifyDelta = 1.0;
+
+    const double ppbNew  = getPixelsPerBeat();
+    const double laneNew = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
+    scrollX = beatUnderCursor * ppbNew - focusXInView;
+    scrollY = laneUnderCursor * laneNew - focusYInView;
     clampScrollOffsets();
     updateSubtitle();
     repaint();
@@ -1504,14 +1597,14 @@ void MidiEditorOverlayComponent::smoothSlide(PitchSlide& slide) const
     }
 
     auto smoothed = cleaned;
-    for (int pass = 0; pass < 3; ++pass)
+    for (int pass = 0; pass < 8; ++pass)
     {
         auto next = smoothed;
         for (std::size_t i = 1; i + 1 < smoothed.size(); ++i)
         {
-            next[i].pitch = smoothed[i - 1].pitch * 0.22
-                          + smoothed[i].pitch * 0.56
-                          + smoothed[i + 1].pitch * 0.22;
+            next[i].pitch = smoothed[i - 1].pitch * 0.25
+                          + smoothed[i].pitch * 0.50
+                          + smoothed[i + 1].pitch * 0.25;
         }
         smoothed = std::move(next);
     }
@@ -1526,12 +1619,13 @@ void MidiEditorOverlayComponent::smoothSlide(PitchSlide& slide) const
 
     auto pitchAt = [&smoothed](double beat)
     {
+        const auto n = smoothed.size();
         if (beat <= smoothed.front().beat)
             return smoothed.front().pitch;
         if (beat >= smoothed.back().beat)
             return smoothed.back().pitch;
 
-        for (std::size_t i = 1; i < smoothed.size(); ++i)
+        for (std::size_t i = 1; i < n; ++i)
         {
             const auto& a = smoothed[i - 1];
             const auto& b = smoothed[i];
@@ -1540,7 +1634,19 @@ void MidiEditorOverlayComponent::smoothSlide(PitchSlide& slide) const
 
             const auto segment = juce::jmax(minimumSlidePointBeatDistance, b.beat - a.beat);
             const auto t = juce::jlimit(0.0, 1.0, (beat - a.beat) / segment);
-            return a.pitch + (b.pitch - a.pitch) * t;
+
+            // Catmull-Rom spline through the (de-jittered) points → a genuinely
+            // smooth flowing curve instead of straight segments.
+            const double p0 = smoothed[i >= 2 ? i - 2 : i - 1].pitch;
+            const double p1 = a.pitch;
+            const double p2 = b.pitch;
+            const double p3 = smoothed[i + 1 < n ? i + 1 : i].pitch;
+            const double t2 = t * t;
+            const double t3 = t2 * t;
+            return 0.5 * ((2.0 * p1)
+                          + (-p0 + p2) * t
+                          + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                          + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
         }
 
         return smoothed.back().pitch;
@@ -1691,7 +1797,11 @@ juce::Rectangle<int> MidiEditorOverlayComponent::getGridBounds() const noexcept
     const auto fullHeight = bounds.getHeight();
     const auto naturalHeight = getDisplayedLaneCount() * baseLaneHeightPx;
     const auto zoomedHeight = juce::jmax(fullHeight, static_cast<int>(std::round(static_cast<double>(naturalHeight) * verticalZoom)));
-    return bounds.withWidth(zoomedWidth).withHeight(zoomedHeight).translated(-static_cast<int>(std::round(scrollX)), -static_cast<int>(std::round(scrollY)));
+    // NOTE: horizontal scroll is applied by the drawing/hit-test code itself (it
+    // subtracts scrollX), so we must NOT also translate X here — doing both made
+    // scrollX count twice, which broke zoom-to-cursor when scrolled. Y is applied
+    // only here, so it keeps its translation.
+    return bounds.withWidth(zoomedWidth).withHeight(zoomedHeight).translated(0, -static_cast<int>(std::round(scrollY)));
 }
 
 double MidiEditorOverlayComponent::getPixelsPerBeat() const noexcept
@@ -2225,29 +2335,25 @@ bool MidiEditorOverlayComponent::shouldConsumeFocusClick() const noexcept
 void MidiEditorOverlayComponent::adjustZoom(double horizontalDelta, double verticalDelta, std::optional<juce::Point<int>> focusPoint)
 {
     const auto visible = getVisibleGridViewport();
-    const auto oldContentWidth = static_cast<double>(visible.getWidth()) * horizontalZoom;
-    const auto oldContentHeight = juce::jmax(static_cast<double>(visible.getHeight()), static_cast<double>(getDisplayedLaneCount() * baseLaneHeightPx) * verticalZoom);
 
-    double focusXInView = static_cast<double>(visible.getWidth()) * 0.5;
-    double focusYInView = static_cast<double>(visible.getHeight()) * 0.5;
-    double focusXRatio = 0.5;
-    double focusYRatio = 0.5;
+    const double focusXInView = focusPoint.has_value()
+        ? static_cast<double>(focusPoint->x - visible.getX()) : static_cast<double>(visible.getWidth()) * 0.5;
+    const double focusYInView = focusPoint.has_value()
+        ? static_cast<double>(focusPoint->y - visible.getY()) : static_cast<double>(visible.getHeight()) * 0.5;
 
-    if (focusPoint.has_value())
-    {
-        focusXInView = juce::jlimit(0.0, static_cast<double>(visible.getWidth()), static_cast<double>(focusPoint->x - visible.getX()));
-        focusYInView = juce::jlimit(0.0, static_cast<double>(visible.getHeight()), static_cast<double>(focusPoint->y - visible.getY()));
-        focusXRatio = oldContentWidth > 0.0 ? (scrollX + focusXInView) / oldContentWidth : 0.5;
-        focusYRatio = oldContentHeight > 0.0 ? (scrollY + focusYInView) / oldContentHeight : 0.5;
-    }
+    // Anchor by the beat (x) and lane (y) under the pointer so it stays put.
+    const double ppbOld  = getPixelsPerBeat();
+    const double laneOld = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
+    const double beatUnderCursor = (scrollX + focusXInView) / juce::jmax(1.0e-6, ppbOld);
+    const double laneUnderCursor = (scrollY + focusYInView) / juce::jmax(1.0, laneOld);
 
     horizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, horizontalZoom + horizontalDelta);
     verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, verticalZoom + verticalDelta);
 
-    const auto newContentWidth = static_cast<double>(visible.getWidth()) * horizontalZoom;
-    const auto newContentHeight = juce::jmax(static_cast<double>(visible.getHeight()), static_cast<double>(getDisplayedLaneCount() * baseLaneHeightPx) * verticalZoom);
-    scrollX = (focusXRatio * newContentWidth) - focusXInView;
-    scrollY = (focusYRatio * newContentHeight) - focusYInView;
+    const double ppbNew  = getPixelsPerBeat();
+    const double laneNew = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
+    scrollX = beatUnderCursor * ppbNew - focusXInView;
+    scrollY = laneUnderCursor * laneNew - focusYInView;
     clampScrollOffsets();
     updateSubtitle();
     repaint();
@@ -2260,8 +2366,14 @@ void MidiEditorOverlayComponent::clampScrollOffsets()
     const auto fullHeight = static_cast<double>(visible.getHeight());
     const auto zoomedWidth = fullWidth * horizontalZoom;
     const auto zoomedHeight = juce::jmax(fullHeight, static_cast<double>(getDisplayedLaneCount() * baseLaneHeightPx) * verticalZoom);
-    scrollX = juce::jlimit(0.0, juce::jmax(0.0, zoomedWidth - fullWidth), scrollX);
-    scrollY = juce::jlimit(0.0, juce::jmax(0.0, zoomedHeight - fullHeight), scrollY);
+
+    // Allow a little overscroll past the content edge (half a viewport) so that
+    // zoom-to-cursor can keep a point near the RIGHT / BOTTOM edge fixed under the
+    // pointer. Without this the upper clamp pulls right-edge zooms back to centre.
+    const auto maxScrollX = juce::jmax(0.0, zoomedWidth - fullWidth * 0.5);
+    const auto maxScrollY = juce::jmax(0.0, zoomedHeight - fullHeight * 0.5);
+    scrollX = juce::jlimit(0.0, maxScrollX, scrollX);
+    scrollY = juce::jlimit(0.0, maxScrollY, scrollY);
 }
 
 juce::String MidiEditorOverlayComponent::getScaleName() const

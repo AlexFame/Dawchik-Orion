@@ -1,4 +1,5 @@
 #include "WarpEngine.h"
+#include "OrionStretchEngine.h"
 
 #include <cmath>
 #include <limits>
@@ -13,6 +14,11 @@
 namespace orion
 {
 const char* const warpBackendCacheVersion = ORION_HAVE_RUBBERBAND ? "rubberband_exp1_drain1" : "signalsmith_fallback";
+
+juce::String currentWarpBackendTag()
+{
+    return juce::String(warpBackendCacheVersion) + (isOrionWarpEnabled() ? "|orion_v0" : "");
+}
 
 juce::String formatKeyName(int rootSemi, bool minor, bool fullName)
 {
@@ -320,7 +326,8 @@ juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer
                                                           int outputSamples,
                                                           double sampleRate,
                                                           const std::map<std::size_t, std::size_t>& keyframes,
-                                                          double pitchScale);
+                                                          double pitchScale,
+                                                          bool percussive);
 
 // Drum warp: pre-emphasis + keyframed RubberBand + de-emphasis.
 // (1) Apply a HF-boost filter to source. HF transient detail is amplified.
@@ -369,7 +376,11 @@ juce::AudioBuffer<float> drumBeatsTailfillBuffer(const juce::AudioBuffer<float>&
             keyframes[static_cast<std::size_t>(t)] =
                 static_cast<std::size_t>(std::round(static_cast<double>(t) * timeRatio));
 
-    auto output = rubberBandStretchBufferToLength(emphSource, outputSamples, sampleRate, keyframes, 1.0);
+    // NOTE: tried RubberBand's documented R2 percussive preset (short window +
+    // independent phase) here — it actually smeared the snare and made the kick
+    // watery. The R3 "Finer" engine (percussive=false) keeps drum transients
+    // tighter, so we stay on it.
+    auto output = rubberBandStretchBufferToLength(emphSource, outputSamples, sampleRate, keyframes, 1.0, /*percussive*/ false);
     if (output.getNumSamples() < outputSamples || output.getNumChannels() != channels)
         return output;
 
@@ -503,7 +514,8 @@ juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer
                                                           int outputSamples,
                                                           double sampleRate,
                                                           const std::map<std::size_t, std::size_t>& keyframes = {},
-                                                          double pitchScale = 1.0)
+                                                          double pitchScale = 1.0,
+                                                          bool percussive = false)
 {
     if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
         return source;
@@ -518,14 +530,29 @@ juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer
         const auto sourceSamples = source.getNumSamples();
         const auto timeRatio = static_cast<double>(outputSamples) / static_cast<double>(sourceSamples);
 
+        using RB = RubberBand::RubberBandStretcher;
+        // Percussive (drums): RubberBand's documented percussive preset on the R2
+        // engine — short window + independent phase + crisp transients + percussive
+        // onset detector. Keeps drum attacks tight. (The R3 "Finer" engine ignores
+        // these R2 options, which is why drums use the R2 engine here.)
+        // Melodic: the R3 "Finer" engine with crisp transients + compound detector.
+        const RB::Options options = percussive
+            ? (RB::OptionProcessOffline
+               | RB::OptionWindowShort
+               | RB::OptionPhaseIndependent
+               | RB::OptionTransientsCrisp
+               | RB::OptionDetectorPercussive
+               | RB::OptionChannelsTogether)
+            : (RB::OptionProcessOffline
+               | RB::OptionEngineFiner
+               | RB::OptionTransientsCrisp
+               | RB::OptionDetectorCompound
+               | RB::OptionChannelsTogether);
+
         RubberBand::RubberBandStretcher stretcher(
             static_cast<std::size_t>(std::round(sampleRate)),
             static_cast<std::size_t>(channels),
-            RubberBand::RubberBandStretcher::OptionProcessOffline
-                | RubberBand::RubberBandStretcher::OptionEngineFiner
-                | RubberBand::RubberBandStretcher::OptionTransientsCrisp
-                | RubberBand::RubberBandStretcher::OptionDetectorCompound
-                | RubberBand::RubberBandStretcher::OptionChannelsTogether,
+            options,
             timeRatio,
             pitchScale);
 
@@ -834,6 +861,17 @@ juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce
                                                                       const juce::String& sourcePath,
                                                                       double pitchScale)
 {
+    // Experimental: our own from-scratch engine. Off by default — when on, it
+    // handles BOTH drum and melodic material so you can A/B it against the
+    // existing backend without touching that code path.
+    if (isOrionWarpEnabled())
+    {
+        auto orion = orionStretchWarp(source, outputSamples, sampleRate, pitchScale);
+        if (orion.getNumSamples() > 0 && orion.getNumChannels() == source.getNumChannels())
+            return orion;
+        // Fall through to the proven path if something went wrong.
+    }
+
     if (inferLoopType(sourcePath, source, sampleRate) == LoopType::drum)
     {
         // Drum path doesn't support pitch shift yet (tonal preservation for drums is iffy

@@ -143,6 +143,21 @@ public:
         wasPlaying = false;
     }
 
+    void setClipEditorPreviewTrim(int trackIndex, int clipIndex, double anchorBeat, double startRatio, double endRatio) noexcept
+    {
+        clipEditorPreviewAnchorBeat.store(anchorBeat, std::memory_order_relaxed);
+        clipEditorPreviewStartRatio.store(juce::jlimit(0.0, 0.999, startRatio), std::memory_order_relaxed);
+        clipEditorPreviewEndRatio.store(juce::jlimit(startRatio + 0.001, 1.0, endRatio), std::memory_order_relaxed);
+        clipEditorPreviewTrackIndex.store(trackIndex, std::memory_order_release);
+        clipEditorPreviewClipIndex.store(clipIndex, std::memory_order_release);
+    }
+
+    void clearClipEditorPreviewTrim() noexcept
+    {
+        clipEditorPreviewTrackIndex.store(-1, std::memory_order_release);
+        clipEditorPreviewClipIndex.store(-1, std::memory_order_release);
+    }
+
     void samplerNoteOn(const juce::String& sourcePath,
                        int midiNote,
                        int velocity,
@@ -286,7 +301,12 @@ public:
         {
             for (const auto& clip : track.clips)
             {
-                if (clip.type != ClipType::audio || ! clip.warpEnabled || clip.sourcePath.isEmpty() || clip.lengthInBeats <= 0.0)
+                if (clip.type != ClipType::audio || clip.sourcePath.isEmpty() || clip.lengthInBeats <= 0.0)
+                    continue;
+                // Pre-build for warped clips AND for clips that only need a pitch
+                // shift (manual transpose / key-shift) — otherwise the realtime read
+                // (allowBuild=false) misses the cache and the clip goes silent.
+                if (! clip.warpEnabled && computeKeyShiftSemitones(clip) == 0)
                     continue;
 
                 if (const auto* originalAudioData = getAudioFileData(clip.sourcePath))
@@ -435,8 +455,9 @@ private:
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
             const auto hasInstrument = trackHasInstrument(trackIndex);
             float trackOutputPeak = 0.0f; // loudest post-fader magnitude for this track (metering only)
-            for (const auto& clip : track.clips)
+            for (int clipIndex = 0; clipIndex < static_cast<int>(track.clips.size()); ++clipIndex)
             {
+                const auto& clip = track.clips[static_cast<std::size_t>(clipIndex)];
                 if (clip.muted || clip.recording)
                     continue;
                 if (anySoloActive && ! track.solo && ! clip.solo)
@@ -507,7 +528,26 @@ private:
                 const auto clipEndBeat = clip.startBeat + clip.lengthInBeats;
                 const auto linearGain = juce::Decibels::decibelsToGain(static_cast<float>(clip.gainDb)) * trackGain;
                 const auto* audioData = originalAudioData;
-                if (clip.warpEnabled && clip.lengthInBeats > 0.0)
+                const auto trimStart = juce::jlimit(0.0, 0.999, clip.sampleStartRatio);
+                const auto trimEnd = juce::jlimit(trimStart + 0.001, 1.0, clip.sampleEndRatio);
+                const auto trimSpan = juce::jmax(0.001, trimEnd - trimStart);
+                const auto fullSourceLengthInBeats = clip.warpTargetLengthInBeats > 0.0
+                    ? clip.warpTargetLengthInBeats
+                    : clip.lengthInBeats / trimSpan;
+                const auto useClipEditorPreview = isRealtime
+                                                && clipEditorPreviewTrackIndex.load(std::memory_order_acquire) == trackIndex
+                                                && clipEditorPreviewClipIndex.load(std::memory_order_acquire) == clipIndex;
+                const auto previewAnchorBeat = clipEditorPreviewAnchorBeat.load(std::memory_order_relaxed);
+                const auto previewStartRatio = juce::jlimit(0.0, 0.999, clipEditorPreviewStartRatio.load(std::memory_order_relaxed));
+                const auto previewEndRatio = juce::jlimit(previewStartRatio + 0.001,
+                                                          1.0,
+                                                          clipEditorPreviewEndRatio.load(std::memory_order_relaxed));
+                // Use the pitch-capable warp render when the clip is warped OR when a
+                // pitch shift (manual transpose / key-shift) is requested — so that
+                // transpose works even on un-warped clips.
+                const bool needsPitchRender = (clip.warpEnabled || computeKeyShiftSemitones(clip) != 0)
+                                              && clip.lengthInBeats > 0.0;
+                if (needsPitchRender)
                 {
                     if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
                         audioData = warpedAudioData;
@@ -533,12 +573,35 @@ private:
                     if (! wrapToLoop && ! wrapToProject && timelineBeat >= repeatEndBeat)
                         continue;
 
-                    if (timelineBeat < clipStartBeat || timelineBeat >= clipEndBeat)
+                    if (useClipEditorPreview)
+                    {
+                        const auto previewEndBeat = previewAnchorBeat
+                            + juce::jmax(0.001, previewEndRatio - previewStartRatio) * fullSourceLengthInBeats;
+                        if (timelineBeat < previewAnchorBeat || timelineBeat >= previewEndBeat)
+                            continue;
+                    }
+                    else if (timelineBeat < clipStartBeat || timelineBeat >= clipEndBeat)
+                    {
                         continue;
+                    }
 
-                    const auto clipBeatOffset = timelineBeat - clipStartBeat;
-                    const auto clipSeconds = clipBeatOffset / beatsPerSecond;
-                    const auto sourceSamplePosition = clipSeconds * audioData->sampleRate;
+                    double sourceRatio = 0.0;
+                    if (useClipEditorPreview)
+                    {
+                        const auto previewBeatOffset = timelineBeat - previewAnchorBeat;
+                        sourceRatio = previewStartRatio + previewBeatOffset / juce::jmax(0.001, fullSourceLengthInBeats);
+                        if (sourceRatio < previewStartRatio || sourceRatio >= previewEndRatio)
+                            continue;
+                    }
+                    else
+                    {
+                        const auto clipBeatOffset = timelineBeat - clipStartBeat;
+                        const auto clipProgress = clip.lengthInBeats > 0.0 ? juce::jlimit(0.0, 1.0, clipBeatOffset / clip.lengthInBeats) : 0.0;
+                        sourceRatio = trimStart + clipProgress * trimSpan;
+                    }
+
+                    const auto sourceSamplePosition = juce::jlimit(0.0, 1.0, sourceRatio)
+                                                    * static_cast<double>(audioData->buffer.getNumSamples() - 1);
 
                     const auto sourceIndex = static_cast<int>(sourceSamplePosition);
                     if (sourceIndex < 0 || sourceIndex >= audioData->buffer.getNumSamples())
@@ -603,11 +666,14 @@ private:
     // current project key. Picks the shortest direction (max 6 semitones either way).
     int computeKeyShiftSemitones(const TimelineClip& clip) const noexcept
     {
-        if (! clip.keyShiftEnabled) return 0;
-        if (clip.sourceKeyRoot < 0)  return 0;
-        int diff = project.getKeyRoot() - clip.sourceKeyRoot;
-        while (diff > 6)  diff -= 12;
-        while (diff < -6) diff += 12;
+        int diff = clip.transposeSemitones;
+        if (! clip.keyShiftEnabled || clip.sourceKeyRoot < 0)
+            return diff;
+
+        int keyDiff = project.getKeyRoot() - clip.sourceKeyRoot;
+        while (keyDiff > 6)  keyDiff -= 12;
+        while (keyDiff < -6) keyDiff += 12;
+        diff += keyDiff;
         return diff;
     }
 
@@ -625,7 +691,7 @@ private:
         const auto pitchScale      = std::pow(2.0, static_cast<double>(semitonesShift) / 12.0);
         const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples)
                        + "|p" + std::to_string(semitonesShift)
-                       + "|" + warpBackendCacheVersion;
+                       + "|" + currentWarpBackendTag().toStdString();
         if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
         {
             DBG("[Warp-Cache] HIT key=" + juce::String(key));
@@ -884,6 +950,11 @@ private:
     static constexpr int maxMeterTracks = 512;
     std::array<std::atomic<float>, maxMeterTracks> trackPeaks {};
     juce::AudioBuffer<float> samplerMeterScratch;
+    std::atomic<int> clipEditorPreviewTrackIndex { -1 };
+    std::atomic<int> clipEditorPreviewClipIndex { -1 };
+    std::atomic<double> clipEditorPreviewAnchorBeat { 0.0 };
+    std::atomic<double> clipEditorPreviewStartRatio { 0.0 };
+    std::atomic<double> clipEditorPreviewEndRatio { 1.0 };
 };
 
 class ClickTrackSource final : public juce::AudioSource

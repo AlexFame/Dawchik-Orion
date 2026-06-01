@@ -71,6 +71,9 @@ juce::var timelineClipToVar(const orion::TimelineClip& clip)
     object->setProperty("sourceKeyRoot", clip.sourceKeyRoot);
     object->setProperty("sourceKeyIsMinor", clip.sourceKeyIsMinor);
     object->setProperty("keyShiftEnabled", clip.keyShiftEnabled);
+    object->setProperty("transposeSemitones", clip.transposeSemitones);
+    object->setProperty("sampleStartRatio", clip.sampleStartRatio);
+    object->setProperty("sampleEndRatio", clip.sampleEndRatio);
 
     juce::Array<juce::var> notes;
     for (const auto& note : clip.midiNotes)
@@ -200,6 +203,11 @@ orion::TimelineClip timelineClipFromVar(const juce::var& value)
     clip.sourceKeyRoot           = getInt(*obj, "sourceKeyRoot", clip.sourceKeyRoot);
     clip.sourceKeyIsMinor        = getBool(*obj, "sourceKeyIsMinor", clip.sourceKeyIsMinor);
     clip.keyShiftEnabled         = getBool(*obj, "keyShiftEnabled", clip.keyShiftEnabled);
+    clip.transposeSemitones      = getInt(*obj, "transposeSemitones", clip.transposeSemitones);
+    clip.sampleStartRatio        = juce::jlimit(0.0, 0.999, getDouble(*obj, "sampleStartRatio", clip.sampleStartRatio));
+    clip.sampleEndRatio          = juce::jlimit(0.001, 1.0, getDouble(*obj, "sampleEndRatio", clip.sampleEndRatio));
+    if (clip.sampleEndRatio <= clip.sampleStartRatio)
+        clip.sampleEndRatio = juce::jmin(1.0, clip.sampleStartRatio + 0.001);
 
     if (auto* notes = obj->getProperty("midiNotes").getArray())
         for (const auto& noteVar : *notes)

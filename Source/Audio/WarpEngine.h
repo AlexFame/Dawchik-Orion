@@ -16,6 +16,11 @@ namespace orion
 // stretch backend changes so stale cached renders are not reused.
 extern const char* const warpBackendCacheVersion;
 
+// Like warpBackendCacheVersion but also reflects the experimental Orion warp
+// toggle, so switching backends produces fresh renders instead of reusing the
+// other backend's cached audio.
+juce::String currentWarpBackendTag();
+
 // Convert (rootSemi 0..11, minor) -> display name like "Cm" / "F#" / "Bb minor".
 juce::String formatKeyName(int rootSemi, bool minor, bool fullName = false);
 

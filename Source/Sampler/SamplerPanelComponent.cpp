@@ -9,7 +9,7 @@ const auto panelBackground = juce::Colour(0xff151c23);
 const auto deviceHeader = juce::Colour(0xff202832);
 const auto waveformBackground = juce::Colour(0xff0e141a);
 const auto panelStroke = juce::Colour(0xff31404d);
-const auto accentColour = juce::Colour(0xffeb6f3a);
+const auto accentColour = juce::Colour(0xffe8401f);
 const auto mutedText = juce::Colours::white.withAlpha(0.62f);
 const auto controlBackground = juce::Colour(0xff202a33);
 
