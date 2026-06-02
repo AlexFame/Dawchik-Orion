@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../Audio/TransportEngine.h"
@@ -28,6 +29,8 @@ public:
     std::function<void()> onTogglePlayback;
     // Returns the current 0..1 output level for a track (for the header meter).
     std::function<float(int)> onRequestTrackLevel;
+    // Returns the current 0..1 left/right output levels for a track (stereo meter).
+    std::function<std::pair<float, float>(int)> onRequestTrackLevelStereo;
     // Returns the current live signal level in dB (-100 ≈ silent → "-inf").
     std::function<float(int)> onRequestTrackLevelDb;
 
@@ -49,6 +52,12 @@ public:
     void itemDropped(const SourceDetails& dragSourceDetails) override;
     std::optional<juce::Rectangle<int>> getSelectedTrackInspectorBounds() const noexcept;
     std::optional<int> getSelectedTrackIndex() const noexcept;
+    // Records an undo checkpoint of the current timeline state (used by the recorder so
+    // a finished take can be removed with Cmd+Z).
+    void captureUndoSnapshot();
+    // Removes the most recent undo checkpoint (used when a take is discarded/cancelled
+    // so it doesn't leave a no-op entry in the undo history).
+    void dropLastUndoSnapshot();
     bool canUndo() const noexcept;
     bool canRedo() const noexcept;
     bool undo();
@@ -58,6 +67,10 @@ public:
     // Clears selection, hover and undo/redo history. Call after a project is
     // loaded so stale indices and snapshots from the previous project are dropped.
     void resetForNewProject();
+    // Live waveform for the clip currently being recorded (drawn until the file exists).
+    void setLiveRecordingWaveform(int trackIndex, int clipIndex,
+                                  std::vector<float> mins, std::vector<float> maxs);
+    void clearLiveRecordingWaveform();
 
 private:
     struct SelectedClip
@@ -66,11 +79,24 @@ private:
         int clipIndex { -1 };
     };
 
+    // Visible tool palette (top-left corner). Pointer = select/move/trim, Knife = split.
+    enum class ToolMode
+    {
+        pointer,
+        knife
+    };
+
     enum class DragMode
     {
         move,
-        resizeRight,
-        stretchRight
+        resizeRight,   // trim the right edge (constant speed, reveals/hides source)
+        stretchRight,  // time-stretch from the right edge (Alt)
+        resizeLeft,    // trim the left edge
+        stretchLeft,   // time-stretch from the left edge (Alt)
+        fadeIn,
+        fadeOut,
+        fadeInCurve,
+        fadeOutCurve
     };
 
     struct ClipHit
@@ -78,6 +104,11 @@ private:
         SelectedClip clip;
         juce::Rectangle<int> bounds;
         bool overResizeHandle { false };
+        bool overLeftResizeHandle { false };
+        bool overFadeInHandle { false };
+        bool overFadeOutHandle { false };
+        bool overFadeInCurveHandle { false };
+        bool overFadeOutCurveHandle { false };
     };
 
     enum class TrackHeaderControl
@@ -106,6 +137,12 @@ private:
         double originalStartBeat { 0.0 };
         double originalLengthInBeats { 0.0 };
         double originalWarpTargetLengthInBeats { 0.0 };
+        double originalSampleStartRatio { 0.0 };
+        double originalSampleEndRatio { 1.0 };
+        double originalFadeInBeats { 0.0 };
+        double originalFadeOutBeats { 0.0 };
+        double originalFadeInCurve { 0.0 };
+        double originalFadeOutCurve { 0.0 };
         int originalTrackIndex { -1 };
         bool historyCaptured { false };
     };
@@ -166,6 +203,21 @@ private:
         std::optional<SelectedClip> selectedClip;
     };
 
+    // Single source of truth for the track-header card sub-rectangles, so paint(),
+    // hit-testing and the inline volume editor stay pixel-aligned.
+    struct HeaderLayout
+    {
+        juce::Rectangle<int> card;
+        juce::Rectangle<int> title;
+        juce::Rectangle<int> muteButton;
+        juce::Rectangle<int> soloButton;
+        juce::Rectangle<int> recordButton;
+        juce::Rectangle<int> slider;
+        juce::Rectangle<int> volumeValue;
+        juce::Rectangle<int> meter;
+    };
+    HeaderLayout computeHeaderLayout(int trackIndex) const noexcept;
+
     void timerCallback() override;
     float beatToX(double beat, juce::Rectangle<int> laneArea) const noexcept;
     juce::Rectangle<int> getTrackLaneBounds(int trackIndex) const noexcept;
@@ -178,6 +230,14 @@ private:
     double snapBeatValue(double beat) const noexcept;
     bool canClipLiveOnTrack(const TimelineClip& clip, int trackIndex) const noexcept;
     void moveSelectedClipToTrack(int targetTrackIndex);
+    // Splits a clip at an absolute timeline beat into two clips (non-destructive).
+    // Returns true if a split happened. splitBeat must lie strictly inside the clip.
+    bool splitClipAtBeat(int trackIndex, int clipIndex, double splitBeat);
+    // Splits every selected clip (or the clip under the playhead) at the playhead.
+    void splitSelectionAtPlayhead();
+    // Bounds of tool-palette button `index` (0 = pointer, 1 = knife) in the corner.
+    juce::Rectangle<int> getToolButtonBounds(int index) const noexcept;
+    void paintToolPalette(juce::Graphics& g);
     void pushUndoSnapshot();
     void restoreSnapshot(const TimelineSnapshot& snapshot);
     bool hasTimelineChangedSince(const TimelineSnapshot& snapshot) const noexcept;
@@ -248,5 +308,11 @@ private:
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
     juce::Colour browserDropPreviewColour { juce::Colour(0xffe8401f) };
     bool browserDropCreatesNewTrack { false };
+    ToolMode currentTool { ToolMode::pointer };
+
+    int liveWaveformTrack { -1 };
+    int liveWaveformClip { -1 };
+    std::vector<float> liveWaveformMin;
+    std::vector<float> liveWaveformMax;
 };
 }  // namespace orion

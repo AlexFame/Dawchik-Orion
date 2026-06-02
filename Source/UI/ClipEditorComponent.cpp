@@ -581,8 +581,11 @@ void ClipEditorComponent::beginTrimmedClipDrag(const juce::MouseEvent& event)
     payloadObject->setProperty("category", "Audio");
     payloadObject->setProperty("subtitle", state.fileName);
     payloadObject->setProperty("colour", static_cast<int>(state.accent.getARGB()));
-    payloadObject->setProperty("sourceLengthBeats", state.lengthInBeats);
-    payloadObject->setProperty("lengthBeats", state.lengthInBeats * juce::jmax(0.001, state.sampleEndRatio - state.sampleStartRatio));
+    // Full source length (not the trimmed clip length) so the dropped region keeps the
+    // original speed; fall back to lengthInBeats for safety.
+    const auto fullSourceBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
+    payloadObject->setProperty("sourceLengthBeats", fullSourceBeats);
+    payloadObject->setProperty("lengthBeats", fullSourceBeats * juce::jmax(0.001, state.sampleEndRatio - state.sampleStartRatio));
     payloadObject->setProperty("path", state.sourcePath);
     payloadObject->setProperty("sampleStartRatio", state.sampleStartRatio);
     payloadObject->setProperty("sampleEndRatio", state.sampleEndRatio);

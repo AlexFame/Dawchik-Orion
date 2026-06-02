@@ -253,6 +253,119 @@ public:
         return getTrackInstrument(trackIndex) != nullptr;
     }
 
+    // ---- Insert FX chain hosting (per track) --------------------------------
+    struct InsertSlot
+    {
+        std::unique_ptr<juce::AudioPluginInstance> instance;
+        std::atomic<bool> bypassed { false };
+    };
+
+    // Appends an effect to a track's insert chain (message thread). Returns its index.
+    int addInsert(int trackIndex, std::unique_ptr<juce::AudioPluginInstance> instance, bool bypassed)
+    {
+        if (instance == nullptr)
+            return -1;
+        instance->setRateAndBufferSizeDetails(outputSampleRate, preparedBlockSize);
+        instance->setPlayConfigDetails(2, 2, outputSampleRate, preparedBlockSize);
+        instance->prepareToPlay(outputSampleRate, preparedBlockSize);
+
+        auto slot = std::make_unique<InsertSlot>();
+        slot->instance = std::move(instance);
+        slot->bypassed.store(bypassed, std::memory_order_relaxed);
+
+        const juce::ScopedLock sl(insertLock);
+        auto& chain = trackInserts[trackIndex];
+        chain.push_back(std::move(slot));
+        return static_cast<int>(chain.size()) - 1;
+    }
+
+    void removeInsert(int trackIndex, int index)
+    {
+        std::unique_ptr<InsertSlot> removed;
+        {
+            const juce::ScopedLock sl(insertLock);
+            const auto it = trackInserts.find(trackIndex);
+            if (it == trackInserts.end() || index < 0 || index >= static_cast<int>(it->second.size()))
+                return;
+            removed = std::move(it->second[static_cast<std::size_t>(index)]);
+            it->second.erase(it->second.begin() + index);
+        }
+        if (removed != nullptr && removed->instance != nullptr)
+            removed->instance->releaseResources();
+    }
+
+    void clearTrackInserts(int trackIndex)
+    {
+        std::vector<std::unique_ptr<InsertSlot>> removed;
+        {
+            const juce::ScopedLock sl(insertLock);
+            if (const auto it = trackInserts.find(trackIndex); it != trackInserts.end())
+            {
+                removed = std::move(it->second);
+                trackInserts.erase(it);
+            }
+        }
+        for (auto& slot : removed)
+            if (slot != nullptr && slot->instance != nullptr)
+                slot->instance->releaseResources();
+    }
+
+    // Moves an insert slot (the live plugin instance) between/within tracks.
+    void moveInsert(int fromTrack, int fromIndex, int toTrack, int toIndex)
+    {
+        const juce::ScopedLock sl(insertLock);
+        const auto fromIt = trackInserts.find(fromTrack);
+        if (fromIt == trackInserts.end() || fromIndex < 0 || fromIndex >= static_cast<int>(fromIt->second.size()))
+            return;
+        auto slot = std::move(fromIt->second[static_cast<std::size_t>(fromIndex)]);
+        fromIt->second.erase(fromIt->second.begin() + fromIndex);
+
+        auto& dest = trackInserts[toTrack];
+        const auto clamped = juce::jlimit(0, static_cast<int>(dest.size()), toIndex);
+        dest.insert(dest.begin() + clamped, std::move(slot));
+    }
+
+    void setInsertBypass(int trackIndex, int index, bool bypassed)
+    {
+        const juce::ScopedLock sl(insertLock);
+        const auto it = trackInserts.find(trackIndex);
+        if (it != trackInserts.end() && index >= 0 && index < static_cast<int>(it->second.size())
+            && it->second[static_cast<std::size_t>(index)] != nullptr)
+            it->second[static_cast<std::size_t>(index)]->bypassed.store(bypassed, std::memory_order_relaxed);
+    }
+
+    juce::AudioPluginInstance* getInsertInstance(int trackIndex, int index) noexcept
+    {
+        const juce::ScopedLock sl(insertLock);
+        const auto it = trackInserts.find(trackIndex);
+        if (it != trackInserts.end() && index >= 0 && index < static_cast<int>(it->second.size())
+            && it->second[static_cast<std::size_t>(index)] != nullptr)
+            return it->second[static_cast<std::size_t>(index)]->instance.get();
+        return nullptr;
+    }
+
+    int getInsertCount(int trackIndex) noexcept
+    {
+        const juce::ScopedLock sl(insertLock);
+        const auto it = trackInserts.find(trackIndex);
+        return it != trackInserts.end() ? static_cast<int>(it->second.size()) : 0;
+    }
+
+    // Audio thread: run a track's buffer through its (non-bypassed) inserts in order.
+    void processTrackInserts(int trackIndex, juce::AudioBuffer<float>& buf)
+    {
+        const juce::ScopedTryLock stl(insertLock);
+        if (! stl.isLocked())
+            return;
+        const auto it = trackInserts.find(trackIndex);
+        if (it == trackInserts.end())
+            return;
+        juce::MidiBuffer noMidi;
+        for (auto& slot : it->second)
+            if (slot != nullptr && slot->instance != nullptr && ! slot->bypassed.load(std::memory_order_relaxed))
+                slot->instance->processBlock(buf, noMidi);
+    }
+
     // Live monitoring: queue a note from the keyboard for the instrument on a
     // given track. Thread-safe (MidiMessageCollector handles cross-thread enqueue).
     void instrumentLiveNoteOn(int trackIndex, int midiNote, int velocity)
@@ -288,7 +401,21 @@ public:
     {
         if (trackIndex < 0 || trackIndex >= maxMeterTracks)
             return 0.0f;
-        return trackPeaks[static_cast<std::size_t>(trackIndex)].exchange(0.0f, std::memory_order_relaxed);
+        const auto l = trackPeaksL[static_cast<std::size_t>(trackIndex)].exchange(0.0f, std::memory_order_relaxed);
+        const auto r = trackPeaksR[static_cast<std::size_t>(trackIndex)].exchange(0.0f, std::memory_order_relaxed);
+        return juce::jmax(l, r);
+    }
+
+    // Stereo variant: reads and resets the left/right peaks for a track.
+    void fetchAndResetTrackPeakStereo(int trackIndex, float& outL, float& outR) noexcept
+    {
+        if (trackIndex < 0 || trackIndex >= maxMeterTracks)
+        {
+            outL = outR = 0.0f;
+            return;
+        }
+        outL = trackPeaksL[static_cast<std::size_t>(trackIndex)].exchange(0.0f, std::memory_order_relaxed);
+        outR = trackPeaksR[static_cast<std::size_t>(trackIndex)].exchange(0.0f, std::memory_order_relaxed);
     }
 
     void prepareWarpCacheForCurrentTempo()
@@ -453,8 +580,25 @@ private:
                 continue;
 
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
+            float panLeftGain = 1.0f, panRightGain = 1.0f;
+            panToGains(track.pan, panLeftGain, panRightGain);
+            // Per-output-channel gain (left=0, right=1; mono/others unaffected).
+            const auto panForChannel = [panLeftGain, panRightGain](int ch) -> float
+            {
+                return ch == 0 ? panLeftGain : (ch == 1 ? panRightGain : 1.0f);
+            };
             const auto hasInstrument = trackHasInstrument(trackIndex);
-            float trackOutputPeak = 0.0f; // loudest post-fader magnitude for this track (metering only)
+            const auto hasInserts = ! track.inserts.empty();
+            // Snapshot this track's slice of the mix so we can (a) measure the track's TRUE
+            // summed contribution and (b) isolate it for the insert FX chain. Needed for
+            // metering (realtime) and for FX (realtime + offline export).
+            const auto meterChannels = juce::jmax(1, targetBuffer.getNumChannels());
+            if (isRealtime || hasInserts)
+            {
+                trackMeterBefore.setSize(meterChannels, numSamples, false, false, true);
+                for (int ch = 0; ch < meterChannels; ++ch)
+                    trackMeterBefore.copyFrom(ch, 0, targetBuffer, ch, startSample, numSamples);
+            }
             for (int clipIndex = 0; clipIndex < static_cast<int>(track.clips.size()); ++clipIndex)
             {
                 const auto& clip = track.clips[static_cast<std::size_t>(clipIndex)];
@@ -492,10 +636,9 @@ private:
                                                      clip);
                         for (int channel = 0; channel < numCh; ++channel)
                         {
-                            trackOutputPeak = juce::jmax(trackOutputPeak,
-                                                         samplerMeterScratch.getMagnitude(channel, 0, numSamples));
+                            const auto pg = panForChannel(channel);
                             const auto srcChannel = juce::jmin(channel, samplerMeterScratch.getNumChannels() - 1);
-                            targetBuffer.addFrom(channel, startSample, samplerMeterScratch, srcChannel, 0, numSamples);
+                            targetBuffer.addFrom(channel, startSample, samplerMeterScratch, srcChannel, 0, numSamples, pg);
                         }
                     }
                     else
@@ -613,6 +756,17 @@ private:
                     const auto i1 = sourceIndex;
                     const auto i2 = juce::jmin(sourceIndex + 1, lastSample);
                     const auto i3 = juce::jmin(sourceIndex + 2, lastSample);
+
+                    // Fade in/out envelope (linear), based on position within the clip.
+                    float fadeGain = 1.0f;
+                    if (! useClipEditorPreview)
+                    {
+                        if (clip.fadeInBeats > 0.0 && timelineBeat < clipStartBeat + clip.fadeInBeats)
+                            fadeGain *= static_cast<float>(fadeCurveGain((timelineBeat - clipStartBeat) / clip.fadeInBeats, clip.fadeInCurve));
+                        if (clip.fadeOutBeats > 0.0 && timelineBeat > clipEndBeat - clip.fadeOutBeats)
+                            fadeGain *= static_cast<float>(fadeCurveGain((clipEndBeat - timelineBeat) / clip.fadeOutBeats, clip.fadeOutCurve));
+                    }
+
                     for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
                     {
                         const auto sourceChannel = juce::jmin(channel, audioData->buffer.getNumChannels() - 1);
@@ -621,16 +775,57 @@ private:
                         const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
                         const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
                         const auto sampleValue = cubicHermite(sourceFraction, y0, y1, y2, y3) * linearGain;
-                        const auto outputValue = sampleValue * 0.75f;
+                        const auto outputValue = sampleValue * 0.75f * fadeGain * panForChannel(channel);
                         targetBuffer.addSample(channel, startSample + sampleIndex, outputValue);
-                        if (isRealtime)
-                            trackOutputPeak = juce::jmax(trackOutputPeak, std::abs(outputValue));
                     }
                 }
             }
 
-            if (isRealtime)
-                accumulateTrackPeak(trackIndex, trackOutputPeak);
+            if (hasInserts)
+            {
+                // Isolate the track's dry contribution (after − before), run it through the
+                // insert chain, then write the processed signal back in place. Tracks with
+                // NO inserts are untouched (byte-identical), so this can't regress them.
+                trackFxScratch.setSize(meterChannels, numSamples, false, false, true);
+                for (int ch = 0; ch < meterChannels; ++ch)
+                    for (int s = 0; s < numSamples; ++s)
+                        trackFxScratch.setSample(ch, s, targetBuffer.getSample(ch, startSample + s)
+                                                        - trackMeterBefore.getSample(ch, s));
+
+                processTrackInserts(trackIndex, trackFxScratch);
+
+                for (int ch = 0; ch < meterChannels; ++ch)
+                    for (int s = 0; s < numSamples; ++s)
+                        targetBuffer.setSample(ch, startSample + s,
+                                               trackMeterBefore.getSample(ch, s) + trackFxScratch.getSample(ch, s));
+
+                if (isRealtime)
+                {
+                    float peakL = 0.0f, peakR = 0.0f;
+                    for (int ch = 0; ch < meterChannels; ++ch)
+                    {
+                        const auto m = trackFxScratch.getMagnitude(ch, 0, numSamples);
+                        if (ch == 0)      peakL = m;
+                        else if (ch == 1) peakR = m;
+                    }
+                    accumulateTrackPeakStereo(trackIndex, peakL, peakR);
+                }
+            }
+            else if (isRealtime)
+            {
+                // Measure the track's contribution as (buffer after − buffer before).
+                float peakL = 0.0f, peakR = 0.0f;
+                for (int ch = 0; ch < meterChannels; ++ch)
+                {
+                    float chPeak = 0.0f;
+                    for (int s = 0; s < numSamples; ++s)
+                        chPeak = juce::jmax(chPeak, std::abs(targetBuffer.getSample(ch, startSample + s)
+                                                            - trackMeterBefore.getSample(ch, s)));
+                    if (ch == 0)      peakL = chPeak;
+                    else if (ch == 1) peakR = chPeak;
+                }
+                accumulateTrackPeakStereo(trackIndex, peakL, peakR);
+            }
         }
 
         // Render any hosted VST instruments for this block (clip notes + live keyboard).
@@ -909,29 +1104,46 @@ private:
                 continue;
 
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
-            float instrumentPeak = 0.0f;
-            for (int ch = 0; ch < slot->scratch.getNumChannels(); ++ch)
-                instrumentPeak = juce::jmax(instrumentPeak, slot->scratch.getMagnitude(ch, 0, numSamples));
-            accumulateTrackPeak(trackIndex, instrumentPeak * trackGain);
+            float panL = 1.0f, panR = 1.0f;
+            panToGains(track.pan, panL, panR);
 
+            float instPeakL = 0.0f, instPeakR = 0.0f;
             for (int ch = 0; ch < targetBuffer.getNumChannels(); ++ch)
             {
+                const auto pg = (ch == 0 ? panL : (ch == 1 ? panR : 1.0f)) * trackGain;
                 const auto srcCh = juce::jmin(ch, slot->scratch.getNumChannels() - 1);
-                targetBuffer.addFrom(ch, startSample, slot->scratch, srcCh, 0, numSamples, trackGain);
+                const auto mag = slot->scratch.getMagnitude(srcCh, 0, numSamples) * pg;
+                if (ch == 0)      instPeakL = juce::jmax(instPeakL, mag);
+                else if (ch == 1) instPeakR = juce::jmax(instPeakR, mag);
+                targetBuffer.addFrom(ch, startSample, slot->scratch, srcCh, 0, numSamples, pg);
             }
+            accumulateTrackPeakStereo(trackIndex, instPeakL, instPeakR);
         }
     }
 
-    // Record a track's loudest magnitude this block (keeps the max until the UI reads it).
-    void accumulateTrackPeak(int trackIndex, float peak) noexcept
+    static void accumulateAtomicMax(std::atomic<float>& slot, float peak) noexcept
     {
-        if (trackIndex < 0 || trackIndex >= maxMeterTracks || peak <= 0.0f)
-            return;
-        auto& slot = trackPeaks[static_cast<std::size_t>(trackIndex)];
         float prev = slot.load(std::memory_order_relaxed);
         while (peak > prev && ! slot.compare_exchange_weak(prev, peak, std::memory_order_relaxed))
         {
         }
+    }
+
+    // Record a track's loudest magnitude this block (keeps the max until the UI reads it).
+    // The mono variant feeds both channels equally.
+    void accumulateTrackPeak(int trackIndex, float peak) noexcept
+    {
+        accumulateTrackPeakStereo(trackIndex, peak, peak);
+    }
+
+    void accumulateTrackPeakStereo(int trackIndex, float peakL, float peakR) noexcept
+    {
+        if (trackIndex < 0 || trackIndex >= maxMeterTracks)
+            return;
+        if (peakL > 0.0f)
+            accumulateAtomicMax(trackPeaksL[static_cast<std::size_t>(trackIndex)], peakL);
+        if (peakR > 0.0f)
+            accumulateAtomicMax(trackPeaksR[static_cast<std::size_t>(trackIndex)], peakR);
     }
 
     ProjectState& project;
@@ -948,8 +1160,13 @@ private:
     std::map<int, std::unique_ptr<InstrumentSlot>> instruments;
 
     static constexpr int maxMeterTracks = 512;
-    std::array<std::atomic<float>, maxMeterTracks> trackPeaks {};
+    std::array<std::atomic<float>, maxMeterTracks> trackPeaksL {};
+    std::array<std::atomic<float>, maxMeterTracks> trackPeaksR {};
     juce::AudioBuffer<float> samplerMeterScratch;
+    juce::AudioBuffer<float> trackMeterBefore;   // per-track mix snapshot for accurate metering
+    juce::AudioBuffer<float> trackFxScratch;     // isolated per-track buffer for insert FX
+    std::map<int, std::vector<std::unique_ptr<InsertSlot>>> trackInserts;
+    juce::CriticalSection insertLock;
     std::atomic<int> clipEditorPreviewTrackIndex { -1 };
     std::atomic<int> clipEditorPreviewClipIndex { -1 };
     std::atomic<double> clipEditorPreviewAnchorBeat { 0.0 };
@@ -980,6 +1197,12 @@ public:
     {
         if (info.buffer == nullptr || info.numSamples <= 0)
             return;
+
+        // CRITICAL: clear our slice first. MixerAudioSource reuses a single temp buffer
+        // across inputs, so if we leave it untouched (e.g. metronome off) it still holds
+        // the PREVIOUS input's audio (the arrangement) — which the mixer would then add a
+        // second time, doubling the level on the master. Always start from silence.
+        info.clearActiveBufferRegion();
 
         const auto metronomeOn = isMetronomeEnabled && isMetronomeEnabled();
         const auto shouldTick = metronomeOn || transport.isCountInActive();
@@ -1076,20 +1299,24 @@ public:
         if (info.buffer == nullptr || info.numSamples <= 0)
             return;
 
+        const auto accumulate = [](std::atomic<float>& slot, float value)
+        {
+            float prev = slot.load(std::memory_order_relaxed);
+            while (value > prev && ! slot.compare_exchange_weak(prev, value, std::memory_order_relaxed))
+            {
+            }
+        };
+
         const auto gain = gainLinear.load(std::memory_order_relaxed);
         if (std::abs(gain - 1.0f) > 1.0e-4f)
             info.buffer->applyGain(info.startSample, info.numSamples, gain);
 
-        float blockPeak = 0.0f;
-        for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
-            blockPeak = juce::jmax(blockPeak, info.buffer->getMagnitude(ch, info.startSample, info.numSamples));
+        const auto numCh = info.buffer->getNumChannels();
+        const auto peakL = numCh > 0 ? info.buffer->getMagnitude(0, info.startSample, info.numSamples) : 0.0f;
+        const auto peakR = numCh > 1 ? info.buffer->getMagnitude(1, info.startSample, info.numSamples) : peakL;
 
-        // Keep the loudest peak seen since the UI last read it.
-        float prev = meterPeak.load(std::memory_order_relaxed);
-        while (blockPeak > prev
-               && ! meterPeak.compare_exchange_weak(prev, blockPeak, std::memory_order_relaxed))
-        {
-        }
+        accumulate(meterPeakL, peakL);
+        accumulate(meterPeakR, peakR);
     }
 
     void setGainDb(double db) noexcept
@@ -1100,12 +1327,21 @@ public:
     // Returns the peak magnitude observed since the previous call, then resets it.
     float fetchAndResetPeak() noexcept
     {
-        return meterPeak.exchange(0.0f, std::memory_order_relaxed);
+        float l = 0.0f, r = 0.0f;
+        fetchAndResetPeakStereo(l, r);
+        return juce::jmax(l, r);
+    }
+
+    void fetchAndResetPeakStereo(float& outL, float& outR) noexcept
+    {
+        outL = meterPeakL.exchange(0.0f, std::memory_order_relaxed);
+        outR = meterPeakR.exchange(0.0f, std::memory_order_relaxed);
     }
 
 private:
     juce::AudioSource& downstream;
     std::atomic<float> gainLinear { 1.0f };
-    std::atomic<float> meterPeak { 0.0f };
+    std::atomic<float> meterPeakL { 0.0f };
+    std::atomic<float> meterPeakR { 0.0f };
 };
 }  // namespace orion

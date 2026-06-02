@@ -3,6 +3,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_graphics/juce_graphics.h>
 
+#include <cmath>
 #include <vector>
 
 namespace orion
@@ -68,10 +69,38 @@ struct TimelineClip
     int transposeSemitones { 0 };
     double sampleStartRatio { 0.0 };
     double sampleEndRatio { 1.0 };
+    // Fade in/out lengths in beats (Studio One style — drag the top corners).
+    double fadeInBeats { 0.0 };
+    double fadeOutBeats { 0.0 };
+    // Fade curvature in [-1, 1]; 0 = linear, >0 = concave (slow start),
+    // <0 = convex (fast start). Set by dragging the mid-point handle.
+    double fadeInCurve { 0.0 };
+    double fadeOutCurve { 0.0 };
     // Transient UI/audio state: a clip currently being recorded is visible on
     // the timeline but must not play back until the take is finalized.
     bool recording { false };
 };
+
+// Maps a linear fade progress t in [0,1] (0 = silent end, 1 = full level) to a
+// gain, applying a curvature in [-1,1]. 0 = linear, >0 concave (slow start),
+// <0 convex (fast start). Shared by the audio render and the timeline drawing.
+inline double fadeCurveGain(double t, double curve) noexcept
+{
+    t = juce::jlimit(0.0, 1.0, t);
+    if (std::abs(curve) < 1.0e-4)
+        return t;
+    const auto exponent = std::pow(4.0, juce::jlimit(-1.0, 1.0, curve));
+    return std::pow(t, exponent);
+}
+
+// Equal-power pan: maps pan in [-1,1] to left/right gains (centre ≈ 0.707 each).
+inline void panToGains(double pan, float& leftGain, float& rightGain) noexcept
+{
+    const auto p = juce::jlimit(-1.0, 1.0, pan);
+    const auto angle = (p + 1.0) * 0.25 * juce::MathConstants<double>::pi; // 0..pi/2
+    leftGain  = static_cast<float>(std::cos(angle));
+    rightGain = static_cast<float>(std::sin(angle));
+}
 
 struct TrackState
 {
@@ -82,6 +111,8 @@ struct TrackState
     bool solo { false };
     bool recordArmed { false };
     double volumeDb { 0.0 };
+    // Stereo pan in [-1, 1]: -1 = hard left, 0 = centre, +1 = hard right.
+    double pan { 0.0 };
     std::vector<TimelineClip> clips;
     juce::String samplerSourcePath;
     int samplerRootMidiNote { 60 };
@@ -94,6 +125,25 @@ struct TrackState
     double samplerSourceDurationSeconds { 0.0 };
     int samplerDetectedBars { 0 };
 
+    // One hosted VST3 effect in a track's insert chain.
+    struct InsertFx
+    {
+        juce::String pluginId;       // PluginDescription::createIdentifierString()
+        juce::String pluginName;
+        juce::String stateBase64;    // saved plugin state for persistence
+        bool bypassed { false };
+    };
+    std::vector<InsertFx> inserts;
+
+    // An aux send from this track to a bus (post-fader by default).
+    struct SendFx
+    {
+        int busIndex { 0 };
+        double level { 0.25 };   // linear 0..1
+        bool prefader { false };
+    };
+    std::vector<SendFx> sends;
+
     // Hosted VST instrument (empty = none). instrumentPluginId is the plugin's
     // stable identifier (PluginDescription::createIdentifierString()), used to
     // find and re-instantiate it. instrumentStateBase64 holds the plugin's saved
@@ -101,6 +151,19 @@ struct TrackState
     juce::String instrumentPluginId;
     juce::String instrumentPluginName;
     juce::String instrumentStateBase64;
+};
+
+// An aux/FX bus: receives sends from tracks, runs its own insert chain, and feeds the
+// master. Buses live outside the timeline (mixer-only), so they are kept separate from
+// TrackState (which carries clips).
+struct BusState
+{
+    juce::String name { "Bus" };
+    juce::Colour colour { juce::Colour(0xff35c9d6) };
+    double volumeDb { 0.0 };
+    double pan { 0.0 };
+    bool muted { false };
+    std::vector<TrackState::InsertFx> inserts;
 };
 
 class ProjectState
@@ -140,6 +203,8 @@ public:
     void clearLoopRange() noexcept;
     const std::vector<TrackState>& getTracks() const noexcept;
     std::vector<TrackState>& getTracks() noexcept;
+    const std::vector<BusState>& getBuses() const noexcept { return buses; }
+    std::vector<BusState>& getBuses() noexcept { return buses; }
 
 private:
     double tempoBpm { 126.0 };
@@ -154,5 +219,6 @@ private:
     bool scaleLockEnabled { true };
     bool recordWithMetronome { true };
     std::vector<TrackState> tracks;
+    std::vector<BusState> buses;
 };
 }  // namespace orion

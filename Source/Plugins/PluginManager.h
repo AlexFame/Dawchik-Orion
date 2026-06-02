@@ -9,9 +9,9 @@
 
 namespace orion
 {
-// Owns plugin discovery (scanning) and instantiation for VST3 (and, on macOS,
-// AudioUnit) plugins. Lives on the message thread; scanning happens on a
-// background thread and reports back via MessageManager::callAsync.
+// Owns VST3 plugin discovery and instantiation. Lives on the message thread;
+// scanning happens on a background thread and reports back via
+// MessageManager::callAsync.
 class PluginManager final
 {
 public:
@@ -25,7 +25,7 @@ public:
                         std::function<void()> onFinished);
     bool isScanning() const noexcept { return scanning.load(); }
 
-    // Every known plugin (instruments + effects), sorted by manufacturer.
+    // Every known plugin (instruments + effects), sorted alphabetically.
     juce::Array<juce::PluginDescription> getAllDescriptions() const;
     // Only plugins that report themselves as instruments (synths/samplers).
     juce::Array<juce::PluginDescription> getInstrumentDescriptions() const;

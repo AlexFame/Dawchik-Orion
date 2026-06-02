@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace orion
 {
@@ -50,7 +51,20 @@ double pitchRatioForPitch(double midiPitch, int rootMidiNote) noexcept
     return std::pow(2.0, (midiPitch - static_cast<double>(rootMidiNote)) / 12.0);
 }
 
-std::optional<double> slidePitchForNoteAtBeat(const TimelineClip& clip, const MidiNote& note, double beat)
+double nextTriggerBeatAfter(const std::vector<MidiNote>& notes, const MidiNote& note, double fallbackBeat) noexcept
+{
+    auto nextTriggerBeat = fallbackBeat;
+
+    for (const auto& nextNote : notes)
+    {
+        if (nextNote.startBeat > note.startBeat + 0.0001)
+            nextTriggerBeat = juce::jmin(nextTriggerBeat, nextNote.startBeat);
+    }
+
+    return nextTriggerBeat;
+}
+
+const PitchSlide* findSlideForNote(const TimelineClip& clip, const MidiNote& note)
 {
     for (const auto& slide : clip.pitchSlides)
     {
@@ -65,25 +79,90 @@ std::optional<double> slidePitchForNoteAtBeat(const TimelineClip& clip, const Mi
         if (! originalSource && ! startsInsideNote)
             continue;
 
-        if (beat < slide.points.front().beat)
-            continue;
-        if (beat >= slide.points.back().beat)
-            return slide.points.back().pitch;
-
-        for (std::size_t i = 1; i < slide.points.size(); ++i)
-        {
-            const auto& a = slide.points[i - 1];
-            const auto& b = slide.points[i];
-            if (beat < a.beat || beat > b.beat)
-                continue;
-
-            const auto span = juce::jmax(0.0001, b.beat - a.beat);
-            const auto t = juce::jlimit(0.0, 1.0, (beat - a.beat) / span);
-            return a.pitch + (b.pitch - a.pitch) * t;
-        }
+        return &slide;
     }
 
-    return std::nullopt;
+    return nullptr;
+}
+
+double pitchForSlideAtBeat(const PitchSlide& slide, double beat)
+{
+    if (beat >= slide.points.back().beat)
+        return slide.points.back().pitch;
+
+    for (std::size_t i = 1; i < slide.points.size(); ++i)
+    {
+        const auto& a = slide.points[i - 1];
+        const auto& b = slide.points[i];
+        if (beat < a.beat || beat > b.beat)
+            continue;
+
+        const auto span = juce::jmax(0.0001, b.beat - a.beat);
+        const auto t = juce::jlimit(0.0, 1.0, (beat - a.beat) / span);
+        return a.pitch + (b.pitch - a.pitch) * t;
+    }
+
+    return slide.points.front().pitch;
+}
+
+double pitchForNoteAtBeat(const PitchSlide* slide, const MidiNote& note, double beat)
+{
+    if (slide == nullptr || beat < slide->points.front().beat)
+        return static_cast<double>(note.pitch);
+
+    return pitchForSlideAtBeat(*slide, beat);
+}
+
+double sourceSamplesForNoteAtBeat(const PitchSlide* slide,
+                                  const MidiNote& note,
+                                  double beat,
+                                  int rootMidiNote,
+                                  double sourceSampleRate,
+                                  double beatsPerSecond)
+{
+    if (beat <= note.startBeat || beatsPerSecond <= 0.0 || sourceSampleRate <= 0.0)
+        return 0.0;
+
+    if (slide == nullptr)
+    {
+        return ((beat - note.startBeat) / beatsPerSecond)
+            * sourceSampleRate
+            * pitchRatioForPitch(static_cast<double>(note.pitch), rootMidiNote);
+    }
+
+    std::vector<double> boundaries;
+    boundaries.reserve(slide->points.size() + 2);
+    boundaries.push_back(note.startBeat);
+    boundaries.push_back(beat);
+
+    for (const auto& point : slide->points)
+    {
+        if (point.beat > note.startBeat + 0.000001 && point.beat < beat - 0.000001)
+            boundaries.push_back(point.beat);
+    }
+
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end(), [](double a, double b)
+    {
+        return std::abs(a - b) < 0.000001;
+    }), boundaries.end());
+
+    auto sourceSamples = 0.0;
+    for (std::size_t i = 1; i < boundaries.size(); ++i)
+    {
+        const auto segmentStart = boundaries[i - 1];
+        const auto segmentEnd = boundaries[i];
+        if (segmentEnd <= segmentStart)
+            continue;
+
+        const auto midpointBeat = (segmentStart + segmentEnd) * 0.5;
+        const auto segmentPitch = pitchForNoteAtBeat(slide, note, midpointBeat);
+        sourceSamples += ((segmentEnd - segmentStart) / beatsPerSecond)
+            * sourceSampleRate
+            * pitchRatioForPitch(segmentPitch, rootMidiNote);
+    }
+
+    return sourceSamples;
 }
 }
 
@@ -162,29 +241,42 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
         const auto clipLocalBeat = timelineBeat - clipStartBeat;
         for (const auto& note : clip.midiNotes)
         {
+            const auto* noteSlide = findSlideForNote(clip, note);
             auto noteEndBeat = note.startBeat + juce::jmax(0.01, note.lengthInBeats);
-            // In Classic and OneShot modes the sample plays through to its natural end
-            // regardless of the MIDI note duration — matches the keyboard-live behaviour
-            // (noteOff is intentionally a no-op for those modes). Only Slice mode keeps
-            // the note bounded by the slice / next-trigger.
-            if (track.samplerMode == SamplerPlaybackMode::classic
-                || track.samplerMode == SamplerPlaybackMode::oneShot)
+            const auto nextTriggerBeat = nextTriggerBeatAfter(clip.midiNotes, note, clip.lengthInBeats);
+
+            // Classic is polyphonic. One-Shot/Slice retrigger, so the next MIDI note
+            // must choke the previous rendered voice even when that voice has a slide.
+            if (track.samplerMode == SamplerPlaybackMode::classic)
             {
-                const auto sourceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
-                    * beatsPerSecond / getPitchRatio(note.pitch, track.samplerRootMidiNote);
-                noteEndBeat = juce::jmin(clip.lengthInBeats, note.startBeat + sourceDurationBeats);
+                if (noteSlide != nullptr)
+                {
+                    noteEndBeat = clip.lengthInBeats;
+                }
+                else
+                {
+                    const auto sourceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
+                        * beatsPerSecond / getPitchRatio(note.pitch, track.samplerRootMidiNote);
+                    noteEndBeat = juce::jmin(clip.lengthInBeats, note.startBeat + sourceDurationBeats);
+                }
+            }
+            else if (track.samplerMode == SamplerPlaybackMode::oneShot)
+            {
+                if (noteSlide != nullptr)
+                {
+                    noteEndBeat = juce::jmin(clip.lengthInBeats, nextTriggerBeat);
+                }
+                else
+                {
+                    const auto sourceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
+                        * beatsPerSecond / getPitchRatio(note.pitch, track.samplerRootMidiNote);
+                    noteEndBeat = juce::jmin(nextTriggerBeat, note.startBeat + sourceDurationBeats);
+                }
             }
             else if (track.samplerMode == SamplerPlaybackMode::slice)
             {
                 const auto sliceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
                     * beatsPerSecond / static_cast<double>(safeSliceCount);
-                auto nextTriggerBeat = clip.lengthInBeats;
-                for (const auto& nextNote : clip.midiNotes)
-                {
-                    if (nextNote.startBeat > note.startBeat + 0.0001)
-                        nextTriggerBeat = juce::jmin(nextTriggerBeat, nextNote.startBeat);
-                }
-
                 noteEndBeat = juce::jmin(nextTriggerBeat, note.startBeat + sliceDurationBeats);
             }
 
@@ -194,8 +286,7 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
             const auto noteSeconds = (clipLocalBeat - note.startBeat) / beatsPerSecond;
             double sourceStartPosition = 0.0;
             double sourceEndPosition = static_cast<double>(sampleData->buffer.getNumSamples());
-            const auto slidePitch = slidePitchForNoteAtBeat(clip, note, clipLocalBeat);
-            double playbackRatio = pitchRatioForPitch(slidePitch.value_or(static_cast<double>(note.pitch)), track.samplerRootMidiNote);
+            double playbackRatio = pitchRatioForPitch(pitchForNoteAtBeat(noteSlide, note, clipLocalBeat), track.samplerRootMidiNote);
 
             if (track.samplerMode == SamplerPlaybackMode::slice)
             {
@@ -209,7 +300,15 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                 playbackRatio = 1.0;
             }
 
-            const auto sourceSamplePosition = sourceStartPosition + noteSeconds * sampleData->sampleRate * playbackRatio;
+            const auto sourceSamplePosition = sourceStartPosition
+                + (track.samplerMode == SamplerPlaybackMode::slice
+                       ? noteSeconds * sampleData->sampleRate * playbackRatio
+                       : sourceSamplesForNoteAtBeat(noteSlide,
+                                                    note,
+                                                    clipLocalBeat,
+                                                    track.samplerRootMidiNote,
+                                                    sampleData->sampleRate,
+                                                    beatsPerSecond));
             const auto sourceIndex = static_cast<int>(sourceSamplePosition);
             if (sourceIndex < 0 || sourceSamplePosition >= sourceEndPosition || sourceIndex >= sampleData->buffer.getNumSamples())
                 continue;

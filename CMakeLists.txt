@@ -46,7 +46,12 @@ else()
     set(ORION_HAVE_RUBBERBAND 0)
 endif()
 
-juce_add_gui_app(Orion PRODUCT_NAME "Orion")
+juce_add_gui_app(Orion
+    PRODUCT_NAME "Orion"
+    # Required on macOS so the OS lets the app open the microphone/audio input.
+    # Without NSMicrophoneUsageDescription the app is killed when input is opened.
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Orion needs access to your microphone/audio input to record audio.")
 
 target_sources(
     Orion

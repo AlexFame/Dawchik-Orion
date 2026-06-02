@@ -14,9 +14,22 @@ MainWindow::MainWindow(juce::String name)
 {
     setUsingNativeTitleBar(true);
     setResizable(true, true);
-    setResizeLimits(1200, 760, 3840, 2160);
+    setResizeLimits(1200, 760, 8192, 8192);
     setContentOwned(new MainComponent(), true);
-    centreWithSize(1440, 900);
+
+    if (const auto* primaryDisplay = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+    {
+        const auto launchBounds = primaryDisplay->userArea;
+        if (! launchBounds.isEmpty())
+            setBounds(launchBounds);
+        else
+            centreWithSize(1440, 900);
+    }
+    else
+    {
+        centreWithSize(1440, 900);
+    }
+
     setVisible(true);
 
     if (auto* mainComponent = dynamic_cast<MainComponent*>(getContentComponent()))

@@ -82,6 +82,18 @@ private:
     void closeAllInstrumentEditors();
     void captureAllInstrumentStates();
     void restoreInstrumentsFromProject();
+    // Insert FX chain (per track). insertIndex < 0 means the "+" add slot.
+    void showInsertMenuForTrack(int trackIndex, int insertIndex);
+    void addInsertOnTrack(int trackIndex, const juce::PluginDescription& description);
+    void replaceInsertOnTrack(int trackIndex, int insertIndex, const juce::PluginDescription& description);
+    void removeInsertFromTrack(int trackIndex, int insertIndex);
+    void openInsertEditor(int trackIndex, int insertIndex);
+    void toggleInsertBypass(int trackIndex, int insertIndex);
+    void moveInsert(int fromTrack, int fromIndex, int toTrack, int toIndex);
+    void copyInsertToTrack(int fromTrack, int fromIndex, int toTrack);
+    void restoreInsertsFromProject();
+    double getCurrentPluginSampleRate() const noexcept;
+    int getCurrentPluginBlockSize() const noexcept;
     void stopBrowserPreview(bool resetPosition);
     void toggleTransportFromUi();
     void stopTransportFromUi();
@@ -129,6 +141,7 @@ private:
     MixerPanelComponent mixerPanel;
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
+    std::map<std::pair<int, int>, std::unique_ptr<PluginEditorWindow>> insertEditorWindows;
     std::map<std::string, std::pair<std::vector<float>, std::vector<float>>> clipEditorWaveformCache;
     // Cache of fully-prepared (trimmed + pitch-shifted) clip-editor preview buffers,
     // keyed by source|startSample|numSamples|semitones|backend, so re-triggering or
@@ -234,8 +247,21 @@ private:
     // MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks
     // so the two meter views never steal peaks from each other.
     std::vector<float> trackMeterLevels;   // fast bar level (linear), responsive
-    std::vector<float> trackPeakHoldDb;    // Logic-style held peak in dB (numeric readout)
-    std::vector<int>   trackPeakHoldFrames;// remaining hold frames before the number falls
+    std::vector<float> trackMeterLevelsL;  // per-channel fast bar level (linear) — left
+    std::vector<float> trackMeterLevelsR;  // per-channel fast bar level (linear) — right
+    std::vector<float> trackPeakHoldDb;    // numeric readout in dB (Logic-style peak hold)
+    std::vector<float> trackPeakRecentDb;  // loudest dB seen since the last discrete update
+    std::vector<int>   trackPeakHoldFrames;// remaining peak-hold frames before the number snaps
+    // Master output metering — single consumer (this component) fetches the audio-thread
+    // peaks once per tick; the mixer and the bottom bar both read these stored values.
+    float masterRawPeakL { 0.0f };         // raw peak this tick (left), for the mixer
+    float masterRawPeakR { 0.0f };         // raw peak this tick (right), for the mixer
+    float masterMeterLevel { 0.0f };       // decayed 0..1 level for the bottom MASTER OUT bar
+    float masterMeterLevelL { 0.0f };      // per-channel decayed linear level for the mixer master bar
+    float masterMeterLevelR { 0.0f };
+    float masterMeterDb { -100.0f };       // numeric dB readout for the bottom MASTER OUT text
+    float masterMeterRecentDb { -100.0f }; // loudest dB since the last discrete update
+    int   masterMeterDbHoldFrames { 0 };   // remaining peak-hold frames before it snaps
     void updateTrackMeterLevels();
     std::unique_ptr<juce::FileChooser> saveFileChooser;
     std::unique_ptr<juce::FileChooser> openFileChooser;
@@ -284,6 +310,11 @@ private:
     void finalizeRecordingClip();
     void startAudioRecordingClip(int trackIndex);
     void finalizeAudioRecordingClip();
+    // Discards any in-progress take (audio + MIDI) and stops the transport.
+    void cancelRecording();
+    // Attaches/detaches the input callback so an armed audio track shows live input
+    // level (monitoring) even before recording starts.
+    void updateInputMonitoring();
     juce::File getAudioRecordingDirectory() const;
     int browserPanelWidth { 300 };
     int exportSampleRate { 44100 };

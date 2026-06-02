@@ -1,12 +1,14 @@
 #include "BottomStatusBarComponent.h"
 
+#include "OrionTheme.h"
+
 namespace orion
 {
 namespace
 {
 const auto background = juce::Colour(0xff2b2b2a);
 const auto panelDark = juce::Colour(0xff191817);
-const auto coral = juce::Colour(0xffff533f);
+const auto coral = theme::warm::red;
 const auto peach = juce::Colour(0xffffb3a9);
 const auto dim = juce::Colour(0xff6f6967);
 
@@ -46,8 +48,9 @@ void BottomStatusBarComponent::paint(juce::Graphics& g)
     g.fillRect(meter);
     auto fill = meter.toFloat();
     fill.setWidth(fill.getWidth() * juce::jlimit(0.0f, 1.0f, state.masterLevel));
-    juce::ColourGradient meterGradient(coral, fill.getX(), fill.getCentreY(),
-                                       coral.darker(0.45f), fill.getRight(), fill.getCentreY(), false);
+    juce::ColourGradient meterGradient(juce::Colour(0xff39d36b), fill.getX(), fill.getCentreY(),
+                                       juce::Colour(0xffe8401f), fill.getRight(), fill.getCentreY(), false);
+    meterGradient.addColour(0.72, juce::Colour(0xffe7c93a));
     g.setGradientFill(meterGradient);
     g.fillRect(fill);
     g.setColour(juce::Colours::white.withAlpha(0.08f));
@@ -55,7 +58,7 @@ void BottomStatusBarComponent::paint(juce::Graphics& g)
 
     g.setColour(juce::Colours::white.withAlpha(0.90f));
     g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-    g.drawText(formatDb(state.masterGainDb), meterRow.removeFromLeft(96), juce::Justification::centredRight);
+    g.drawText(formatDb(state.masterLevelDb), meterRow.removeFromLeft(108), juce::Justification::centredRight);
 
     const auto itemWidth = 118;
     auto center = getLocalBounds().withSizeKeepingCentre(itemWidth * 5 + 32, getHeight());

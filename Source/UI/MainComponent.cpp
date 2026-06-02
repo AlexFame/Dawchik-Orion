@@ -973,7 +973,35 @@ MainComponent::MainComponent()
     clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine,
                                                           [this]() { return metronomeButton.getToggleState(); });
     audioInputRecorder = std::make_unique<AudioInputRecorder>();
-    audioDeviceManager.initialise(0, 2, nullptr, true);
+    // Open up to 2 input channels as well as 2 outputs, so the microphone/line input
+    // is available for recording. On macOS this triggers the system mic-permission
+    // prompt the first time (needs NSMicrophoneUsageDescription — set in CMake).
+    {
+        const auto requestInputAndInit = [this]
+        {
+            audioDeviceManager.initialise(2, 2, nullptr, true);
+
+            // Request a low-latency buffer for responsive live playing. The device
+            // default is often 512 samples (~12 ms + output ≈ 23 ms round-trip, audible
+            // when playing). Drop to ~256 (clamped to the device's nearest allowed size).
+            auto setup = audioDeviceManager.getAudioDeviceSetup();
+            if (setup.bufferSize <= 0 || setup.bufferSize > 256)
+            {
+                setup.bufferSize = 256;
+                audioDeviceManager.setAudioDeviceSetup(setup, true);
+            }
+        };
+        if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
+            && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio))
+        {
+            juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
+                                              [requestInputAndInit](bool /*granted*/) { requestInputAndInit(); });
+        }
+        else
+        {
+            requestInputAndInit();
+        }
+    }
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
     masterMixerSource.addInputSource(&previewTransportSource, false);
     masterMixerSource.addInputSource(&clipEditorPreviewTransportSource, false);
@@ -997,9 +1025,34 @@ MainComponent::MainComponent()
             masterStripSource->setGainDb(db);
     };
     mixerPanel.onRequestMasterGainDb = [this]() { return masterGainDb; };
+    // The peaks are fetched/reset once per tick in updateTrackMeterLevels() (single
+    // consumer); these callbacks just return the stored values so the mixer and the
+    // bottom bar never steal peaks from each other.
     mixerPanel.onRequestMasterPeak = [this]() -> float
     {
-        return masterStripSource != nullptr ? masterStripSource->fetchAndResetPeak() : 0.0f;
+        return juce::jmax(masterRawPeakL, masterRawPeakR);
+    };
+    mixerPanel.onRequestMasterPeakStereo = [this]() -> std::pair<float, float>
+    {
+        return { masterRawPeakL, masterRawPeakR };
+    };
+    // Unified (host-owned) master readouts so the mixer master matches the track meters.
+    mixerPanel.onRequestMasterLevelStereo = [this]() -> std::pair<float, float>
+    {
+        return { masterMeterLevelL, masterMeterLevelR };
+    };
+    mixerPanel.onRequestMasterLevelDb = [this]() -> float { return masterMeterDb; };
+    mixerPanel.onInsertClicked = [this](int trackIndex, int insertIndex)
+    {
+        if (trackIndex >= 0)
+            showInsertMenuForTrack(trackIndex, insertIndex);
+    };
+    mixerPanel.onInsertMoved = [this](int fromTrack, int fromIndex, int toTrack, int toIndex)
+    {
+        if (fromTrack == toTrack)
+            moveInsert(fromTrack, fromIndex, toTrack, toIndex);   // reorder within the track
+        else
+            copyInsertToTrack(fromTrack, fromIndex, toTrack);     // copy onto another track
     };
 
     clipEditorPanel.onGainChanged = [this](double gainDb)
@@ -1119,10 +1172,25 @@ MainComponent::MainComponent()
                    ? trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
                    : -100.0f;
     };
+    // Stereo levels for the timeline header meters (each channel mapped over -60..0 dB).
+    const auto requestTrackLevelStereo = [this](int trackIndex) -> std::pair<float, float>
+    {
+        const auto toBar = [](float lin)
+        {
+            const auto db = lin > 0.0f ? juce::Decibels::gainToDecibels(lin, -60.0f) : -60.0f;
+            return juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 0.0f, 0.0f, 1.0f));
+        };
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(trackMeterLevelsL.size()))
+            return { 0.0f, 0.0f };
+        return { toBar(trackMeterLevelsL[static_cast<std::size_t>(trackIndex)]),
+                 toBar(trackMeterLevelsR[static_cast<std::size_t>(trackIndex)]) };
+    };
     mixerPanel.onRequestTrackLevel = requestTrackLevel;
+    mixerPanel.onRequestTrackLevelStereo = requestTrackLevelStereo;
     mixerPanel.onRequestTrackLevelDb = requestTrackLevelDb;
     arrangementTimeline.onRequestTrackLevel = requestTrackLevel;
     arrangementTimeline.onRequestTrackLevelDb = requestTrackLevelDb;
+    arrangementTimeline.onRequestTrackLevelStereo = requestTrackLevelStereo;
     browserPanel.onPreviewItem = [this](const BrowserItem& item)
     {
         if (item.isDirectory)
@@ -1480,6 +1548,7 @@ MainComponent::~MainComponent()
     // Editor windows borrow plugin instances owned by the playback source — close
     // them before that source (and its instruments) is destroyed.
     closeAllInstrumentEditors();
+    insertEditorWindows.clear();
 
     finalizeRecordingClip();
     finalizeAudioRecordingClip();
@@ -1698,7 +1767,9 @@ void MainComponent::resized()
     // Reduced padding for a sleeker edge-to-edge floating layout
     auto bounds = getLocalBounds().reduced(8);
     auto topStrip = bounds.removeFromTop(transportShelfHeight).reduced(18, 10);
-    bounds.removeFromBottom(bottomStatusBarHeight);
+    // Extend the content all the way down to the bottom status bar's top edge — the
+    // reduced(8) above otherwise leaves a dead gap between the playlist and the bar.
+    bounds.setBottom(getLocalBounds().getBottom() - bottomStatusBarHeight);
     const auto contentWidth = transportBrandWidth + transportClusterWidth + transportTempoWidth + transportModeWidth
         + transportUtilityWidth + transportSectionGap * 4;
     auto contentRow = topStrip.withSizeKeepingCentre(juce::jmin(contentWidth, topStrip.getWidth()), topStrip.getHeight());
@@ -1809,7 +1880,6 @@ void MainComponent::resized()
     playlistArea.removeFromLeft(8);
     playlistArea.removeFromRight(8);
     playlistArea.removeFromTop(8);
-    playlistArea.removeFromBottom(8);
 
     const auto samplerOpen = samplerPanel.isVisible();
     const auto clipEditorOpen = clipEditorPanel.isVisible();
@@ -1854,6 +1924,11 @@ void MainComponent::resized()
     clipEditorPanel.setVisible(clipEditorOpen);
     samplerPanel.setBounds(samplerOpen ? lowerPanelArea : juce::Rectangle<int>());
     samplerPanel.setVisible(samplerOpen);
+
+    // The sidebar / transport were just raised with toFront above; if the mixer overlay
+    // is open it must stay on top of them, otherwise they overlap and clip it.
+    if (mixerPanel.isVisible())
+        mixerPanel.toFront(false);
 }
 
 void MainComponent::mouseMove(const juce::MouseEvent& event)
@@ -1993,6 +2068,14 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    // Escape cancels an in-progress recording (discards the current take).
+    if (key == juce::KeyPress::escapeKey
+        && (audioRecordingSession.has_value() || recordingSession.has_value()))
+    {
+        cancelRecording();
+        return true;
+    }
+
     if (key != juce::KeyPress::spaceKey)
         return false;
 
@@ -2031,43 +2114,113 @@ void MainComponent::updateTrackMeterLevels()
     if (static_cast<int>(trackMeterLevels.size()) != trackCount)
     {
         trackMeterLevels.assign(sized, 0.0f);
+        trackMeterLevelsL.assign(sized, 0.0f);
+        trackMeterLevelsR.assign(sized, 0.0f);
         trackPeakHoldDb.assign(sized, -100.0f);
+        trackPeakRecentDb.assign(sized, -100.0f);
         trackPeakHoldFrames.assign(sized, 0);
     }
 
-    // Logic-style ballistics at 60 Hz: the bar rises instantly and falls smoothly,
-    // while the numeric readout HOLDS the peak for ~1 s before easing down — so the
-    // number stays readable instead of flickering every frame.
-    constexpr int   peakHoldFrames     = 60;    // ~1.0 s hold at 60 Hz
-    constexpr float peakReleaseDbPerTick = 0.35f; // ~21 dB/s slow release afterwards
+    // Keep input monitoring in sync with the armed/recording state, then work out which
+    // track should display the live input level this tick.
+    updateInputMonitoring();
+    int monitoredAudioTrack = -1;
+    if (audioRecordingSession.has_value())
+    {
+        monitoredAudioTrack = audioRecordingSession->trackIndex;
+    }
+    else
+    {
+        const auto& tracks = projectState.getTracks();
+        for (int t = 0; t < static_cast<int>(tracks.size()); ++t)
+            if (! tracks[static_cast<std::size_t>(t)].isMidiTrack && tracks[static_cast<std::size_t>(t)].recordArmed)
+            {
+                monitoredAudioTrack = t;
+                break;
+            }
+    }
+
+    // Numeric dB readout = a Logic/Studio One-style peak hold: it jumps up instantly on
+    // a louder peak, HOLDS for a while, then snaps in ONE step to the loudest level seen
+    // recently. It never rolls digit-by-digit, so it stays readable (bars move smoothly).
+    constexpr int peakHoldFrames = 90;             // ~1.5 s hold at 60 Hz
 
     for (int i = 0; i < trackCount; ++i)
     {
-        const auto peak = arrangementPlaybackSource != nullptr
-                              ? arrangementPlaybackSource->fetchAndResetTrackPeak(i)
-                              : 0.0f;
+        float peakL = 0.0f, peakR = 0.0f;
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->fetchAndResetTrackPeakStereo(i, peakL, peakR);
 
-        // Fast bar level (linear): instant rise, smooth fall.
-        auto& level = trackMeterLevels[static_cast<std::size_t>(i)];
-        level = juce::jmax(peak, level * 0.85f);
+        // Show the LIVE INPUT level on the monitored track (the armed audio track, or
+        // the one currently recording) so the user can confirm the mic works — both
+        // before and during recording.
+        if (i == monitoredAudioTrack && audioRecorderCallbackAttached
+            && audioInputRecorder != nullptr)
+        {
+            float inL = 0.0f, inR = 0.0f;
+            audioInputRecorder->fetchAndResetInputPeak(inL, inR);
+            peakL = juce::jmax(peakL, inL);
+            peakR = juce::jmax(peakR, inR);
+        }
 
-        // Peak-hold numeric readout (dB).
+        const auto peak = juce::jmax(peakL, peakR);
+
+
+        // Fast bar level (linear): instant rise, smooth fall. Kept per-channel for the
+        // stereo header meter, plus a combined value for the mixer/legacy consumers.
+        auto& level  = trackMeterLevels[static_cast<std::size_t>(i)];
+        auto& levelL = trackMeterLevelsL[static_cast<std::size_t>(i)];
+        auto& levelR = trackMeterLevelsR[static_cast<std::size_t>(i)];
+        level  = juce::jmax(peak,  level  * 0.85f);
+        levelL = juce::jmax(peakL, levelL * 0.85f);
+        levelR = juce::jmax(peakR, levelR * 0.85f);
+
+        // Peak-hold numeric readout (dB): jump up instantly, hold, then snap once.
         const auto peakDb = peak > 0.0001f ? juce::Decibels::gainToDecibels(peak) : -100.0f;
         auto& holdDb     = trackPeakHoldDb[static_cast<std::size_t>(i)];
+        auto& recentDb   = trackPeakRecentDb[static_cast<std::size_t>(i)];
         auto& holdFrames = trackPeakHoldFrames[static_cast<std::size_t>(i)];
+        recentDb = juce::jmax(recentDb, peakDb);
         if (peakDb >= holdDb)
         {
-            holdDb = peakDb;
+            holdDb = peakDb;          // louder than shown → jump up now
+            recentDb = peakDb;
             holdFrames = peakHoldFrames;
         }
-        else if (holdFrames > 0)
+        else if (--holdFrames <= 0)
         {
-            --holdFrames;
+            holdDb = recentDb;        // hold elapsed → snap once to the recent max
+            recentDb = -100.0f;
+            holdFrames = peakHoldFrames;
         }
-        else
-        {
-            holdDb = juce::jmax(-100.0f, holdDb - peakReleaseDbPerTick);
-        }
+    }
+
+    // Master output level — fetched once here (single consumer) so the mixer and the
+    // bottom MASTER OUT bar both read consistent values without stealing peaks.
+    masterRawPeakL = masterRawPeakR = 0.0f;
+    if (masterStripSource != nullptr)
+        masterStripSource->fetchAndResetPeakStereo(masterRawPeakL, masterRawPeakR);
+    const auto masterPeak = juce::jmax(masterRawPeakL, masterRawPeakR);
+    const auto masterDb = masterPeak > 0.0f ? juce::Decibels::gainToDecibels(masterPeak, -60.0f) : -60.0f;
+    const auto masterTarget = juce::jlimit(0.0f, 1.0f, juce::jmap(masterDb, -60.0f, 0.0f, 0.0f, 1.0f));
+    masterMeterLevel = juce::jmax(masterTarget, masterMeterLevel * 0.85f);
+    // Per-channel decayed levels (same ballistics as the tracks) for the mixer master bar.
+    masterMeterLevelL = juce::jmax(masterRawPeakL, masterMeterLevelL * 0.85f);
+    masterMeterLevelR = juce::jmax(masterRawPeakR, masterMeterLevelR * 0.85f);
+
+    const auto masterDisplayDb = masterPeak > 0.0001f ? juce::Decibels::gainToDecibels(masterPeak) : -100.0f;
+    masterMeterRecentDb = juce::jmax(masterMeterRecentDb, masterDisplayDb);
+    if (masterDisplayDb >= masterMeterDb)
+    {
+        masterMeterDb = masterDisplayDb;
+        masterMeterRecentDb = masterDisplayDb;
+        masterMeterDbHoldFrames = peakHoldFrames;
+    }
+    else if (--masterMeterDbHoldFrames <= 0)
+    {
+        masterMeterDb = masterMeterRecentDb;
+        masterMeterRecentDb = -100.0f;
+        masterMeterDbHoldFrames = peakHoldFrames;
     }
 
     // The timeline repaints itself continuously (its own 120 Hz timer), so the
@@ -2151,6 +2304,7 @@ void MainComponent::timerCallback()
             const auto playheadBeat = transportEngine.getPlayheadBeat();
             const auto clipStart    = std::floor(playheadBeat);
             auto& track = tracks[static_cast<std::size_t>(armedTrack)];
+            arrangementTimeline.captureUndoSnapshot();
             track.clips.push_back(TimelineClip {
                 "Recording",
                 ClipType::midi,
@@ -2213,6 +2367,17 @@ void MainComponent::timerCallback()
                 auto& clip = clips[static_cast<std::size_t>(audioRecordingSession->clipIndex)];
                 const auto rawLen = juce::jmax(0.25, transportEngine.getPlayheadBeat() - audioRecordingSession->clipStartBeat);
                 clip.lengthInBeats = rawLen;
+
+                // Feed the live capture waveform to the timeline so the clip shows its
+                // waveform as it records (the file isn't readable yet).
+                if (audioInputRecorder != nullptr)
+                {
+                    std::vector<float> mins, maxs;
+                    audioInputRecorder->copyLiveWaveform(mins, maxs);
+                    arrangementTimeline.setLiveRecordingWaveform(audioRecordingSession->trackIndex,
+                                                                 audioRecordingSession->clipIndex,
+                                                                 std::move(mins), std::move(maxs));
+                }
                 arrangementTimeline.repaint();
             }
         }
@@ -2342,7 +2507,9 @@ void MainComponent::updateTransportLabels()
 
     BottomStatusBarState bottomState;
     bottomState.masterGainDb = masterGainDb;
-    bottomState.masterLevel = static_cast<float>(juce::jmap(juce::jlimit(-60.0, 12.0, masterGainDb), -60.0, 12.0, 0.0, 1.0));
+    // Real, decayed master output level (not the fader setting).
+    bottomState.masterLevel = juce::jlimit(0.0f, 1.0f, masterMeterLevel);
+    bottomState.masterLevelDb = masterMeterDb;
     bottomState.engineLoad = 0.32f;
     bottomState.projectSaved = true;
     bottomState.mixerOpen = mixerPanel.isVisible();
@@ -2484,6 +2651,24 @@ bool MainComponent::openSamplerForTrackIfAvailable(int trackIndex)
     return true;
 }
 
+double MainComponent::getCurrentPluginSampleRate() const noexcept
+{
+    if (auto* device = audioDeviceManager.getCurrentAudioDevice())
+        if (device->getCurrentSampleRate() > 0.0)
+            return device->getCurrentSampleRate();
+
+    return 44100.0;
+}
+
+int MainComponent::getCurrentPluginBlockSize() const noexcept
+{
+    if (auto* device = audioDeviceManager.getCurrentAudioDevice())
+        if (device->getCurrentBufferSizeSamples() > 0)
+            return device->getCurrentBufferSizeSamples();
+
+    return 512;
+}
+
 void MainComponent::showTrackInstrumentMenu(int trackIndex)
 {
     auto& tracks = projectState.getTracks();
@@ -2495,7 +2680,7 @@ void MainComponent::showTrackInstrumentMenu(int trackIndex)
         return;  // only MIDI tracks host instruments
 
     const bool hasInstrument = track.instrumentPluginId.isNotEmpty();
-    const auto loadablePlugins = pluginManager.getAllDescriptions();
+    const auto loadablePlugins = pluginManager.getInstrumentDescriptions();
 
     juce::PopupMenu menu;
     if (hasInstrument)
@@ -2513,22 +2698,24 @@ void MainComponent::showTrackInstrumentMenu(int trackIndex)
         if (pluginManager.isScanning())
             loadMenu.addItem(9999, "Scanning...", false, false);
         else
-            loadMenu.addItem(3, "Scan VST plugins...");
+            loadMenu.addItem(3, "Scan VST3 instruments...");
     }
     else
     {
         int id = 1000;
         for (const auto& desc : loadablePlugins)
         {
-            auto label = desc.name + "  (" + desc.pluginFormatName + ")";
-            if (! desc.isInstrument)
-                label += " - effect";
+            auto label = desc.name;
+            if (desc.manufacturerName.isNotEmpty())
+                label += " - " + desc.manufacturerName;
+            if (desc.pluginFormatName.isNotEmpty())
+                label += "  (" + desc.pluginFormatName + ")";
             loadMenu.addItem(id++, label);
         }
     }
     menu.addSubMenu(hasInstrument ? "Replace instrument" : "Load instrument", loadMenu);
     menu.addSeparator();
-    menu.addItem(3, pluginManager.isScanning() ? "Scanning..." : "Rescan VST plugins...",
+    menu.addItem(3, pluginManager.isScanning() ? "Scanning..." : "Rescan VST3 plugins...",
                  ! pluginManager.isScanning());
 
     const auto pluginList = loadablePlugins;
@@ -2610,8 +2797,20 @@ void MainComponent::loadInstrumentOnTrack(int trackIndex, const juce::PluginDesc
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || arrangementPlaybackSource == nullptr)
         return;
 
+    if (! description.isInstrument)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                               "This plugin is not an instrument",
+                                               description.name + " is a VST3 effect. Effects need an insert chain; "
+                                                                  "MIDI tracks can only load instruments here.");
+        return;
+    }
+
     juce::String error;
-    auto instance = pluginManager.createInstance(description, 44100.0, 512, error);
+    auto instance = pluginManager.createInstance(description,
+                                                getCurrentPluginSampleRate(),
+                                                getCurrentPluginBlockSize(),
+                                                error);
     if (instance == nullptr)
     {
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
@@ -2630,10 +2829,7 @@ void MainComponent::loadInstrumentOnTrack(int trackIndex, const juce::PluginDesc
 
     samplerPanel.openTrackIndex(trackIndex);
     samplerPanel.setVisible(false);
-    statusLabel.setText(description.isInstrument
-                            ? "Instrument loaded: " + description.name
-                            : "Effect loaded: " + description.name + " (keyboard notes need an instrument)",
-                        juce::dontSendNotification);
+    statusLabel.setText("Instrument loaded: " + description.name, juce::dontSendNotification);
     arrangementTimeline.repaint();
     openInstrumentEditor(trackIndex);
 }
@@ -2653,6 +2849,304 @@ void MainComponent::removeInstrumentFromTrack(int trackIndex)
         track.instrumentStateBase64 = {};
     }
     arrangementTimeline.repaint();
+}
+
+void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+    auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+
+    juce::PopupMenu menu;
+
+    // VST3 effects list (shared by add + replace).
+    juce::Array<juce::PluginDescription> effects;
+    for (const auto& d : pluginManager.getAllDescriptions())
+        if (! d.isInstrument)
+            effects.add(d);
+
+    // Clicking an existing insert chip: open / bypass / replace / remove.
+    if (insertIndex >= 0 && insertIndex < static_cast<int>(track.inserts.size()))
+    {
+        const auto& fx = track.inserts[static_cast<std::size_t>(insertIndex)];
+        menu.addItem(1, "Open " + fx.pluginName);
+        menu.addItem(2, fx.bypassed ? "Un-bypass" : "Bypass", true, fx.bypassed);
+
+        juce::PopupMenu replaceMenu;
+        {
+            int id = 2000;
+            for (const auto& d : effects)
+            {
+                auto label = d.name;
+                if (d.manufacturerName.isNotEmpty()) label += " - " + d.manufacturerName;
+                replaceMenu.addItem(id++, label);
+            }
+        }
+        menu.addSubMenu("Replace with", replaceMenu, ! effects.isEmpty());
+        menu.addItem(3, "Remove");
+
+        const auto list = effects;
+        menu.showMenuAsync(juce::PopupMenu::Options(), [this, trackIndex, insertIndex, list](int r)
+        {
+            if (r == 1) openInsertEditor(trackIndex, insertIndex);
+            else if (r == 2) toggleInsertBypass(trackIndex, insertIndex);
+            else if (r == 3) removeInsertFromTrack(trackIndex, insertIndex);
+            else if (r >= 2000)
+            {
+                const auto i = r - 2000;
+                if (i >= 0 && i < list.size())
+                    replaceInsertOnTrack(trackIndex, insertIndex, list.getReference(i));
+            }
+        });
+        return;
+    }
+
+    // The "+" add slot: pick a VST3 effect to append.
+    juce::PopupMenu addMenu;
+    if (effects.isEmpty())
+        addMenu.addItem(900, pluginManager.isScanning() ? "Scanning..." : "No VST3 effects found — Rescan...", ! pluginManager.isScanning());
+    else
+    {
+        int id = 1000;
+        for (const auto& d : effects)
+        {
+            auto label = d.name;
+            if (d.manufacturerName.isNotEmpty()) label += " - " + d.manufacturerName;
+            addMenu.addItem(id++, label);
+        }
+    }
+    menu.addSubMenu("Add effect", addMenu);
+    menu.addSeparator();
+    menu.addItem(901, pluginManager.isScanning() ? "Scanning..." : "Rescan VST3 plugins...", ! pluginManager.isScanning());
+
+    const auto list = effects;
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, trackIndex, list](int r)
+    {
+        if (r == 900 || r == 901) { scanPluginsInteractively(); return; }
+        if (r >= 1000)
+        {
+            const auto i = r - 1000;
+            if (i >= 0 && i < list.size())
+                addInsertOnTrack(trackIndex, list.getReference(i));
+        }
+    });
+}
+
+void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescription& description)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || arrangementPlaybackSource == nullptr)
+        return;
+
+    juce::String error;
+    auto instance = pluginManager.createInstance(description, getCurrentPluginSampleRate(), getCurrentPluginBlockSize(), error);
+    if (instance == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Could not load effect",
+                                               error.isNotEmpty() ? error : juce::String("Unknown error."));
+        return;
+    }
+
+    const auto idx = arrangementPlaybackSource->addInsert(trackIndex, std::move(instance), false);
+    if (idx < 0)
+        return;
+
+    TrackState::InsertFx fx;
+    fx.pluginId = description.createIdentifierString();
+    fx.pluginName = description.name;
+    tracks[static_cast<std::size_t>(trackIndex)].inserts.push_back(std::move(fx));
+
+    statusLabel.setText("Insert added: " + description.name, juce::dontSendNotification);
+    if (mixerPanel.isVisible()) mixerPanel.repaint();
+    arrangementTimeline.repaint();
+    openInsertEditor(trackIndex, idx);
+}
+
+void MainComponent::replaceInsertOnTrack(int trackIndex, int insertIndex, const juce::PluginDescription& description)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || arrangementPlaybackSource == nullptr)
+        return;
+    auto& chain = tracks[static_cast<std::size_t>(trackIndex)].inserts;
+    if (insertIndex < 0 || insertIndex >= static_cast<int>(chain.size()))
+        return;
+
+    juce::String error;
+    auto instance = pluginManager.createInstance(description, getCurrentPluginSampleRate(), getCurrentPluginBlockSize(), error);
+    if (instance == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Could not load effect",
+                                               error.isNotEmpty() ? error : juce::String("Unknown error."));
+        return;
+    }
+
+    const auto bypassed = chain[static_cast<std::size_t>(insertIndex)].bypassed;
+    insertEditorWindows.erase({ trackIndex, insertIndex });
+
+    // Engine: drop the old instance, add the new one and move it to the same slot.
+    arrangementPlaybackSource->removeInsert(trackIndex, insertIndex);
+    const auto appended = arrangementPlaybackSource->addInsert(trackIndex, std::move(instance), bypassed);
+    if (appended != insertIndex)
+        arrangementPlaybackSource->moveInsert(trackIndex, appended, trackIndex, insertIndex);
+
+    // Model: replace the entry in place.
+    TrackState::InsertFx fx;
+    fx.pluginId = description.createIdentifierString();
+    fx.pluginName = description.name;
+    fx.bypassed = bypassed;
+    chain[static_cast<std::size_t>(insertIndex)] = std::move(fx);
+
+    statusLabel.setText("Replaced with " + description.name, juce::dontSendNotification);
+    if (mixerPanel.isVisible()) mixerPanel.repaint();
+    openInsertEditor(trackIndex, insertIndex);
+}
+
+void MainComponent::removeInsertFromTrack(int trackIndex, int insertIndex)
+{
+    insertEditorWindows.erase({ trackIndex, insertIndex });
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->removeInsert(trackIndex, insertIndex);
+
+    auto& tracks = projectState.getTracks();
+    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size()))
+    {
+        auto& chain = tracks[static_cast<std::size_t>(trackIndex)].inserts;
+        if (insertIndex >= 0 && insertIndex < static_cast<int>(chain.size()))
+            chain.erase(chain.begin() + insertIndex);
+    }
+    if (mixerPanel.isVisible()) mixerPanel.repaint();
+}
+
+void MainComponent::toggleInsertBypass(int trackIndex, int insertIndex)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+    auto& chain = tracks[static_cast<std::size_t>(trackIndex)].inserts;
+    if (insertIndex < 0 || insertIndex >= static_cast<int>(chain.size()))
+        return;
+    chain[static_cast<std::size_t>(insertIndex)].bypassed = ! chain[static_cast<std::size_t>(insertIndex)].bypassed;
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->setInsertBypass(trackIndex, insertIndex, chain[static_cast<std::size_t>(insertIndex)].bypassed);
+    if (mixerPanel.isVisible()) mixerPanel.repaint();
+}
+
+void MainComponent::openInsertEditor(int trackIndex, int insertIndex)
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+    auto* instance = arrangementPlaybackSource->getInsertInstance(trackIndex, insertIndex);
+    if (instance == nullptr)
+        return;
+
+    const std::pair<int, int> key { trackIndex, insertIndex };
+    if (auto it = insertEditorWindows.find(key); it != insertEditorWindows.end() && it->second != nullptr)
+    {
+        it->second->toFront(true);
+        return;
+    }
+
+    auto& tracks = projectState.getTracks();
+    juce::String title = "Insert";
+    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
+        && insertIndex >= 0 && insertIndex < static_cast<int>(tracks[static_cast<std::size_t>(trackIndex)].inserts.size()))
+        title = tracks[static_cast<std::size_t>(trackIndex)].name + " - "
+              + tracks[static_cast<std::size_t>(trackIndex)].inserts[static_cast<std::size_t>(insertIndex)].pluginName;
+
+    insertEditorWindows[key] = std::make_unique<PluginEditorWindow>(
+        *instance, title,
+        [this, key]() { insertEditorWindows.erase(key); },
+        [this](const juce::KeyPress& k) { return keyPressed(k); },
+        [this](bool down) { return keyStateChanged(down); });
+}
+
+void MainComponent::moveInsert(int fromTrack, int fromIndex, int toTrack, int toIndex)
+{
+    auto& tracks = projectState.getTracks();
+    if (fromTrack < 0 || fromTrack >= static_cast<int>(tracks.size())
+        || toTrack < 0 || toTrack >= static_cast<int>(tracks.size()))
+        return;
+    auto& fromChain = tracks[static_cast<std::size_t>(fromTrack)].inserts;
+    if (fromIndex < 0 || fromIndex >= static_cast<int>(fromChain.size()))
+        return;
+    if (fromTrack == toTrack && (toIndex == fromIndex || toIndex == fromIndex + 1))
+        return;   // no-op move
+
+    // Editor windows are keyed by (track,index); indices shift, so just close them.
+    insertEditorWindows.clear();
+
+    // Move in the engine (the live instance).
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->moveInsert(fromTrack, fromIndex, toTrack, toIndex);
+
+    // Mirror in the model.
+    auto fx = fromChain[static_cast<std::size_t>(fromIndex)];
+    fromChain.erase(fromChain.begin() + fromIndex);
+    auto& destChain = tracks[static_cast<std::size_t>(toTrack)].inserts;
+    auto clamped = juce::jlimit(0, static_cast<int>(destChain.size()), toIndex);
+    destChain.insert(destChain.begin() + clamped, std::move(fx));
+
+    if (mixerPanel.isVisible()) mixerPanel.repaint();
+}
+
+void MainComponent::copyInsertToTrack(int fromTrack, int fromIndex, int toTrack)
+{
+    auto& tracks = projectState.getTracks();
+    if (fromTrack < 0 || fromTrack >= static_cast<int>(tracks.size())
+        || toTrack < 0 || toTrack >= static_cast<int>(tracks.size())
+        || arrangementPlaybackSource == nullptr)
+        return;
+    auto& fromChain = tracks[static_cast<std::size_t>(fromTrack)].inserts;
+    if (fromIndex < 0 || fromIndex >= static_cast<int>(fromChain.size()))
+        return;
+
+    const auto src = fromChain[static_cast<std::size_t>(fromIndex)];   // copy of the model entry
+    const auto desc = pluginManager.findDescription(src.pluginId);
+    if (! desc.has_value())
+        return;
+
+    juce::String error;
+    auto instance = pluginManager.createInstance(*desc, getCurrentPluginSampleRate(), getCurrentPluginBlockSize(), error);
+    if (instance == nullptr)
+        return;
+
+    // Copy the source plugin's current settings onto the new instance.
+    if (auto* srcInst = arrangementPlaybackSource->getInsertInstance(fromTrack, fromIndex))
+    {
+        juce::MemoryBlock state;
+        srcInst->getStateInformation(state);
+        if (state.getSize() > 0)
+            instance->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    }
+
+    arrangementPlaybackSource->addInsert(toTrack, std::move(instance), src.bypassed);
+    tracks[static_cast<std::size_t>(toTrack)].inserts.push_back(src);   // append copy to target
+
+    statusLabel.setText("Copied " + src.pluginName + " to another track", juce::dontSendNotification);
+    if (mixerPanel.isVisible()) mixerPanel.repaint();
+}
+
+void MainComponent::restoreInsertsFromProject()
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+    insertEditorWindows.clear();   // old windows reference instances we're about to replace
+    auto& tracks = projectState.getTracks();
+    for (int t = 0; t < static_cast<int>(tracks.size()); ++t)
+    {
+        arrangementPlaybackSource->clearTrackInserts(t);
+        for (auto& fx : tracks[static_cast<std::size_t>(t)].inserts)
+        {
+            const auto desc = pluginManager.findDescription(fx.pluginId);
+            if (! desc.has_value())
+                continue;
+            juce::String error;
+            auto inst = pluginManager.createInstance(*desc, getCurrentPluginSampleRate(), getCurrentPluginBlockSize(), error);
+            if (inst != nullptr)
+                arrangementPlaybackSource->addInsert(t, std::move(inst), fx.bypassed);
+        }
+    }
 }
 
 void MainComponent::openInstrumentEditor(int trackIndex)
@@ -2733,9 +3227,14 @@ void MainComponent::restoreInstrumentsFromProject()
         const auto desc = pluginManager.findDescription(track.instrumentPluginId);
         if (! desc.has_value())
             continue;  // plugin not installed/scanned right now — keep id for a later rescan
+        if (! desc->isInstrument)
+            continue;  // old projects may contain an effect id in the instrument slot
 
         juce::String error;
-        auto instance = pluginManager.createInstance(*desc, 44100.0, 512, error);
+        auto instance = pluginManager.createInstance(*desc,
+                                                    getCurrentPluginSampleRate(),
+                                                    getCurrentPluginBlockSize(),
+                                                    error);
         if (instance == nullptr)
             continue;
 
@@ -2781,6 +3280,23 @@ bool MainComponent::startClipEditorPreview()
     if (samplesToRead64 > static_cast<juce::int64>(std::numeric_limits<int>::max()))
         return false;
 
+    // Time-stretch the region to the project tempo when the clip is warped, so the
+    // preview plays at the SAME speed as on the timeline (not the file's native tempo).
+    const double projectBps = projectState.getTempoBpm() / 60.0;
+    int targetSamples = static_cast<int>(samplesToRead64);
+    if (clip->warpEnabled && projectBps > 0.0)
+    {
+        const auto clipTrimStart = juce::jlimit(0.0, 0.999, clip->sampleStartRatio);
+        const auto clipTrimEnd   = juce::jlimit(clipTrimStart + 0.001, 1.0, clip->sampleEndRatio);
+        const auto clipTrimSpan  = juce::jmax(0.001, clipTrimEnd - clipTrimStart);
+        const double fullWarpBeats = clip->warpTargetLengthInBeats > 0.0
+            ? clip->warpTargetLengthInBeats
+            : clip->lengthInBeats / clipTrimSpan;
+        const double regionBeats = (endRatio - startRatio) * fullWarpBeats;
+        const double tgt = (regionBeats / projectBps) * reader->sampleRate;
+        targetSamples = juce::jlimit(1, std::numeric_limits<int>::max(), static_cast<int>(std::llround(tgt)));
+    }
+
     // Total pitch shift to match the arrangement (manual transpose + auto key-match).
     int semitones = clip->transposeSemitones;
     if (clip->keyShiftEnabled && clip->sourceKeyRoot >= 0)
@@ -2798,6 +3314,7 @@ bool MainComponent::startClipEditorPreview()
                         + "|" + std::to_string(static_cast<long long>(startSample))
                         + "|" + std::to_string(static_cast<long long>(samplesToRead64))
                         + "|" + std::to_string(semitones)
+                        + "|t" + std::to_string(targetSamples)
                         + "|" + currentWarpBackendTag().toStdString();
 
     // Bump the build generation; any in-flight background build with an older
@@ -2813,12 +3330,13 @@ bool MainComponent::startClipEditorPreview()
         const auto pathStr = clip->sourcePath;
         const auto ss      = startSample;
         const auto n       = static_cast<int>(samplesToRead64);
+        const int  tN      = targetSamples;
         const int  semis   = semitones;
         const double sr    = reader->sampleRate;
         const int  nch     = static_cast<int>(reader->numChannels);
         juce::Component::SafePointer<MainComponent> safe(this);
 
-        clipEditorPreviewPool.addJob([safe, pathStr, ss, n, semis, sr, nch, cacheKey, gen]()
+        clipEditorPreviewPool.addJob([safe, pathStr, ss, n, tN, semis, sr, nch, cacheKey, gen]()
         {
             juce::AudioBuffer<float> built(juce::jmax(1, nch), juce::jmax(1, n));
             built.clear();
@@ -2829,13 +3347,14 @@ bool MainComponent::startClipEditorPreview()
                 if (r != nullptr)
                     r->read(&built, 0, n, ss, true, true);
             }
-            if (semis != 0)
+            // One pass handles both tempo (length change to tN) and pitch (pitchScale).
+            if (semis != 0 || tN != n)
             {
                 const auto pitchScale = std::pow(2.0, static_cast<double>(semis) / 12.0);
-                auto pitched = stretchBufferToLengthWithExperimentalBackend(
-                    built, built.getNumSamples(), sr, pathStr, pitchScale);
-                if (pitched.getNumSamples() > 0 && pitched.getNumChannels() == built.getNumChannels())
-                    built = std::move(pitched);
+                auto processed = stretchBufferToLengthWithExperimentalBackend(
+                    built, juce::jmax(1, tN), sr, pathStr, pitchScale);
+                if (processed.getNumSamples() > 0 && processed.getNumChannels() == built.getNumChannels())
+                    built = std::move(processed);
             }
             auto preparedPtr = std::make_shared<juce::AudioBuffer<float>>(std::move(built));
 
@@ -2943,7 +3462,13 @@ void MainComponent::toggleTransportFromUi()
 
     transportController.togglePlayback(
         useCountIn,
-        [this]() { stopBrowserPreview(true); },
+        [this]()
+        {
+            // Kill BOTH previews so they don't double up with the arrangement on the
+            // master bus (a lingering clip-editor preview otherwise adds +6 dB).
+            stopBrowserPreview(true);
+            stopClipEditorPreview(true);
+        },
         [this]()
         {
             if (arrangementPlaybackSource != nullptr)
@@ -3082,6 +3607,28 @@ juce::File MainComponent::getAudioRecordingDirectory() const
         .getChildFile("Orion Recordings");
 }
 
+void MainComponent::updateInputMonitoring()
+{
+    if (audioInputRecorder == nullptr)
+        return;
+
+    bool anyAudioArmed = false;
+    for (const auto& t : projectState.getTracks())
+        if (! t.isMidiTrack && t.recordArmed) { anyAudioArmed = true; break; }
+
+    const bool wantInput = anyAudioArmed || audioInputRecorder->isRecording();
+    if (wantInput && ! audioRecorderCallbackAttached)
+    {
+        audioDeviceManager.addAudioCallback(audioInputRecorder.get());
+        audioRecorderCallbackAttached = true;
+    }
+    else if (! wantInput && audioRecorderCallbackAttached)
+    {
+        audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
+        audioRecorderCallbackAttached = false;
+    }
+}
+
 void MainComponent::startAudioRecordingClip(int trackIndex)
 {
     if (audioInputRecorder == nullptr)
@@ -3146,6 +3693,8 @@ void MainComponent::startAudioRecordingClip(int trackIndex)
     clip.keyShiftEnabled = false;
     clip.recording = true;
 
+    // Checkpoint so the finished take can be removed with Cmd+Z (and cleaned up on cancel).
+    arrangementTimeline.captureUndoSnapshot();
     track.clips.push_back(std::move(clip));
 
     AudioRecordingSession session;
@@ -3162,27 +3711,21 @@ void MainComponent::startAudioRecordingClip(int trackIndex)
 
 void MainComponent::finalizeAudioRecordingClip()
 {
+    // Note: the input callback stays attached for monitoring while a track is armed;
+    // updateInputMonitoring() (and shutdown) own detaching it. Here we only stop the
+    // writer so the WAV file is flushed/closed.
     if (! audioRecordingSession.has_value())
     {
         if (audioInputRecorder != nullptr)
             audioInputRecorder->stop();
-        if (audioInputRecorder != nullptr && audioRecorderCallbackAttached)
-        {
-            audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
-            audioRecorderCallbackAttached = false;
-        }
         return;
     }
 
     const auto session = *audioRecordingSession;
     audioRecordingSession.reset();
+    arrangementTimeline.clearLiveRecordingWaveform();
 
     const auto samplesWritten = audioInputRecorder != nullptr ? audioInputRecorder->stop() : 0;
-    if (audioInputRecorder != nullptr && audioRecorderCallbackAttached)
-    {
-        audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
-        audioRecorderCallbackAttached = false;
-    }
     const auto durationSeconds = session.sampleRate > 0.0
         ? static_cast<double>(samplesWritten) / session.sampleRate
         : 0.0;
@@ -3199,6 +3742,7 @@ void MainComponent::finalizeAudioRecordingClip()
             {
                 clips.erase(clips.begin() + session.clipIndex);
                 session.file.deleteFile();
+                arrangementTimeline.dropLastUndoSnapshot();   // nothing kept — no undo entry
                 statusLabel.setText("Audio recording discarded: no input captured", juce::dontSendNotification);
             }
             else
@@ -3212,6 +3756,47 @@ void MainComponent::finalizeAudioRecordingClip()
         }
     }
 
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::cancelRecording()
+{
+    auto& tracks = projectState.getTracks();
+
+    // Discard the in-progress audio take: stop the recorder, remove its clip + file.
+    if (audioRecordingSession.has_value())
+    {
+        const auto session = *audioRecordingSession;
+        audioRecordingSession.reset();
+        arrangementTimeline.clearLiveRecordingWaveform();
+        if (audioInputRecorder != nullptr)
+            audioInputRecorder->stop();
+        if (session.trackIndex >= 0 && session.trackIndex < static_cast<int>(tracks.size()))
+        {
+            auto& clips = tracks[static_cast<std::size_t>(session.trackIndex)].clips;
+            if (session.clipIndex >= 0 && session.clipIndex < static_cast<int>(clips.size()))
+                clips.erase(clips.begin() + session.clipIndex);
+        }
+        session.file.deleteFile();
+        arrangementTimeline.dropLastUndoSnapshot();
+    }
+
+    // Discard the in-progress MIDI take.
+    if (recordingSession.has_value())
+    {
+        const auto session = *recordingSession;
+        recordingSession.reset();
+        if (session.trackIndex >= 0 && session.trackIndex < static_cast<int>(tracks.size()))
+        {
+            auto& clips = tracks[static_cast<std::size_t>(session.trackIndex)].clips;
+            if (session.clipIndex >= 0 && session.clipIndex < static_cast<int>(clips.size()))
+                clips.erase(clips.begin() + session.clipIndex);
+        }
+        arrangementTimeline.dropLastUndoSnapshot();
+    }
+
+    stopTransportFromUi();
+    statusLabel.setText("Recording cancelled", juce::dontSendNotification);
     arrangementTimeline.repaint();
 }
 
@@ -3376,6 +3961,7 @@ void MainComponent::loadProjectFromFile(const juce::File& file)
     // Re-instantiate hosted VST instruments from the loaded track state, and drop
     // any selection/history that referred to the previous project.
     restoreInstrumentsFromProject();
+    restoreInsertsFromProject();
     arrangementTimeline.resetForNewProject();
     selectedArrangementClip.reset();
 
@@ -3583,6 +4169,16 @@ void MainComponent::refreshClipEditor()
         editorState.accent = clip->colour;
         editorState.startBeat = clip->startBeat;
         editorState.lengthInBeats = clip->lengthInBeats;
+        // Full source length in beats (the clip's length is only the trimmed portion).
+        // Needed so dragging a region out of an already-trimmed clip keeps its speed.
+        {
+            const auto clipTrimStart = juce::jlimit(0.0, 0.999, clip->sampleStartRatio);
+            const auto clipTrimEnd   = juce::jlimit(clipTrimStart + 0.001, 1.0, clip->sampleEndRatio);
+            const auto clipTrimSpan  = juce::jmax(0.001, clipTrimEnd - clipTrimStart);
+            editorState.sourceLengthBeats = clip->warpTargetLengthInBeats > 0.0
+                ? clip->warpTargetLengthInBeats
+                : clip->lengthInBeats / clipTrimSpan;
+        }
         editorState.gainDb = clip->gainDb;
         editorState.sourceBpm = clip->sourceBpm;
         editorState.detectedBars = clip->detectedBars;

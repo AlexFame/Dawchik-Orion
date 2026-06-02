@@ -74,6 +74,10 @@ juce::var timelineClipToVar(const orion::TimelineClip& clip)
     object->setProperty("transposeSemitones", clip.transposeSemitones);
     object->setProperty("sampleStartRatio", clip.sampleStartRatio);
     object->setProperty("sampleEndRatio", clip.sampleEndRatio);
+    object->setProperty("fadeInBeats", clip.fadeInBeats);
+    object->setProperty("fadeOutBeats", clip.fadeOutBeats);
+    object->setProperty("fadeInCurve", clip.fadeInCurve);
+    object->setProperty("fadeOutCurve", clip.fadeOutCurve);
 
     juce::Array<juce::var> notes;
     for (const auto& note : clip.midiNotes)
@@ -99,6 +103,7 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("solo", track.solo);
     object->setProperty("recordArmed", track.recordArmed);
     object->setProperty("volumeDb", track.volumeDb);
+    object->setProperty("pan", track.pan);
     object->setProperty("samplerSourcePath", track.samplerSourcePath);
     object->setProperty("samplerRootMidiNote", track.samplerRootMidiNote);
     object->setProperty("samplerMode", samplerModeToString(track.samplerMode));
@@ -112,6 +117,29 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("instrumentPluginId", track.instrumentPluginId);
     object->setProperty("instrumentPluginName", track.instrumentPluginName);
     object->setProperty("instrumentStateBase64", track.instrumentStateBase64);
+
+    juce::Array<juce::var> inserts;
+    for (const auto& fx : track.inserts)
+    {
+        auto* fxObj = new juce::DynamicObject();
+        fxObj->setProperty("pluginId", fx.pluginId);
+        fxObj->setProperty("pluginName", fx.pluginName);
+        fxObj->setProperty("stateBase64", fx.stateBase64);
+        fxObj->setProperty("bypassed", fx.bypassed);
+        inserts.add(juce::var(fxObj));
+    }
+    object->setProperty("inserts", juce::var(inserts));
+
+    juce::Array<juce::var> sends;
+    for (const auto& s : track.sends)
+    {
+        auto* sObj = new juce::DynamicObject();
+        sObj->setProperty("busIndex", s.busIndex);
+        sObj->setProperty("level", s.level);
+        sObj->setProperty("prefader", s.prefader);
+        sends.add(juce::var(sObj));
+    }
+    object->setProperty("sends", juce::var(sends));
 
     juce::Array<juce::var> clips;
     for (const auto& clip : track.clips)
@@ -208,6 +236,10 @@ orion::TimelineClip timelineClipFromVar(const juce::var& value)
     clip.sampleEndRatio          = juce::jlimit(0.001, 1.0, getDouble(*obj, "sampleEndRatio", clip.sampleEndRatio));
     if (clip.sampleEndRatio <= clip.sampleStartRatio)
         clip.sampleEndRatio = juce::jmin(1.0, clip.sampleStartRatio + 0.001);
+    clip.fadeInBeats             = juce::jmax(0.0, getDouble(*obj, "fadeInBeats", clip.fadeInBeats));
+    clip.fadeOutBeats            = juce::jmax(0.0, getDouble(*obj, "fadeOutBeats", clip.fadeOutBeats));
+    clip.fadeInCurve             = juce::jlimit(-1.0, 1.0, getDouble(*obj, "fadeInCurve", clip.fadeInCurve));
+    clip.fadeOutCurve            = juce::jlimit(-1.0, 1.0, getDouble(*obj, "fadeOutCurve", clip.fadeOutCurve));
 
     if (auto* notes = obj->getProperty("midiNotes").getArray())
         for (const auto& noteVar : *notes)
@@ -230,6 +262,7 @@ orion::TrackState trackStateFromVar(const juce::var& value)
     track.solo                        = getBool(*obj, "solo", track.solo);
     track.recordArmed                 = getBool(*obj, "recordArmed", track.recordArmed);
     track.volumeDb                    = getDouble(*obj, "volumeDb", track.volumeDb);
+    track.pan                         = juce::jlimit(-1.0, 1.0, getDouble(*obj, "pan", track.pan));
     track.samplerSourcePath           = getString(*obj, "samplerSourcePath");
     track.samplerRootMidiNote         = getInt(*obj, "samplerRootMidiNote", track.samplerRootMidiNote);
     track.samplerMode                 = samplerModeFromString(getString(*obj, "samplerMode"));
@@ -243,6 +276,37 @@ orion::TrackState trackStateFromVar(const juce::var& value)
     track.instrumentPluginId          = getString(*obj, "instrumentPluginId");
     track.instrumentPluginName        = getString(*obj, "instrumentPluginName");
     track.instrumentStateBase64       = getString(*obj, "instrumentStateBase64");
+
+    if (auto* inserts = obj->getProperty("inserts").getArray())
+    {
+        for (const auto& fxVar : *inserts)
+        {
+            if (auto* fxObj = fxVar.getDynamicObject())
+            {
+                orion::TrackState::InsertFx fx;
+                fx.pluginId    = getString(*fxObj, "pluginId");
+                fx.pluginName  = getString(*fxObj, "pluginName");
+                fx.stateBase64 = getString(*fxObj, "stateBase64");
+                fx.bypassed    = getBool(*fxObj, "bypassed", false);
+                track.inserts.push_back(std::move(fx));
+            }
+        }
+    }
+
+    if (auto* sends = obj->getProperty("sends").getArray())
+    {
+        for (const auto& sVar : *sends)
+        {
+            if (auto* sObj = sVar.getDynamicObject())
+            {
+                orion::TrackState::SendFx s;
+                s.busIndex = getInt(*sObj, "busIndex", 0);
+                s.level    = juce::jlimit(0.0, 1.0, getDouble(*sObj, "level", 0.25));
+                s.prefader = getBool(*sObj, "prefader", false);
+                track.sends.push_back(s);
+            }
+        }
+    }
 
     if (auto* clips = obj->getProperty("clips").getArray())
         for (const auto& clipVar : *clips)
@@ -278,6 +342,30 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
         trackArray.add(trackStateToVar(track));
 
     rootObject->setProperty("tracks", juce::var(trackArray));
+
+    juce::Array<juce::var> busArray;
+    for (const auto& bus : projectState.getBuses())
+    {
+        auto* b = new juce::DynamicObject();
+        b->setProperty("name", bus.name);
+        b->setProperty("colour", static_cast<int>(bus.colour.getARGB()));
+        b->setProperty("volumeDb", bus.volumeDb);
+        b->setProperty("pan", bus.pan);
+        b->setProperty("muted", bus.muted);
+        juce::Array<juce::var> busInserts;
+        for (const auto& fx : bus.inserts)
+        {
+            auto* fxObj = new juce::DynamicObject();
+            fxObj->setProperty("pluginId", fx.pluginId);
+            fxObj->setProperty("pluginName", fx.pluginName);
+            fxObj->setProperty("stateBase64", fx.stateBase64);
+            fxObj->setProperty("bypassed", fx.bypassed);
+            busInserts.add(juce::var(fxObj));
+        }
+        b->setProperty("inserts", juce::var(busInserts));
+        busArray.add(juce::var(b));
+    }
+    rootObject->setProperty("buses", juce::var(busArray));
 
     const auto json = juce::JSON::toString(juce::var(rootObject), true);
     if (! destinationFile.replaceWithText(json))
@@ -336,6 +424,37 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
         projectState.clearLoopRange();
 
     projectState.getTracks() = std::move(newTracks);
+
+    std::vector<orion::BusState> newBuses;
+    if (auto* buses = root->getProperty("buses").getArray())
+    {
+        for (const auto& busVar : *buses)
+        {
+            if (auto* b = busVar.getDynamicObject())
+            {
+                orion::BusState bus;
+                bus.name = getString(*b, "name");
+                if (bus.name.isEmpty()) bus.name = "Bus";
+                bus.colour = juce::Colour(static_cast<juce::uint32>(getInt(*b, "colour", static_cast<int>(bus.colour.getARGB()))));
+                bus.volumeDb = getDouble(*b, "volumeDb", 0.0);
+                bus.pan = juce::jlimit(-1.0, 1.0, getDouble(*b, "pan", 0.0));
+                bus.muted = getBool(*b, "muted", false);
+                if (auto* ins = b->getProperty("inserts").getArray())
+                    for (const auto& fxVar : *ins)
+                        if (auto* fxObj = fxVar.getDynamicObject())
+                        {
+                            orion::TrackState::InsertFx fx;
+                            fx.pluginId = getString(*fxObj, "pluginId");
+                            fx.pluginName = getString(*fxObj, "pluginName");
+                            fx.stateBase64 = getString(*fxObj, "stateBase64");
+                            fx.bypassed = getBool(*fxObj, "bypassed", false);
+                            bus.inserts.push_back(std::move(fx));
+                        }
+                newBuses.push_back(std::move(bus));
+            }
+        }
+    }
+    projectState.getBuses() = std::move(newBuses);
     return true;
 }
 }  // namespace orion

@@ -18,6 +18,9 @@ struct ClipEditorState
     juce::Colour accent { 0xffff5a4d };
     double startBeat { 0.0 };
     double lengthInBeats { 0.0 };
+    // Full source length in beats (independent of any trim). Used when dragging a
+    // selected region out, so the new clip keeps the original playback speed.
+    double sourceLengthBeats { 0.0 };
     double gainDb { 0.0 };
     double sourceBpm { 0.0 };
     int detectedBars { 0 };

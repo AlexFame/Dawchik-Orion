@@ -10,6 +10,7 @@ struct BottomStatusBarState
 {
     double masterGainDb { 0.0 };
     float masterLevel { 0.0f };
+    float masterLevelDb { -100.0f };
     float engineLoad { 0.32f };
     bool projectSaved { true };
     bool mixerOpen { false };

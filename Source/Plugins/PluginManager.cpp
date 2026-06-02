@@ -141,7 +141,15 @@ private:
     {
         if (completed && currentProcess != nullptr)
         {
-            const auto output = currentProcess->readAllProcessOutput();
+            auto output = currentProcess->readAllProcessOutput();
+            // Some plugins print to stdout while being probed (e.g. Arturia emits
+            // "## ExtendedFilename : 0" before the XML). That junk prefix makes the XML
+            // parse fail and the plugin silently vanish — so strip anything before the
+            // XML declaration / root element first.
+            auto start = output.indexOf("<?xml");
+            if (start < 0) start = output.indexOf("<KNOWNPLUGINS");
+            if (start > 0) output = output.substring(start);
+
             if (auto xml = juce::XmlDocument::parse(output))
             {
                 juce::KnownPluginList childList;
@@ -200,7 +208,9 @@ private:
     PendingPlugin currentPlugin;
     std::size_t nextIndex { 0 };
     double currentProcessStartMs { 0.0 };
-    static constexpr double pluginScanTimeoutMs { 15000.0 };
+    // Generous per-plugin timeout: shell plugins (e.g. Waves WaveShell) enumerate dozens
+    // of sub-plugins and can take well over 15 s, so a short timeout silently drops them.
+    static constexpr double pluginScanTimeoutMs { 90000.0 };
     std::function<void(const juce::String&, double)> onProgress;
     std::function<void(std::unique_ptr<juce::XmlElement>)> onFinished;
 };
