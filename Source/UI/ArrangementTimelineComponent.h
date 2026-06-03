@@ -52,6 +52,8 @@ public:
     void itemDropped(const SourceDetails& dragSourceDetails) override;
     std::optional<juce::Rectangle<int>> getSelectedTrackInspectorBounds() const noexcept;
     std::optional<int> getSelectedTrackIndex() const noexcept;
+    // Selects a track (used by the mixer when its name is clicked); clears clip selection.
+    void selectTrack(int trackIndex);
     // Records an undo checkpoint of the current timeline state (used by the recorder so
     // a finished take can be removed with Cmd+Z).
     void captureUndoSnapshot();

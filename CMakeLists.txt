@@ -197,3 +197,25 @@ target_link_libraries(
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+juce_add_console_app(OrionKeyTest PRODUCT_NAME "Orion Key Test")
+
+target_sources(OrionKeyTest PRIVATE Source/Tools/KeyTest.cpp)
+
+target_compile_definitions(
+    OrionKeyTest
+    PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+)
+
+target_link_libraries(
+    OrionKeyTest
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_core
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)

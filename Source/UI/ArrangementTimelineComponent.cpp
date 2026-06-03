@@ -1,6 +1,7 @@
 #include "ArrangementTimelineComponent.h"
 
 #include "OrionTheme.h"
+#include "../Audio/WarpEngine.h"
 
 #include <algorithm>
 #include <array>
@@ -46,9 +47,9 @@ constexpr auto loopHandleHitWidth = 8;
 constexpr auto playheadHitWidth = 8;
 constexpr auto newTrackDropZoneHeight = 64;
 constexpr auto maxExpandedLaneHeight = 240;
-constexpr auto minPixelsPerBeat = 1.25;
+constexpr auto minPixelsPerBeat = 0.25;
 constexpr auto maxPixelsPerBeat = 160.0;
-constexpr auto minTimelineLengthInBeats = 256.0;
+constexpr auto minTimelineLengthInBeats = 4096.0;
 constexpr auto timelinePaddingInBeats = 64.0;
 juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 {
@@ -79,165 +80,6 @@ struct AudioImportAnalysis
     bool sourceKeyIsMinor { false };
 };
 
-// Parses musical key from a filename. Strict — only accepts standalone token candidates
-// (rejects words like "Bass", "Drum" that start with a note letter). Handles "Cm",
-// "C minor", "C_minor", "Cmin", "Cmaj", "C# minor", "Db", "Fsharp", "Bbm" etc.
-struct ParsedClipKey { int root { -1 }; bool minor { false }; };
-ParsedClipKey parseKeyFromClipFileName(const juce::File& file)
-{
-    auto raw  = file.getFileNameWithoutExtension();
-    auto text = juce::String(' ') + raw.toLowerCase().replaceCharacters("_-.()[]", "       ") + juce::String(' ');
-
-    auto letterToSemi = [](juce::juce_wchar c) -> int
-    {
-        switch (c)
-        {
-            case 'c': return 0;
-            case 'd': return 2;
-            case 'e': return 4;
-            case 'f': return 5;
-            case 'g': return 7;
-            case 'a': return 9;
-            case 'b': return 11;
-        }
-        return -1;
-    };
-    auto isLetter = [](juce::juce_wchar c) { return c >= 'a' && c <= 'z'; };
-
-    ParsedClipKey best { -1, false };
-    int bestScore = 0;
-
-    for (int i = 1; i + 1 < text.length(); ++i)
-    {
-        const auto prev = text[i - 1];
-        if (prev != ' ' && prev != '\t') continue;       // word boundary
-        const auto c = text[i];
-        const auto semi = letterToSemi(c);
-        if (semi < 0) continue;
-
-        int rootSemi = semi;
-        int pos = i + 1;
-        bool hadAccidental = false;
-
-        // Optional sharp/flat
-        if (pos < text.length())
-        {
-            const auto a = text[pos];
-            if (a == '#')
-            {
-                rootSemi = (rootSemi + 1) % 12; ++pos; hadAccidental = true;
-            }
-            else if (a == 'b' && pos + 1 < text.length())
-            {
-                // Accept 'b' as flat only when followed by 'm' (Cbm), space, or digit (Cb 120bpm).
-                const auto next = text[pos + 1];
-                if (next == 'm' || next == ' ' || next == '\t' || (next >= '0' && next <= '9'))
-                {
-                    rootSemi = (rootSemi + 11) % 12; ++pos; hadAccidental = true;
-                }
-            }
-        }
-
-        // Look at what immediately follows root+accidental.
-        int modePos = pos;
-        while (modePos < text.length() && (text[modePos] == ' ' || text[modePos] == '\t')) ++modePos;
-        const bool skippedSpace = modePos > pos;
-
-        bool isMinor = false, modeKnown = false, isValid = false;
-
-        if (modePos >= text.length())
-        {
-            // End of name — standalone note → default major.
-            isValid = true;
-        }
-        else
-        {
-            const auto rem = text.substring(modePos, juce::jmin(modePos + 6, text.length()));
-            if      (rem.startsWith("minor")) { isMinor = true;  modeKnown = true; isValid = true; }
-            else if (rem.startsWith("major")) { isMinor = false; modeKnown = true; isValid = true; }
-            else if (rem.startsWith("min"))   { isMinor = true;  modeKnown = true; isValid = true; }
-            else if (rem.startsWith("maj"))   { isMinor = false; modeKnown = true; isValid = true; }
-            else if (! skippedSpace && text[pos] == 'm')
-            {
-                // "Cm" — 'm' immediately after root (no space). Reject if followed by another letter
-                // that's not part of a mode suffix.
-                if (pos + 1 >= text.length() || ! isLetter(text[pos + 1]))
-                {
-                    isMinor = true; modeKnown = true; isValid = true;
-                }
-            }
-            else if (skippedSpace)
-            {
-                // Standalone note followed by space and something non-mode → default major.
-                isValid = true;
-            }
-            // else: root immediately followed by a letter that's not m/maj/min → false positive (e.g. "Bass", "Drum"). Reject.
-        }
-
-        if (! isValid) continue;
-
-        // Explicit mode strongly preferred. Accidentals also score higher.
-        const int score = (modeKnown ? 1000 : 100) + (hadAccidental ? 50 : 0) + juce::jmax(0, 100 - i);
-        if (score > bestScore)
-        {
-            bestScore = score;
-            best.root = rootSemi;
-            best.minor = isMinor;
-        }
-    }
-    return best;
-}
-
-double parseBpmFromFileName(const juce::File& file)
-{
-    auto text = file.getFileNameWithoutExtension().toLowerCase();
-    const auto bpmIndex = text.indexOf("bpm");
-    if (bpmIndex < 0)
-    {
-        if (! (text.contains("loop") || text.contains("break") || text.contains("drum") || text.contains("beat")))
-            return 0.0;
-
-        double bestBpm = 0.0;
-        int bestDigitCount = 0;
-        juce::String currentNumber;
-
-        const auto textWithDelimiter = text + " ";
-        for (int i = 0; i < textWithDelimiter.length(); ++i)
-        {
-            const auto character = textWithDelimiter[i];
-            if (juce::CharacterFunctions::isDigit(character))
-            {
-                currentNumber += juce::String::charToString(character);
-                continue;
-            }
-
-            if (currentNumber.isNotEmpty())
-            {
-                const auto candidateBpm = currentNumber.getDoubleValue();
-                if (candidateBpm >= 40.0 && candidateBpm <= 260.0 && currentNumber.length() >= bestDigitCount)
-                {
-                    bestBpm = candidateBpm;
-                    bestDigitCount = currentNumber.length();
-                }
-
-                currentNumber.clear();
-            }
-        }
-
-        return bestBpm;
-    }
-
-    auto start = bpmIndex - 1;
-    while (start >= 0 && (juce::CharacterFunctions::isDigit(text[start]) || text[start] == ' ' || text[start] == '_' || text[start] == '-'))
-        --start;
-
-    auto numberText = text.substring(start + 1, bpmIndex).retainCharacters("0123456789").trim();
-    if (numberText.isEmpty())
-        return 0.0;
-
-    const auto bpm = numberText.getDoubleValue();
-    return (bpm >= 40.0 && bpm <= 260.0) ? bpm : 0.0;
-}
 
 double fallbackClipLengthInBeats(const juce::DynamicObject& payload)
 {
@@ -252,95 +94,35 @@ AudioImportAnalysis analyzeImportedAudioClip(const juce::File& file, double temp
     if (! file.existsAsFile() || tempoBpm <= 0.0)
         return result;
 
-    static juce::AudioFormatManager audioFormatManager;
-    static bool formatsRegistered = false;
-    if (! formatsRegistered)
-    {
-        audioFormatManager.registerBasicFormats();
-        formatsRegistered = true;
-    }
+    // Delegate to the unified analyzer (filename → DSP key/tempo → short-sample fit), so
+    // dropped clips get the same detection as everywhere else — including key from the
+    // audio signal and a usable tempo for short loops/chops that don't fill a whole bar.
+    const auto warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator);
+    result.durationSeconds  = warp.durationSeconds;
+    result.sourceBpm        = warp.sourceBpm;
+    result.detectedBars     = warp.detectedBars;
+    result.bpmSource        = warp.bpmSource;
+    result.bpmConfidence    = warp.bpmConfidence;
+    result.bpmGuessed       = warp.bpmGuessed;
+    result.sourceKeyRoot    = warp.sourceKeyRoot;
+    result.sourceKeyIsMinor = warp.sourceKeyIsMinor;
 
-    std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(file));
-    if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
-        return result;
-
-    const auto durationSeconds = static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
-    const auto beatsPerSecond = tempoBpm / 60.0;
-    const auto durationInBeats = durationSeconds * beatsPerSecond;
-    result.durationSeconds = durationSeconds;
+    const auto beatsPerBar = static_cast<double>(juce::jmax(1, numerator));
+    const auto durationInBeats = warp.durationSeconds * (tempoBpm / 60.0);
     result.clipLengthInBeats = juce::jmax(minimumClipLengthInBeats, durationInBeats);
 
-    // Parse key from filename so the dropped clip is auto-pitched to the project key.
-    const auto parsedKey = parseKeyFromClipFileName(file);
-    result.sourceKeyRoot    = parsedKey.root;
-    result.sourceKeyIsMinor = parsedKey.minor;
-
-    const auto nameBpm = parseBpmFromFileName(file);
-    if (nameBpm > 0.0)
+    if (warp.detectedBars > 0)
     {
-        result.sourceBpm = nameBpm;
-        result.bpmSource = "filename";
-        result.bpmConfidence = 1.0;
-        result.bpmGuessed = false;
-        const auto sourceBeats = durationSeconds * (nameBpm / 60.0);
+        result.clipLengthInBeats = juce::jmax(minimumClipLengthInBeats,
+                                              static_cast<double>(warp.detectedBars) * beatsPerBar);
+    }
+    else if (warp.sourceBpm > 0.0 && warp.durationSeconds > 0.0)
+    {
+        // Musical length (in beats) of the source — snapped to the grid. This is what the
+        // clip occupies once warped to the project tempo (source-beats map 1:1 to project-beats).
+        const auto sourceBeats = warp.durationSeconds * (warp.sourceBpm / 60.0);
         const auto snappedBeats = std::round(sourceBeats / snapSizeInBeats) * snapSizeInBeats;
         result.clipLengthInBeats = juce::jmax(minimumClipLengthInBeats, snappedBeats);
-
-        const auto roundedBeats = std::round(sourceBeats);
-        const auto beatsPerBar = static_cast<double>(juce::jmax(1, numerator));
-        const auto roundedBars = static_cast<int>(std::round(roundedBeats / beatsPerBar));
-        if (roundedBars > 0 && std::abs(roundedBeats - static_cast<double>(roundedBars) * beatsPerBar) <= 0.25)
-            result.detectedBars = roundedBars;
-
-        DBG("[Warp-Import] " + file.getFileName() + " | bpmSource=filename | confidence=1.0 | sourceBpm=" + juce::String(nameBpm, 1));
-        return result;
-    }
-
-    constexpr double neutralCenter = 128.0;
-    constexpr int commonLoopBars[] = { 1, 2, 3, 4, 6, 8, 12, 16, 24, 32 };
-    double bestBpm = 0.0;
-    int bestBars = 0;
-    double bestScore = std::numeric_limits<double>::max();
-
-    for (const auto bars : commonLoopBars)
-    {
-        const auto loopBeats = static_cast<double>(bars * juce::jmax(1, numerator));
-        const auto candidateBpm = (loopBeats / durationSeconds) * 60.0;
-        if (candidateBpm < 70.0 || candidateBpm > 180.0)
-            continue;
-
-        const auto score = std::abs(candidateBpm - neutralCenter);
-        if (score < bestScore)
-        {
-            bestScore = score;
-            bestBpm = candidateBpm;
-            bestBars = bars;
-        }
-    }
-
-    if (bestBars > 0)
-    {
-        result.sourceBpm = bestBpm;
-        result.detectedBars = bestBars;
-        result.clipLengthInBeats = juce::jmax(minimumClipLengthInBeats, static_cast<double>(bestBars * juce::jmax(1, numerator)));
-        result.bpmSource = "duration-bars";
-        result.bpmGuessed = true;
-
-        // Confidence: how close the detected beats align to perfect bar boundaries
-        const auto beatsPerBar = static_cast<double>(juce::jmax(1, numerator));
-        const auto sourceBeats = durationSeconds * (bestBpm / 60.0);
-        const auto barFraction = std::abs(sourceBeats - std::round(sourceBeats / beatsPerBar) * beatsPerBar);
-        result.bpmConfidence = juce::jlimit(0.0, 1.0, 1.0 - barFraction / beatsPerBar);
-
-        DBG("[Warp-Import] " + file.getFileName()
-            + " | bpmSource=duration-bars | confidence=" + juce::String(result.bpmConfidence, 2)
-            + " | sourceBpm=" + juce::String(bestBpm, 1)
-            + " | bars=" + juce::String(bestBars));
-    }
-    else
-    {
-        // No usable BPM candidate — warp cannot be applied
-        DBG("[Warp-Import] " + file.getFileName() + " | bpmSource=none | confidence=0 | sourceBpm=0");
     }
 
     return result;
@@ -401,6 +183,16 @@ bool ArrangementTimelineComponent::canUndo() const noexcept
 std::optional<int> ArrangementTimelineComponent::getSelectedTrackIndex() const noexcept
 {
     return selectedTrackIndex;
+}
+
+void ArrangementTimelineComponent::selectTrack(int trackIndex)
+{
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(project.getTracks().size()))
+        return;
+    setSingleSelection(std::nullopt);
+    selectedTrackIndex = trackIndex;
+    notifyClipSelectionChanged();
+    repaint();
 }
 
 bool ArrangementTimelineComponent::canRedo() const noexcept
@@ -581,10 +373,10 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         labelStepBars *= 2;
     const auto labelStepBeats = beatsPerBarInt * labelStepBars;
 
-    auto drawGridLayer = [&](juce::Rectangle<int> verticalArea, int stepBeats, juce::Colour colour, float thickness)
-    {
-        if (stepBeats <= 0 || pixelsPerBeat * static_cast<double>(stepBeats) < minGridSpacingPixels)
-            return;
+        auto drawGridLayer = [&](juce::Rectangle<int> verticalArea, int stepBeats, juce::Colour colour, float thickness, bool forceVisible = false)
+        {
+            if (stepBeats <= 0 || (! forceVisible && pixelsPerBeat * static_cast<double>(stepBeats) < minGridSpacingPixels))
+                return;
 
         const auto firstBeat = (firstVisibleBeat / stepBeats) * stepBeats;
         g.setColour(colour);
@@ -603,9 +395,10 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.saveState();
     g.reduceClipRegion(markerLane);
     drawGridLayer(rulerGridArea, beatStepBeats, minorGridColour.withAlpha(0.22f), 1.0f);
-    drawGridLayer(rulerGridArea, barStepBeats, majorGridColour.withAlpha(0.36f), 1.0f);
-    drawGridLayer(rulerGridArea, majorStepBeats, majorGridColour.withAlpha(0.56f), 1.3f);
-    drawGridLayer(rulerGridArea, sectionStepBeats, majorGridColour.withAlpha(0.72f), 1.6f);
+        drawGridLayer(rulerGridArea, barStepBeats, majorGridColour.withAlpha(0.36f), 1.0f);
+        drawGridLayer(rulerGridArea, majorStepBeats, majorGridColour.withAlpha(0.56f), 1.3f);
+        drawGridLayer(rulerGridArea, sectionStepBeats, majorGridColour.withAlpha(0.72f), 1.6f);
+        drawGridLayer(rulerGridArea, labelStepBeats, majorGridColour.withAlpha(0.82f), 1.7f, true);
 
     const auto firstLabelBeat = (firstVisibleBeat / labelStepBeats) * labelStepBeats;
     for (int beat = firstLabelBeat; beat <= maxBeat; beat += labelStepBeats)
@@ -742,9 +535,10 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.reduceClipRegion(gridArea);
 
     drawGridLayer(visibleTracksArea, beatStepBeats, minorGridColour.withAlpha(0.20f), 1.0f);
-    drawGridLayer(visibleTracksArea, barStepBeats, majorGridColour.withAlpha(0.30f), 1.0f);
-    drawGridLayer(visibleTracksArea, majorStepBeats, majorGridColour.withAlpha(0.48f), 1.15f);
-    drawGridLayer(visibleTracksArea, sectionStepBeats, majorGridColour.withAlpha(0.62f), 1.4f);
+        drawGridLayer(visibleTracksArea, barStepBeats, majorGridColour.withAlpha(0.30f), 1.0f);
+        drawGridLayer(visibleTracksArea, majorStepBeats, majorGridColour.withAlpha(0.48f), 1.15f);
+        drawGridLayer(visibleTracksArea, sectionStepBeats, majorGridColour.withAlpha(0.62f), 1.4f);
+        drawGridLayer(visibleTracksArea, labelStepBeats, majorGridColour.withAlpha(0.72f), 1.65f, true);
 
     // Draw Clips
     for (int trackIndex = 0; trackIndex < trackCount; ++trackIndex)
@@ -2390,7 +2184,8 @@ void ArrangementTimelineComponent::mouseMagnify(const juce::MouseEvent& event, f
     if (! headerArea.contains(event.getPosition()) && ! gridArea.contains(event.getPosition()))
         return;
 
-    const auto rawDelta = (static_cast<double>(scaleFactor) - 1.0) * 3.0;
+    const auto clampedScale = juce::jlimit(0.35, 2.85, static_cast<double>(scaleFactor));
+    const auto rawDelta = std::log(clampedScale) / std::log(1.2);
     pendingMagnifyDelta += rawDelta;
     ignoreWheelUntilMs = juce::Time::getMillisecondCounterHiRes() + 120.0;
 
@@ -2582,8 +2377,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(targetTrack.clips.size()) - 1 });
 
     clearBrowserDropPreview();
-    // Auto-fit zoom-out if the freshly dropped clip extends past the visible area.
-    ensureBeatVisible(startBeat + lengthBeats);
+    // Preserve the user's current timeline zoom on import/drop.
     clampScrollOffsets();
     repaint();
 }
@@ -2631,13 +2425,11 @@ void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double ver
     const auto focusBeat = oldPixelsPerBeat > 0.0 ? (scrollX + focusXInView) / oldPixelsPerBeat : 0.0;
     const auto oldTrackHeight = static_cast<double>(getTotalTrackHeight());
     const auto focusTrackRatio = oldTrackHeight > 0.0 ? (scrollY + focusYInView) / oldTrackHeight : 0.5;
-    const auto keepTimelineStartAnchored = scrollX <= 0.0;
-
     if (std::abs(horizontalDelta) > 0.0001)
     {
         const auto zoomFactor = std::pow(1.2, horizontalDelta);
         pixelsPerBeat = juce::jlimit(minPixelsPerBeat, maxPixelsPerBeat, pixelsPerBeat * zoomFactor);
-        scrollX = keepTimelineStartAnchored ? 0.0 : (focusBeat * pixelsPerBeat) - focusXInView;
+        scrollX = (focusBeat * pixelsPerBeat) - focusXInView;
     }
 
     if (std::abs(verticalDelta) > 0.0001)

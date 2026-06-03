@@ -82,7 +82,13 @@ private:
     void closeAllInstrumentEditors();
     void captureAllInstrumentStates();
     void restoreInstrumentsFromProject();
-    // Insert FX chain (per track). insertIndex < 0 means the "+" add slot.
+    // Insert FX chain. The "id" is a track index, or a bus key (ArrangementPlaybackSource
+    // ::busInsertKey(busIndex)) so buses reuse the same chain code. insertIndex < 0 = add.
+    std::vector<TrackState::InsertFx>* insertChainForId(int id);
+    juce::String insertOwnerName(int id) const;
+    void addBus();
+    void showSendMenuForTrack(int trackIndex, int sendIndex);
+    void showOutputRouteMenuForTrack(int trackIndex);
     void showInsertMenuForTrack(int trackIndex, int insertIndex);
     void addInsertOnTrack(int trackIndex, const juce::PluginDescription& description);
     void replaceInsertOnTrack(int trackIndex, int insertIndex, const juce::PluginDescription& description);
@@ -262,6 +268,12 @@ private:
     float masterMeterDb { -100.0f };       // numeric dB readout for the bottom MASTER OUT text
     float masterMeterRecentDb { -100.0f }; // loudest dB since the last discrete update
     int   masterMeterDbHoldFrames { 0 };   // remaining peak-hold frames before it snaps
+    // Aux-bus meters (mirror the track meter machinery).
+    std::vector<float> busMeterLevelsL;
+    std::vector<float> busMeterLevelsR;
+    std::vector<float> busPeakHoldDb;
+    std::vector<float> busPeakRecentDb;
+    std::vector<int>   busPeakHoldFrames;
     void updateTrackMeterLevels();
     std::unique_ptr<juce::FileChooser> saveFileChooser;
     std::unique_ptr<juce::FileChooser> openFileChooser;

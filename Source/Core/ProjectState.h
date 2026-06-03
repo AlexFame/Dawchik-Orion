@@ -144,6 +144,9 @@ struct TrackState
     };
     std::vector<SendFx> sends;
 
+    // Main output routing: -1 = master (default), >=0 = aux bus index.
+    int outputBus { -1 };
+
     // Hosted VST instrument (empty = none). instrumentPluginId is the plugin's
     // stable identifier (PluginDescription::createIdentifierString()), used to
     // find and re-instantiate it. instrumentStateBase64 holds the plugin's saved
@@ -206,6 +209,10 @@ public:
     const std::vector<BusState>& getBuses() const noexcept { return buses; }
     std::vector<BusState>& getBuses() noexcept { return buses; }
 
+    // Master-bus insert chain (processed on the final stereo mix).
+    const std::vector<TrackState::InsertFx>& getMasterInserts() const noexcept { return masterInserts; }
+    std::vector<TrackState::InsertFx>& getMasterInserts() noexcept { return masterInserts; }
+
 private:
     double tempoBpm { 126.0 };
     int timeSigNumerator { 4 };
@@ -220,5 +227,9 @@ private:
     bool recordWithMetronome { true };
     std::vector<TrackState> tracks;
     std::vector<BusState> buses;
+    std::vector<TrackState::InsertFx> masterInserts;
+
+    // Per-track output routing: -1 = master (default), >=0 = aux bus index.
+    // Stored on TrackState; this comment documents the convention.
 };
 }  // namespace orion

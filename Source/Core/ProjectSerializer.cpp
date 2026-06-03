@@ -140,6 +140,7 @@ juce::var trackStateToVar(const orion::TrackState& track)
         sends.add(juce::var(sObj));
     }
     object->setProperty("sends", juce::var(sends));
+    object->setProperty("outputBus", track.outputBus);
 
     juce::Array<juce::var> clips;
     for (const auto& clip : track.clips)
@@ -308,6 +309,8 @@ orion::TrackState trackStateFromVar(const juce::var& value)
         }
     }
 
+    track.outputBus = getInt(*obj, "outputBus", -1);
+
     if (auto* clips = obj->getProperty("clips").getArray())
         for (const auto& clipVar : *clips)
             track.clips.push_back(timelineClipFromVar(clipVar));
@@ -366,6 +369,18 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
         busArray.add(juce::var(b));
     }
     rootObject->setProperty("buses", juce::var(busArray));
+
+    juce::Array<juce::var> masterInserts;
+    for (const auto& fx : projectState.getMasterInserts())
+    {
+        auto* fxObj = new juce::DynamicObject();
+        fxObj->setProperty("pluginId", fx.pluginId);
+        fxObj->setProperty("pluginName", fx.pluginName);
+        fxObj->setProperty("stateBase64", fx.stateBase64);
+        fxObj->setProperty("bypassed", fx.bypassed);
+        masterInserts.add(juce::var(fxObj));
+    }
+    rootObject->setProperty("masterInserts", juce::var(masterInserts));
 
     const auto json = juce::JSON::toString(juce::var(rootObject), true);
     if (! destinationFile.replaceWithText(json))
@@ -455,6 +470,20 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
         }
     }
     projectState.getBuses() = std::move(newBuses);
+
+    std::vector<orion::TrackState::InsertFx> newMasterInserts;
+    if (auto* ins = root->getProperty("masterInserts").getArray())
+        for (const auto& fxVar : *ins)
+            if (auto* fxObj = fxVar.getDynamicObject())
+            {
+                orion::TrackState::InsertFx fx;
+                fx.pluginId = getString(*fxObj, "pluginId");
+                fx.pluginName = getString(*fxObj, "pluginName");
+                fx.stateBase64 = getString(*fxObj, "stateBase64");
+                fx.bypassed = getBool(*fxObj, "bypassed", false);
+                newMasterInserts.push_back(std::move(fx));
+            }
+    projectState.getMasterInserts() = std::move(newMasterInserts);
     return true;
 }
 }  // namespace orion

@@ -351,6 +351,27 @@ public:
         return it != trackInserts.end() ? static_cast<int>(it->second.size()) : 0;
     }
 
+    // Insert chains for aux buses are stored in the same map under a high key offset,
+    // so the whole insert API (add/remove/bypass/editor) is reused for buses too.
+    static constexpr int kBusInsertKeyBase = 1000000;
+    static int busInsertKey(int busIndex) noexcept { return kBusInsertKeyBase + busIndex; }
+    // Master-bus insert chain id (processed on the final arrangement mix, pre-fader).
+    static constexpr int kMasterInsertKey = 2000000;
+
+    static constexpr int maxBuses = 64;
+    void accumulateBusPeakStereo(int busIndex, float l, float r) noexcept
+    {
+        if (busIndex < 0 || busIndex >= maxBuses) return;
+        if (l > 0.0f) accumulateAtomicMax(busPeaksL[static_cast<std::size_t>(busIndex)], l);
+        if (r > 0.0f) accumulateAtomicMax(busPeaksR[static_cast<std::size_t>(busIndex)], r);
+    }
+    void fetchAndResetBusPeakStereo(int busIndex, float& outL, float& outR) noexcept
+    {
+        if (busIndex < 0 || busIndex >= maxBuses) { outL = outR = 0.0f; return; }
+        outL = busPeaksL[static_cast<std::size_t>(busIndex)].exchange(0.0f, std::memory_order_relaxed);
+        outR = busPeaksR[static_cast<std::size_t>(busIndex)].exchange(0.0f, std::memory_order_relaxed);
+    }
+
     // Audio thread: run a track's buffer through its (non-bypassed) inserts in order.
     void processTrackInserts(int trackIndex, juce::AudioBuffer<float>& buf)
     {
@@ -573,6 +594,18 @@ private:
                 break;
         }
 
+        // Prepare aux-bus accumulation buffers for this block (cleared each time).
+        const auto& buses = project.getBuses();
+        const auto numBuses = juce::jmin(maxBuses, static_cast<int>(buses.size()));
+        const auto busChannels = juce::jmax(2, targetBuffer.getNumChannels());
+        if (static_cast<int>(busBuffers.size()) != numBuses)
+            busBuffers.resize(static_cast<std::size_t>(numBuses));
+        for (auto& bb : busBuffers)
+        {
+            bb.setSize(busChannels, numSamples, false, false, true);
+            bb.clear();
+        }
+
         for (int trackIndex = 0; trackIndex < static_cast<int>(tracks.size()); ++trackIndex)
         {
             const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
@@ -589,11 +622,15 @@ private:
             };
             const auto hasInstrument = trackHasInstrument(trackIndex);
             const auto hasInserts = ! track.inserts.empty();
+            const auto hasSends = ! track.sends.empty() && ! busBuffers.empty();
+            // Main output routing: -1 = master (default), >=0 = aux bus.
+            const auto routedToBus = track.outputBus >= 0 && track.outputBus < numBuses;
+            const auto needIsolation = hasInserts || hasSends || routedToBus;
             // Snapshot this track's slice of the mix so we can (a) measure the track's TRUE
-            // summed contribution and (b) isolate it for the insert FX chain. Needed for
-            // metering (realtime) and for FX (realtime + offline export).
+            // summed contribution, (b) isolate it for the insert FX chain, and (c) feed aux
+            // sends. Needed for metering (realtime) and for FX/sends (realtime + export).
             const auto meterChannels = juce::jmax(1, targetBuffer.getNumChannels());
-            if (isRealtime || hasInserts)
+            if (isRealtime || needIsolation)
             {
                 trackMeterBefore.setSize(meterChannels, numSamples, false, false, true);
                 for (int ch = 0; ch < meterChannels; ++ch)
@@ -781,23 +818,57 @@ private:
                 }
             }
 
-            if (hasInserts)
+            if (needIsolation)
             {
                 // Isolate the track's dry contribution (after − before), run it through the
-                // insert chain, then write the processed signal back in place. Tracks with
-                // NO inserts are untouched (byte-identical), so this can't regress them.
+                // insert chain, feed aux sends, then write the processed signal back in
+                // place. Tracks with no inserts/sends are untouched (byte-identical).
                 trackFxScratch.setSize(meterChannels, numSamples, false, false, true);
                 for (int ch = 0; ch < meterChannels; ++ch)
                     for (int s = 0; s < numSamples; ++s)
                         trackFxScratch.setSample(ch, s, targetBuffer.getSample(ch, startSample + s)
                                                         - trackMeterBefore.getSample(ch, s));
 
-                processTrackInserts(trackIndex, trackFxScratch);
+                if (hasInserts)
+                    processTrackInserts(trackIndex, trackFxScratch);
 
-                for (int ch = 0; ch < meterChannels; ++ch)
-                    for (int s = 0; s < numSamples; ++s)
-                        targetBuffer.setSample(ch, startSample + s,
-                                               trackMeterBefore.getSample(ch, s) + trackFxScratch.getSample(ch, s));
+                // Aux sends (post-insert): post-fader adds the processed signal as-is;
+                // pre-fader undoes the channel fader (so the send is independent of volume).
+                if (hasSends)
+                {
+                    for (const auto& send : track.sends)
+                    {
+                        const auto level = static_cast<float>(juce::jlimit(0.0, 1.0, send.level));
+                        if (level <= 0.0001f || send.busIndex < 0 || send.busIndex >= static_cast<int>(busBuffers.size()))
+                            continue;
+                        const auto sendGain = send.prefader
+                            ? level / juce::jmax(1.0e-4f, trackGain) : level;
+                        auto& busBuf = busBuffers[static_cast<std::size_t>(send.busIndex)];
+                        const auto bc = juce::jmin(meterChannels, busBuf.getNumChannels());
+                        for (int ch = 0; ch < bc; ++ch)
+                            busBuf.addFrom(ch, 0, trackFxScratch, ch, 0, numSamples, sendGain);
+                    }
+                }
+
+                if (routedToBus)
+                {
+                    // Output goes to an aux bus instead of the master: restore the master to
+                    // its pre-track state and add the processed contribution to the bus.
+                    auto& outBuf = busBuffers[static_cast<std::size_t>(track.outputBus)];
+                    const auto bc = juce::jmin(meterChannels, outBuf.getNumChannels());
+                    for (int ch = 0; ch < bc; ++ch)
+                        outBuf.addFrom(ch, 0, trackFxScratch, ch, 0, numSamples, 1.0f);
+                    for (int ch = 0; ch < meterChannels; ++ch)
+                        for (int s = 0; s < numSamples; ++s)
+                            targetBuffer.setSample(ch, startSample + s, trackMeterBefore.getSample(ch, s));
+                }
+                else
+                {
+                    for (int ch = 0; ch < meterChannels; ++ch)
+                        for (int s = 0; s < numSamples; ++s)
+                            targetBuffer.setSample(ch, startSample + s,
+                                                   trackMeterBefore.getSample(ch, s) + trackFxScratch.getSample(ch, s));
+                }
 
                 if (isRealtime)
                 {
@@ -828,9 +899,54 @@ private:
             }
         }
 
+        // Mix the aux buses (through their own insert chains + gain/pan) into the master.
+        for (int b = 0; b < numBuses; ++b)
+        {
+            const auto& bus = buses[static_cast<std::size_t>(b)];
+            if (bus.muted)
+                continue;
+            auto& busBuf = busBuffers[static_cast<std::size_t>(b)];
+            processTrackInserts(busInsertKey(b), busBuf);
+
+            float gL = 1.0f, gR = 1.0f;
+            panToGains(bus.pan, gL, gR);
+            const auto g = juce::Decibels::decibelsToGain(static_cast<float>(bus.volumeDb));
+            const auto bc = juce::jmin(targetBuffer.getNumChannels(), busBuf.getNumChannels());
+            float pkL = 0.0f, pkR = 0.0f;
+            for (int ch = 0; ch < bc; ++ch)
+            {
+                const auto cg = g * (ch == 0 ? gL : (ch == 1 ? gR : 1.0f));
+                if (isRealtime)
+                {
+                    const auto m = busBuf.getMagnitude(ch, 0, numSamples) * cg;
+                    if (ch == 0)      pkL = m;
+                    else if (ch == 1) pkR = m;
+                }
+                targetBuffer.addFrom(ch, startSample, busBuf, ch, 0, numSamples, cg);
+            }
+            if (isRealtime)
+                accumulateBusPeakStereo(b, pkL, pkR);
+        }
+
         // Render any hosted VST instruments for this block (clip notes + live keyboard).
         processInstruments(targetBuffer, startSample, numSamples, blockStartBeat, beatsPerSecond,
                            true, isRealtime, anySoloActive);
+
+        // Master insert chain: process the full arrangement mix (tracks + buses + instruments)
+        // through the master inserts, pre-fader (the master gain/meter live downstream).
+        {
+            const juce::ScopedTryLock stl(insertLock);
+            if (stl.isLocked() && trackInserts.find(kMasterInsertKey) != trackInserts.end())
+            {
+                juce::AudioBuffer<float> sub(targetBuffer.getArrayOfWritePointers(),
+                                             targetBuffer.getNumChannels(), startSample, numSamples);
+                juce::MidiBuffer noMidi;
+                for (auto& slot : trackInserts[kMasterInsertKey])
+                    if (slot != nullptr && slot->instance != nullptr
+                        && ! slot->bypassed.load(std::memory_order_relaxed))
+                        slot->instance->processBlock(sub, noMidi);
+            }
+        }
     }
 
     const AudioFileData* getAudioFileData(const juce::String& path)
@@ -1167,6 +1283,9 @@ private:
     juce::AudioBuffer<float> trackFxScratch;     // isolated per-track buffer for insert FX
     std::map<int, std::vector<std::unique_ptr<InsertSlot>>> trackInserts;
     juce::CriticalSection insertLock;
+    std::vector<juce::AudioBuffer<float>> busBuffers;   // per-block aux-bus accumulation
+    std::array<std::atomic<float>, maxBuses> busPeaksL {};
+    std::array<std::atomic<float>, maxBuses> busPeaksR {};
     std::atomic<int> clipEditorPreviewTrackIndex { -1 };
     std::atomic<int> clipEditorPreviewClipIndex { -1 };
     std::atomic<double> clipEditorPreviewAnchorBeat { 0.0 };

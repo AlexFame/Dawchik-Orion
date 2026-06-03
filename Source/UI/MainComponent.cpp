@@ -1054,6 +1054,43 @@ MainComponent::MainComponent()
         else
             copyInsertToTrack(fromTrack, fromIndex, toTrack);     // copy onto another track
     };
+    mixerPanel.onAddBus = [this]() { addBus(); };
+    mixerPanel.onSendClicked = [this](int trackIndex, int sendIndex)
+    {
+        if (trackIndex >= 0)
+            showSendMenuForTrack(trackIndex, sendIndex);
+    };
+    mixerPanel.onSendLevelChanged = [this](int trackIndex, int sendIndex, float level)
+    {
+        auto& tracks = projectState.getTracks();
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())) return;
+        auto& sends = tracks[static_cast<std::size_t>(trackIndex)].sends;
+        if (sendIndex < 0 || sendIndex >= static_cast<int>(sends.size())) return;
+        sends[static_cast<std::size_t>(sendIndex)].level = juce::jlimit(0.0, 1.0, static_cast<double>(level));
+        if (mixerPanel.isVisible()) mixerPanel.repaint();
+    };
+    mixerPanel.onSelectTrack = [this](int trackIndex)
+    {
+        arrangementTimeline.selectTrack(trackIndex);
+    };
+    mixerPanel.onOutputRouteClicked = [this](int trackIndex)
+    {
+        showOutputRouteMenuForTrack(trackIndex);
+    };
+    mixerPanel.onRequestBusLevelStereo = [this](int b) -> std::pair<float, float>
+    {
+        const auto toBar = [](float lin)
+        {
+            const auto db = lin > 0.0f ? juce::Decibels::gainToDecibels(lin, -60.0f) : -60.0f;
+            return juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 0.0f, 0.0f, 1.0f));
+        };
+        if (b < 0 || b >= static_cast<int>(busMeterLevelsL.size())) return { 0.0f, 0.0f };
+        return { toBar(busMeterLevelsL[static_cast<std::size_t>(b)]), toBar(busMeterLevelsR[static_cast<std::size_t>(b)]) };
+    };
+    mixerPanel.onRequestBusLevelDb = [this](int b) -> float
+    {
+        return (b >= 0 && b < static_cast<int>(busPeakHoldDb.size())) ? busPeakHoldDb[static_cast<std::size_t>(b)] : -100.0f;
+    };
 
     clipEditorPanel.onGainChanged = [this](double gainDb)
     {
@@ -1724,7 +1761,7 @@ void MainComponent::paint(juce::Graphics& g)
     // Reclaim as much vertical space as possible for the playlist (Studio One-style).
     // Old layout reserved 20px above the cards, plus a 66px "Playlist" header inside,
     // plus 18px paddings — all gone now. The cards hug the work area edges tightly.
-    auto workArea = bounds.withTrimmedTop(8);
+    auto workArea = bounds.withTrimmedTop(2);
     workArea.removeFromBottom(bottomStatusBarHeight);
     workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 8);
     juce::Rectangle<int> browserPanelBounds;
@@ -1857,7 +1894,7 @@ void MainComponent::resized()
     scanPluginsButton.setBounds({});
 
     // Matches paint() — minimal margins so the playlist fills the work area.
-    auto workArea = bounds.withTrimmedTop(8);
+    auto workArea = bounds.withTrimmedTop(2);
     auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth);
     sidebarNav.setBounds(sidebarBounds);
     sidebarNav.toFront(false);
@@ -1877,9 +1914,9 @@ void MainComponent::resized()
     auto arrangementPanel = workArea;
 
     auto playlistArea = arrangementPanel;
-    playlistArea.removeFromLeft(8);
+    playlistArea.removeFromLeft(2);
     playlistArea.removeFromRight(8);
-    playlistArea.removeFromTop(8);
+    playlistArea.removeFromTop(2);
 
     const auto samplerOpen = samplerPanel.isVisible();
     const auto clipEditorOpen = clipEditorPanel.isVisible();
@@ -2193,6 +2230,32 @@ void MainComponent::updateTrackMeterLevels()
             recentDb = -100.0f;
             holdFrames = peakHoldFrames;
         }
+    }
+
+    // Aux-bus meters (same ballistics + peak-hold as the track meters).
+    const auto busCount = static_cast<int>(projectState.getBuses().size());
+    const auto busSized = static_cast<std::size_t>(juce::jmax(0, busCount));
+    if (static_cast<int>(busMeterLevelsL.size()) != busCount)
+    {
+        busMeterLevelsL.assign(busSized, 0.0f);
+        busMeterLevelsR.assign(busSized, 0.0f);
+        busPeakHoldDb.assign(busSized, -100.0f);
+        busPeakRecentDb.assign(busSized, -100.0f);
+        busPeakHoldFrames.assign(busSized, 0);
+    }
+    for (int b = 0; b < busCount; ++b)
+    {
+        float pL = 0.0f, pR = 0.0f;
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->fetchAndResetBusPeakStereo(b, pL, pR);
+        const auto bi = static_cast<std::size_t>(b);
+        busMeterLevelsL[bi] = juce::jmax(pL, busMeterLevelsL[bi] * 0.85f);
+        busMeterLevelsR[bi] = juce::jmax(pR, busMeterLevelsR[bi] * 0.85f);
+        const auto peak = juce::jmax(pL, pR);
+        const auto peakDb = peak > 0.0001f ? juce::Decibels::gainToDecibels(peak) : -100.0f;
+        busPeakRecentDb[bi] = juce::jmax(busPeakRecentDb[bi], peakDb);
+        if (peakDb >= busPeakHoldDb[bi]) { busPeakHoldDb[bi] = peakDb; busPeakRecentDb[bi] = peakDb; busPeakHoldFrames[bi] = peakHoldFrames; }
+        else if (--busPeakHoldFrames[bi] <= 0) { busPeakHoldDb[bi] = busPeakRecentDb[bi]; busPeakRecentDb[bi] = -100.0f; busPeakHoldFrames[bi] = peakHoldFrames; }
     }
 
     // Master output level — fetched once here (single consumer) so the mixer and the
@@ -2851,12 +2914,136 @@ void MainComponent::removeInstrumentFromTrack(int trackIndex)
     arrangementTimeline.repaint();
 }
 
-void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
+std::vector<TrackState::InsertFx>* MainComponent::insertChainForId(int id)
+{
+    if (id == ArrangementPlaybackSource::kMasterInsertKey)
+        return &projectState.getMasterInserts();
+    if (id >= ArrangementPlaybackSource::kBusInsertKeyBase)
+    {
+        const auto b = id - ArrangementPlaybackSource::kBusInsertKeyBase;
+        auto& buses = projectState.getBuses();
+        return (b >= 0 && b < static_cast<int>(buses.size())) ? &buses[static_cast<std::size_t>(b)].inserts : nullptr;
+    }
+    auto& tracks = projectState.getTracks();
+    return (id >= 0 && id < static_cast<int>(tracks.size())) ? &tracks[static_cast<std::size_t>(id)].inserts : nullptr;
+}
+
+juce::String MainComponent::insertOwnerName(int id) const
+{
+    if (id == ArrangementPlaybackSource::kMasterInsertKey)
+        return "Master";
+    if (id >= ArrangementPlaybackSource::kBusInsertKeyBase)
+    {
+        const auto b = id - ArrangementPlaybackSource::kBusInsertKeyBase;
+        const auto& buses = projectState.getBuses();
+        return (b >= 0 && b < static_cast<int>(buses.size())) ? buses[static_cast<std::size_t>(b)].name : juce::String("Bus");
+    }
+    const auto& tracks = projectState.getTracks();
+    return (id >= 0 && id < static_cast<int>(tracks.size())) ? tracks[static_cast<std::size_t>(id)].name : juce::String("Track");
+}
+
+void MainComponent::addBus()
+{
+    auto& buses = projectState.getBuses();
+    orion::BusState bus;
+    bus.name = "Bus " + juce::String(static_cast<int>(buses.size()) + 1);
+    buses.push_back(std::move(bus));
+    if (mixerPanel.isVisible()) mixerPanel.refreshStrips();
+}
+
+void MainComponent::showSendMenuForTrack(int trackIndex, int sendIndex)
 {
     auto& tracks = projectState.getTracks();
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
         return;
     auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    auto& buses = projectState.getBuses();
+
+    juce::PopupMenu menu;
+
+    // Existing send row: change level or remove.
+    if (sendIndex >= 0 && sendIndex < static_cast<int>(track.sends.size()))
+    {
+        const std::array<int, 5> pcts { 10, 25, 50, 75, 100 };
+        const auto& send = track.sends[static_cast<std::size_t>(sendIndex)];
+        const auto cur = juce::roundToInt(send.level * 100.0);
+        for (int i = 0; i < 5; ++i)
+            menu.addItem(10 + i, juce::String(pcts[static_cast<std::size_t>(i)]) + "%", true, cur == pcts[static_cast<std::size_t>(i)]);
+        menu.addSeparator();
+        menu.addItem(8, send.prefader ? "Pre-fader (on)" : "Pre-fader", true, send.prefader);
+        menu.addItem(9, "Remove send");
+        menu.showMenuAsync(juce::PopupMenu::Options(), [this, trackIndex, sendIndex, pcts](int r)
+        {
+            auto& tr = projectState.getTracks();
+            if (trackIndex >= static_cast<int>(tr.size())) return;
+            auto& sends = tr[static_cast<std::size_t>(trackIndex)].sends;
+            if (sendIndex >= static_cast<int>(sends.size())) return;
+            if (r == 8) sends[static_cast<std::size_t>(sendIndex)].prefader = ! sends[static_cast<std::size_t>(sendIndex)].prefader;
+            else if (r == 9) sends.erase(sends.begin() + sendIndex);
+            else if (r >= 10 && r < 15) sends[static_cast<std::size_t>(sendIndex)].level = pcts[static_cast<std::size_t>(r - 10)] / 100.0;
+            if (mixerPanel.isVisible()) mixerPanel.refreshStrips();
+        });
+        return;
+    }
+
+    // Add slot: pick a bus to send to (or create one).
+    if (buses.empty())
+    {
+        menu.addItem(200, "New FX Bus (send here)");
+    }
+    else
+    {
+        for (int b = 0; b < static_cast<int>(buses.size()); ++b)
+            menu.addItem(100 + b, juce::String::fromUTF8("\xe2\x86\x92 ") + buses[static_cast<std::size_t>(b)].name);
+        menu.addSeparator();
+        menu.addItem(200, "New FX Bus");
+    }
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, trackIndex](int r)
+    {
+        auto& tr = projectState.getTracks();
+        if (trackIndex >= static_cast<int>(tr.size())) return;
+        int busIndex = -1;
+        if (r == 200) { addBus(); busIndex = static_cast<int>(projectState.getBuses().size()) - 1; }
+        else if (r >= 100) busIndex = r - 100;
+        if (busIndex < 0 || busIndex >= static_cast<int>(projectState.getBuses().size())) return;
+        TrackState::SendFx s; s.busIndex = busIndex; s.level = 0.25;
+        tr[static_cast<std::size_t>(trackIndex)].sends.push_back(s);
+        if (mixerPanel.isVisible()) mixerPanel.refreshStrips();
+    });
+}
+
+void MainComponent::showOutputRouteMenuForTrack(int trackIndex)
+{
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+    const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    const auto& buses = projectState.getBuses();
+
+    juce::PopupMenu menu;
+    menu.addItem(1, "Master", true, track.outputBus < 0);
+    if (! buses.empty())
+    {
+        menu.addSeparator();
+        for (int b = 0; b < static_cast<int>(buses.size()); ++b)
+            menu.addItem(100 + b, buses[static_cast<std::size_t>(b)].name, true, track.outputBus == b);
+    }
+    menu.showMenuAsync(juce::PopupMenu::Options(), [this, trackIndex](int r)
+    {
+        auto& tr = projectState.getTracks();
+        if (trackIndex >= static_cast<int>(tr.size())) return;
+        if (r == 1)            tr[static_cast<std::size_t>(trackIndex)].outputBus = -1;
+        else if (r >= 100)     tr[static_cast<std::size_t>(trackIndex)].outputBus = r - 100;
+        if (mixerPanel.isVisible()) mixerPanel.repaint();
+    });
+}
+
+void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
+{
+    auto* chainPtr = insertChainForId(trackIndex);
+    if (chainPtr == nullptr)
+        return;
+    auto& chain = *chainPtr;
 
     juce::PopupMenu menu;
 
@@ -2867,9 +3054,9 @@ void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
             effects.add(d);
 
     // Clicking an existing insert chip: open / bypass / replace / remove.
-    if (insertIndex >= 0 && insertIndex < static_cast<int>(track.inserts.size()))
+    if (insertIndex >= 0 && insertIndex < static_cast<int>(chain.size()))
     {
-        const auto& fx = track.inserts[static_cast<std::size_t>(insertIndex)];
+        const auto& fx = chain[static_cast<std::size_t>(insertIndex)];
         menu.addItem(1, "Open " + fx.pluginName);
         menu.addItem(2, fx.bypassed ? "Un-bypass" : "Bypass", true, fx.bypassed);
 
@@ -2935,8 +3122,8 @@ void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
 
 void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescription& description)
 {
-    auto& tracks = projectState.getTracks();
-    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || arrangementPlaybackSource == nullptr)
+    auto* chainPtr = insertChainForId(trackIndex);
+    if (chainPtr == nullptr || arrangementPlaybackSource == nullptr)
         return;
 
     juce::String error;
@@ -2955,7 +3142,7 @@ void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescripti
     TrackState::InsertFx fx;
     fx.pluginId = description.createIdentifierString();
     fx.pluginName = description.name;
-    tracks[static_cast<std::size_t>(trackIndex)].inserts.push_back(std::move(fx));
+    chainPtr->push_back(std::move(fx));
 
     statusLabel.setText("Insert added: " + description.name, juce::dontSendNotification);
     if (mixerPanel.isVisible()) mixerPanel.repaint();
@@ -2965,10 +3152,10 @@ void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescripti
 
 void MainComponent::replaceInsertOnTrack(int trackIndex, int insertIndex, const juce::PluginDescription& description)
 {
-    auto& tracks = projectState.getTracks();
-    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || arrangementPlaybackSource == nullptr)
+    auto* chainPtr = insertChainForId(trackIndex);
+    if (chainPtr == nullptr || arrangementPlaybackSource == nullptr)
         return;
-    auto& chain = tracks[static_cast<std::size_t>(trackIndex)].inserts;
+    auto& chain = *chainPtr;
     if (insertIndex < 0 || insertIndex >= static_cast<int>(chain.size()))
         return;
 
@@ -3008,22 +3195,18 @@ void MainComponent::removeInsertFromTrack(int trackIndex, int insertIndex)
     if (arrangementPlaybackSource != nullptr)
         arrangementPlaybackSource->removeInsert(trackIndex, insertIndex);
 
-    auto& tracks = projectState.getTracks();
-    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size()))
-    {
-        auto& chain = tracks[static_cast<std::size_t>(trackIndex)].inserts;
-        if (insertIndex >= 0 && insertIndex < static_cast<int>(chain.size()))
-            chain.erase(chain.begin() + insertIndex);
-    }
+    if (auto* chainPtr = insertChainForId(trackIndex))
+        if (insertIndex >= 0 && insertIndex < static_cast<int>(chainPtr->size()))
+            chainPtr->erase(chainPtr->begin() + insertIndex);
     if (mixerPanel.isVisible()) mixerPanel.repaint();
 }
 
 void MainComponent::toggleInsertBypass(int trackIndex, int insertIndex)
 {
-    auto& tracks = projectState.getTracks();
-    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+    auto* chainPtr = insertChainForId(trackIndex);
+    if (chainPtr == nullptr)
         return;
-    auto& chain = tracks[static_cast<std::size_t>(trackIndex)].inserts;
+    auto& chain = *chainPtr;
     if (insertIndex < 0 || insertIndex >= static_cast<int>(chain.size()))
         return;
     chain[static_cast<std::size_t>(insertIndex)].bypassed = ! chain[static_cast<std::size_t>(insertIndex)].bypassed;
@@ -3047,12 +3230,10 @@ void MainComponent::openInsertEditor(int trackIndex, int insertIndex)
         return;
     }
 
-    auto& tracks = projectState.getTracks();
-    juce::String title = "Insert";
-    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
-        && insertIndex >= 0 && insertIndex < static_cast<int>(tracks[static_cast<std::size_t>(trackIndex)].inserts.size()))
-        title = tracks[static_cast<std::size_t>(trackIndex)].name + " - "
-              + tracks[static_cast<std::size_t>(trackIndex)].inserts[static_cast<std::size_t>(insertIndex)].pluginName;
+    juce::String title = insertOwnerName(trackIndex);
+    if (auto* chain = insertChainForId(trackIndex); chain != nullptr
+        && insertIndex >= 0 && insertIndex < static_cast<int>(chain->size()))
+        title += " - " + (*chain)[static_cast<std::size_t>(insertIndex)].pluginName;
 
     insertEditorWindows[key] = std::make_unique<PluginEditorWindow>(
         *instance, title,
@@ -3146,6 +3327,37 @@ void MainComponent::restoreInsertsFromProject()
             if (inst != nullptr)
                 arrangementPlaybackSource->addInsert(t, std::move(inst), fx.bypassed);
         }
+    }
+
+    // Bus insert chains (stored under the bus key offset).
+    auto& buses = projectState.getBuses();
+    for (int b = 0; b < static_cast<int>(buses.size()); ++b)
+    {
+        const auto key = ArrangementPlaybackSource::busInsertKey(b);
+        arrangementPlaybackSource->clearTrackInserts(key);
+        for (auto& fx : buses[static_cast<std::size_t>(b)].inserts)
+        {
+            const auto desc = pluginManager.findDescription(fx.pluginId);
+            if (! desc.has_value())
+                continue;
+            juce::String error;
+            auto inst = pluginManager.createInstance(*desc, getCurrentPluginSampleRate(), getCurrentPluginBlockSize(), error);
+            if (inst != nullptr)
+                arrangementPlaybackSource->addInsert(key, std::move(inst), fx.bypassed);
+        }
+    }
+
+    // Master insert chain.
+    arrangementPlaybackSource->clearTrackInserts(ArrangementPlaybackSource::kMasterInsertKey);
+    for (auto& fx : projectState.getMasterInserts())
+    {
+        const auto desc = pluginManager.findDescription(fx.pluginId);
+        if (! desc.has_value())
+            continue;
+        juce::String error;
+        auto inst = pluginManager.createInstance(*desc, getCurrentPluginSampleRate(), getCurrentPluginBlockSize(), error);
+        if (inst != nullptr)
+            arrangementPlaybackSource->addInsert(ArrangementPlaybackSource::kMasterInsertKey, std::move(inst), fx.bypassed);
     }
 }
 
