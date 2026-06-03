@@ -32,7 +32,7 @@ public:
             fill = fill.brighter(0.06f);
 
         g.setColour(juce::Colours::black.withAlpha(0.38f));
-        g.fillRect(bounds.translated(0.0f, 3.0f));
+        g.fillRect(bounds.translated(0.0f, 2.0f));
         g.setColour(fill);
         g.fillRect(bounds);
         g.setColour((active ? theme::warm::red : theme::line::strong).withAlpha(active ? 0.72f : 0.54f));
@@ -54,7 +54,7 @@ public:
         else if (role == "loop" && active)
             colour = theme::text::inverse;
 
-        auto area = button.getLocalBounds().toFloat().reduced(role == "play" ? 18.0f : 12.0f);
+        auto area = button.getLocalBounds().toFloat().reduced(role == "play" ? 14.0f : 9.0f);
         g.setColour(colour);
 
         if (role == "play")
@@ -151,7 +151,7 @@ void TransportBarComponent::setState(const TransportBarState& newState)
 
 juce::Rectangle<int> TransportBarComponent::getTempoEditorBounds() const noexcept
 {
-    return tempoCardBounds.reduced(10, 8).removeFromTop(28);
+    return tempoCardBounds.reduced(8, 7).removeFromTop(24);
 }
 
 juce::Rectangle<int> TransportBarComponent::getKeyBounds() const noexcept
@@ -177,18 +177,18 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.setColour(theme::line::subtle.withAlpha(0.62f));
     g.drawLine(0.0f, static_cast<float>(getHeight() - 1), static_cast<float>(getWidth()), static_cast<float>(getHeight() - 1), 1.0f);
 
-    auto bounds = getLocalBounds().reduced(20, 14);
-    const auto bpmBackdrop = tempoCardBounds.expanded(18, 14).toFloat();
+    auto bounds = getLocalBounds().reduced(18, 10);
+    const auto bpmBackdrop = tempoCardBounds.expanded(12, 10).toFloat();
     g.setColour(theme::surface::primary.withAlpha(0.62f));
-    g.fillRoundedRectangle(bpmBackdrop, 10.0f);
+    g.fillRoundedRectangle(bpmBackdrop, 8.0f);
 
     auto infoArea = bounds.withTrimmedLeft(tempoCardBounds.getRight() + 44 - bounds.getX())
-                         .withTrimmedRight(getWidth() - positionCardBounds.getRight() - 20);
+                         .withTrimmedRight(getWidth() - positionCardBounds.getRight() - 18);
     g.setColour(theme::line::subtle.withAlpha(0.58f));
-    g.drawLine(static_cast<float>(keyCardBounds.getX() - 32), static_cast<float>(bounds.getY() + 18),
-               static_cast<float>(keyCardBounds.getX() - 32), static_cast<float>(bounds.getBottom() - 18), 1.0f);
-    g.drawLine(static_cast<float>(positionCardBounds.getX() - 32), static_cast<float>(bounds.getY() + 18),
-               static_cast<float>(positionCardBounds.getX() - 32), static_cast<float>(bounds.getBottom() - 18), 1.0f);
+    g.drawLine(static_cast<float>(keyCardBounds.getX() - 32), static_cast<float>(bounds.getY() + 10),
+               static_cast<float>(keyCardBounds.getX() - 32), static_cast<float>(bounds.getBottom() - 10), 1.0f);
+    g.drawLine(static_cast<float>(positionCardBounds.getX() - 32), static_cast<float>(bounds.getY() + 10),
+               static_cast<float>(positionCardBounds.getX() - 32), static_cast<float>(bounds.getBottom() - 10), 1.0f);
     juce::ignoreUnused(infoArea);
 
     drawButtonFrame(g, tempoCardBounds.toFloat(), theme::core::voidBlack, true);
@@ -198,28 +198,28 @@ void TransportBarComponent::paint(juce::Graphics& g)
         g.fillRoundedRectangle(card.toFloat(), 6.0f);
     }
 
-    auto tempoText = tempoCardBounds.reduced(8, 8);
+    auto tempoText = tempoCardBounds.reduced(7, 7);
     g.setColour(theme::warm::coral);
-    g.setFont(juce::FontOptions(21.0f, juce::Font::bold));
-    g.drawText(juce::String(state.tempoBpm, 0), tempoText.removeFromTop(25), juce::Justification::centred);
-    g.setFont(juce::FontOptions(15.0f, juce::Font::plain));
+    g.setFont(juce::FontOptions(18.5f, juce::Font::bold));
+    g.drawText(juce::String(state.tempoBpm, 0), tempoText.removeFromTop(22), juce::Justification::centred);
+    g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
     g.drawText("BPM", tempoText, juce::Justification::centredTop);
 
     auto keyValue = keyCardBounds;
     auto positionValue = positionCardBounds;
     g.setColour(theme::text::primary.withAlpha(0.96f));
-    g.setFont(juce::FontOptions(21.0f, juce::Font::bold));
-    g.drawText(state.keyText, keyValue.removeFromTop(28), juce::Justification::centred);
-    g.drawText(state.positionText, positionValue.removeFromTop(28), juce::Justification::centred);
+    g.setFont(juce::FontOptions(19.0f, juce::Font::bold));
+    g.drawText(state.keyText, keyValue.removeFromTop(24), juce::Justification::centred);
+    g.drawText(state.positionText, positionValue.removeFromTop(24), juce::Justification::centred);
 
     g.setColour(theme::text::tertiary.withAlpha(0.62f));
-    g.setFont(juce::FontOptions(15.0f, juce::Font::plain));
+    g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
     g.drawText("KEY", keyValue, juce::Justification::centredTop);
     g.drawText("TIME", positionValue, juce::Justification::centredTop);
 
     if (state.scanVisible)
     {
-        auto scan = getLocalBounds().reduced(24, 0).removeFromBottom(5).toFloat();
+        auto scan = getLocalBounds().reduced(24, 0).removeFromBottom(4).toFloat();
         g.setColour(juce::Colours::black.withAlpha(0.48f));
         g.fillRoundedRectangle(scan, 2.0f);
         g.setColour(theme::warm::red);
@@ -229,23 +229,23 @@ void TransportBarComponent::paint(juce::Graphics& g)
 
 void TransportBarComponent::resized()
 {
-    auto area = getLocalBounds().reduced(28, 18);
-    tempoCardBounds = area.removeFromLeft(82).withSizeKeepingCentre(66, 66);
-    area.removeFromLeft(58);
-    keyCardBounds = area.removeFromLeft(170).withSizeKeepingCentre(136, 54);
-    area.removeFromLeft(30);
-    positionCardBounds = area.removeFromLeft(230).withSizeKeepingCentre(194, 54);
+    auto area = getLocalBounds().reduced(24, 12);
+    tempoCardBounds = area.removeFromLeft(70).withSizeKeepingCentre(56, 56);
+    area.removeFromLeft(48);
+    keyCardBounds = area.removeFromLeft(150).withSizeKeepingCentre(118, 44);
+    area.removeFromLeft(24);
+    positionCardBounds = area.removeFromLeft(214).withSizeKeepingCentre(176, 44);
 
-    auto rightControls = getLocalBounds().reduced(32, 18).removeFromRight(310);
-    metronomeButton.setBounds(rightControls.removeFromLeft(58).withSizeKeepingCentre(54, 54));
-    rightControls.removeFromLeft(14);
-    stopButton.setBounds(rightControls.removeFromLeft(58).withSizeKeepingCentre(54, 54));
-    rightControls.removeFromLeft(14);
-    playButton.setBounds(rightControls.removeFromLeft(82).withSizeKeepingCentre(78, 78));
-    rightControls.removeFromLeft(14);
-    recordButton.setBounds(rightControls.removeFromLeft(58).withSizeKeepingCentre(54, 54));
-    rightControls.removeFromLeft(14);
-    loopButton.setBounds(rightControls.removeFromLeft(58).withSizeKeepingCentre(54, 54));
+    auto rightControls = getLocalBounds().reduced(26, 12).removeFromRight(290);
+    metronomeButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    rightControls.removeFromLeft(12);
+    stopButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    rightControls.removeFromLeft(12);
+    playButton.setBounds(rightControls.removeFromLeft(66).withSizeKeepingCentre(60, 60));
+    rightControls.removeFromLeft(12);
+    recordButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    rightControls.removeFromLeft(12);
+    loopButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
 }
 
 void TransportBarComponent::mouseDown(const juce::MouseEvent& event)
