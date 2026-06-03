@@ -968,6 +968,44 @@ TempoEstimate estimateTempoAutocorr(const juce::AudioBuffer<float>& mono, double
 // tempo) run here; the public wrapper below caches the result per file.
 static AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm,
                                                           int numerator, bool deepAnalysis);
+
+// On-disk cache (our equivalent of Ableton's .asd) so the expensive signal analysis is
+// computed once per file and reused across sessions. Stored centrally (writable) keyed by
+// a hash of file identity + tempo/numerator.
+juce::File analysisCacheFileFor(const juce::String& key)
+{
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                   .getChildFile("Orion").getChildFile("AnalysisCache");
+    return dir.getChildFile(juce::String(key.hashCode64()) + ".awa");
+}
+
+bool readAnalysisFromDisk(const juce::File& f, AudioWarpAnalysis& out)
+{
+    if (! f.existsAsFile())
+        return false;
+    auto p = juce::StringArray::fromTokens(f.loadFileAsString(), "|", "");
+    if (p.size() < 8)
+        return false;
+    out.durationSeconds  = p[0].getDoubleValue();
+    out.sourceBpm        = p[1].getDoubleValue();
+    out.detectedBars     = p[2].getIntValue();
+    out.bpmSource        = p[3];
+    out.bpmConfidence    = p[4].getDoubleValue();
+    out.bpmGuessed       = p[5].getIntValue() != 0;
+    out.sourceKeyRoot    = p[6].getIntValue();
+    out.sourceKeyIsMinor = p[7].getIntValue() != 0;
+    return true;
+}
+
+void writeAnalysisToDisk(const juce::File& f, const AudioWarpAnalysis& a)
+{
+    f.getParentDirectory().createDirectory();
+    juce::String s;
+    s << juce::String(a.durationSeconds, 6) << "|" << juce::String(a.sourceBpm, 6) << "|"
+      << a.detectedBars << "|" << a.bpmSource << "|" << juce::String(a.bpmConfidence, 6) << "|"
+      << (a.bpmGuessed ? 1 : 0) << "|" << a.sourceKeyRoot << "|" << (a.sourceKeyIsMinor ? 1 : 0);
+    f.replaceWithText(s);
+}
 }  // namespace
 
 AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator,
@@ -994,7 +1032,23 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
             return it->second;
     }
 
+    // Disk cache only for the expensive (deep) analysis — the fast path is instant anyway.
+    const auto diskFile = deepAnalysis ? analysisCacheFileFor(cacheKey) : juce::File();
+    if (deepAnalysis)
+    {
+        AudioWarpAnalysis disk;
+        if (readAnalysisFromDisk(diskFile, disk))
+        {
+            const juce::ScopedLock sl(cacheLock);
+            cache[cacheKey] = disk;
+            return disk;
+        }
+    }
+
     auto result = analyzeAudioWarpMetadataUncached(file, projectTempoBpm, numerator, deepAnalysis);
+
+    if (deepAnalysis)
+        writeAnalysisToDisk(diskFile, result);
 
     {
         const juce::ScopedLock sl(cacheLock);
