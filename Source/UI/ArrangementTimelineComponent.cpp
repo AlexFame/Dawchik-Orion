@@ -2361,6 +2361,12 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
 
     auto& targetTrack = tracks[static_cast<std::size_t>(targetTrackIndex)];
     const auto clipColour = targetTrack.colour;
+    // Auto-warp / auto-pitch only SHORT clips with a known tempo (loops). Full tracks /
+    // long clips are NOT auto-warped or auto-pitched — otherwise pressing Play would
+    // RubberBand-stretch the whole multi-minute file on the message thread and freeze the
+    // UI. The key is still detected and shown; the user can enable warp manually.
+    const bool autoWarp = analysis.durationSeconds > 0.0 && analysis.durationSeconds <= 30.0
+                          && (analysis.detectedBars > 0 || analysis.sourceBpm > 0.0);
     targetTrack.clips.push_back(TimelineClip {
         clipName,
         ClipType::audio,
@@ -2376,12 +2382,12 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         analysis.durationSeconds,
         analysis.sourceBpm,
         analysis.detectedBars,
-        true,
+        autoWarp,
         analysis.bpmGuessed,
         sourceLengthBeats,
         analysis.sourceKeyRoot,
         analysis.sourceKeyIsMinor,
-        true   // keyShiftEnabled — auto pitch to project key by default
+        autoWarp   // keyShiftEnabled — auto pitch to project key (loops only)
     });
     auto& droppedClip = targetTrack.clips.back();
     droppedClip.signalAnalysisPending = analysis.needsSignalAnalysis;
