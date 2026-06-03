@@ -964,9 +964,46 @@ TempoEstimate estimateTempoAutocorr(const juce::AudioBuffer<float>& mono, double
     result.confidence = juce::jlimit(0.0, 1.0, best / zero);
     return result;
 }
+// Uncached worker. The expensive bits (audio decode + chroma key + autocorrelation
+// tempo) run here; the public wrapper below caches the result per file.
+static AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm, int numerator);
 }  // namespace
 
 AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator)
+{
+    // Cache by file identity + the tempo/numerator the bar-fit depends on. The heavy
+    // signal analysis then runs at most ONCE per file — repeated calls (warp-length
+    // refresh over every clip, inspector refreshes, re-drops) become instant lookups.
+    // This is what keeps adding clips to the timeline seamless.
+    static juce::CriticalSection cacheLock;
+    static std::map<juce::String, AudioWarpAnalysis> cache;
+
+    const auto cacheKey = file.getFullPathName()
+        + "|" + juce::String(file.getLastModificationTime().toMilliseconds())
+        + "|" + juce::String(file.getSize())
+        + "|" + juce::String(juce::roundToInt(projectTempoBpm * 100.0))
+        + "|" + juce::String(numerator);
+
+    {
+        const juce::ScopedLock sl(cacheLock);
+        const auto it = cache.find(cacheKey);
+        if (it != cache.end())
+            return it->second;
+    }
+
+    auto result = analyzeAudioWarpMetadataUncached(file, projectTempoBpm, numerator);
+
+    {
+        const juce::ScopedLock sl(cacheLock);
+        if (cache.size() > 1024) cache.clear();   // bound memory over a long session
+        cache[cacheKey] = result;
+    }
+    return result;
+}
+
+namespace
+{
+AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm, int numerator)
 {
     AudioWarpAnalysis result;
 
@@ -1124,6 +1161,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
     DBG("[Warp] " + file.getFileName() + " | bpmSource=none | confidence=0 | sourceBpm=0");
     return result;
 }
+}  // namespace
 
 juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
                                                                       int outputSamples,
