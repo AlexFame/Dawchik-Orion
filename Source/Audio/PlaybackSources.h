@@ -1003,16 +1003,25 @@ private:
         const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples)
                        + "|p" + std::to_string(semitonesShift)
                        + "|" + currentWarpBackendTag().toStdString();
-        if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
+
+        // The warp cache is read from the audio thread (allowBuild=false) and written from
+        // the message thread (allowBuild=true, on Play / tempo change). Without
+        // synchronization the audio thread's std::map::find races the build's emplace, so
+        // the first playback after a drop doesn't see the just-built entry (plays unwarped),
+        // while the second does. A lock fixes both correctness and visibility. Entries are
+        // never erased, so a pointer returned under the lock stays valid afterwards.
+        if (! allowBuild)
         {
-            DBG("[Warp-Cache] HIT key=" + juce::String(key));
-            return it->second.get();
+            const juce::ScopedTryLock stl(warpCacheLock);
+            if (! stl.isLocked())
+                return nullptr;   // a build is in progress — this block plays the fallback
+            const auto it = warpedAudioCache.find(key);
+            return it != warpedAudioCache.end() ? it->second.get() : nullptr;
         }
 
-        if (! allowBuild)
-            return nullptr;
-
-        DBG("[Warp-Cache] MISS key=" + juce::String(key) + " building... pitchSemi=" + juce::String(semitonesShift));
+        const juce::ScopedLock sl(warpCacheLock);
+        if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
+            return it->second.get();
 
         auto data = std::make_unique<AudioFileData>();
         data->sampleRate = originalData.sampleRate;
@@ -1272,6 +1281,7 @@ private:
     bool wasPlaying { false };
     std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
+    juce::CriticalSection warpCacheLock;   // guards warpedAudioCache (audio vs message thread)
     juce::CriticalSection instrumentLock;
     std::map<int, std::unique_ptr<InstrumentSlot>> instruments;
 

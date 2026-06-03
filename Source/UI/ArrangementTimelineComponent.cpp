@@ -2385,7 +2385,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     // long clips are NOT auto-warped or auto-pitched — otherwise pressing Play would
     // RubberBand-stretch the whole multi-minute file on the message thread and freeze the
     // UI. The key is still detected and shown; the user can enable warp manually.
-    const bool autoWarp = analysis.durationSeconds > 0.0 && analysis.durationSeconds <= 30.0
+    const bool autoWarp = analysis.durationSeconds > 0.0 && analysis.durationSeconds <= 90.0
                           && (analysis.detectedBars > 0 || analysis.sourceBpm > 0.0);
     targetTrack.clips.push_back(TimelineClip {
         clipName,
