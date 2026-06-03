@@ -2320,6 +2320,13 @@ void MainComponent::timerCallback()
     updateTransportLabels();
     updateTrackMeterLevels();
     maybeStartBackgroundAnalysis();
+    // While stopped, pre-configure warp streamers + warm the background producer so the
+    // next Play is instant and the stretched audio is already filled ahead. Cheap once the
+    // streams exist (skips configured ones); the one-time original decode is invisible
+    // while stopped.
+    if (arrangementPlaybackSource != nullptr && arrangementPlaybackSource->isRealtimeWarpEnabled()
+        && ! transportEngine.isPlaying() && ! transportEngine.isCountInActive())
+        arrangementPlaybackSource->prepareWarpStreams();
     if (clipEditorPanel.isVisible())
         refreshClipEditor();
 
@@ -3707,7 +3714,13 @@ void MainComponent::toggleTransportFromUi()
         },
         [this]()
         {
-            if (arrangementPlaybackSource != nullptr)
+            if (arrangementPlaybackSource == nullptr)
+                return;
+            // Real-time warp: configure streamers (cheap) + start the background producer.
+            // The heavy stretching happens off-thread, so Play is instant and glitch-free.
+            if (arrangementPlaybackSource->isRealtimeWarpEnabled())
+                arrangementPlaybackSource->prepareWarpStreams();
+            else
                 arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
         },
         [this]()

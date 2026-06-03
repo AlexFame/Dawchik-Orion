@@ -12,7 +12,10 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <signalsmith-stretch/signalsmith-stretch.h>
 
 #include "../Audio/TransportEngine.h"
 #include "../Audio/WarpEngine.h"
@@ -103,6 +106,11 @@ public:
                             return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate, sourcePath);
                         })
     {
+    }
+
+    ~ArrangementPlaybackSource() override
+    {
+        stopWarpProducer();   // join the producer before its data (streams/caches) is destroyed
     }
 
     void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override
@@ -544,6 +552,206 @@ private:
         double sampleRate { 44100.0 };
     };
 
+public:
+    // ===== Real-time streaming warp (Ableton-style) ==============================
+    // A background PRODUCER thread fills each warp clip's stretched output buffer ahead
+    // of the playhead; the audio thread only READS it (cheap → no dropouts), and Play is
+    // instant (no upfront pre-render). Output buffers are filled once (never erased), so
+    // a pointer handed to the audio thread stays valid.
+    struct WarpStream
+    {
+        signalsmith::stretch::SignalsmithStretch<float> stretch;
+        AudioFileData out;                       // out.buffer (targetSamples): producer writes, audio reads
+        const AudioFileData* original { nullptr };
+        int targetSamples { 0 };
+        int originalSamples { 0 };
+        int channels { 1 };
+        int inputPos { 0 };                      // producer-only
+        bool primed { false };                   // producer-only
+        std::atomic<int> producedSamples { 0 };  // producer (release) → audio (acquire)
+        std::atomic<int> requestedSamples { 0 }; // audio → producer (how far to fill)
+    };
+
+    static juce::String warpStreamKey(const juce::String& path, int targetSamples, int semis)
+    {
+        return path + "|" + juce::String(targetSamples) + "|p" + juce::String(semis);
+    }
+
+    void setRealtimeWarpEnabled(bool e) noexcept { realtimeWarpEnabled.store(e, std::memory_order_relaxed); }
+    bool isRealtimeWarpEnabled() const noexcept { return realtimeWarpEnabled.load(std::memory_order_relaxed); }
+
+    // Message thread: configure (cheap) a streaming stretcher per warp/pitch clip, capture
+    // the decoded original, and ensure the producer thread is running. No stretching here.
+    void prepareWarpStreams()
+    {
+        const auto beatsPerSecond = project.getTempoBpm() / 60.0;
+        if (beatsPerSecond <= 0.0)
+            return;
+
+        for (const auto& track : project.getTracks())
+            for (const auto& clip : track.clips)
+            {
+                if (clip.type != ClipType::audio || clip.sourcePath.isEmpty() || clip.lengthInBeats <= 0.0)
+                    continue;
+                const auto semis = computeKeyShiftSemitones(clip);
+                if (! clip.warpEnabled && semis == 0)
+                    continue;
+                const auto* original = getAudioFileData(clip.sourcePath);
+                if (original == nullptr || original->sampleRate <= 0.0 || original->buffer.getNumSamples() <= 0)
+                    continue;
+                const auto warpLengthInBeats = clip.warpTargetLengthInBeats > 0.0 ? clip.warpTargetLengthInBeats : clip.lengthInBeats;
+                const auto targetSamples = juce::jmax(1, static_cast<int>(std::round((warpLengthInBeats / beatsPerSecond) * original->sampleRate)));
+                const auto key = warpStreamKey(clip.sourcePath, targetSamples, semis).toStdString();
+                {
+                    const juce::ScopedLock sl(warpStreamLock);
+                    if (warpStreams.find(key) != warpStreams.end())
+                        continue;
+                }
+                auto s = std::make_unique<WarpStream>();
+                s->original = original;
+                s->channels = juce::jlimit(1, 2, original->buffer.getNumChannels());
+                s->originalSamples = original->buffer.getNumSamples();
+                s->targetSamples = targetSamples;
+                s->stretch.presetDefault(s->channels, static_cast<float>(original->sampleRate));
+                s->stretch.setTransposeSemitones(static_cast<float>(semis));
+                s->out.sampleRate = original->sampleRate;
+                s->out.buffer.setSize(s->channels, targetSamples);
+                s->out.buffer.clear();
+                {
+                    const juce::ScopedLock sl(warpStreamLock);
+                    warpStreams[key] = std::move(s);
+                }
+            }
+
+        startWarpProducer();
+        warpProducerWake.signal();
+    }
+
+    // Audio thread: request the producer fill up to `neededOut`, return the (partly-filled)
+    // output. Reads beyond producedSamples hit cleared samples (brief, only if the producer
+    // is momentarily behind at the very start).
+    const AudioFileData* streamWarpData(const juce::String& path, int targetSamples, int semis, int neededOut)
+    {
+        WarpStream* s = nullptr;
+        {
+            const juce::ScopedTryLock stl(warpStreamLock);
+            if (! stl.isLocked())
+                return nullptr;
+            const auto it = warpStreams.find(warpStreamKey(path, targetSamples, semis).toStdString());
+            if (it == warpStreams.end())
+                return nullptr;
+            s = it->second.get();
+        }
+        if (neededOut > s->requestedSamples.load(std::memory_order_relaxed))
+        {
+            s->requestedSamples.store(neededOut, std::memory_order_relaxed);
+            warpProducerWake.signal();
+        }
+        return &s->out;
+    }
+
+    void startWarpProducer()
+    {
+        if (warpProducerRunning.load(std::memory_order_acquire))
+            return;
+        warpProducerRunning.store(true, std::memory_order_release);
+        warpProducerThread = std::thread([this] { warpProducerLoop(); });
+    }
+
+    void stopWarpProducer()
+    {
+        warpProducerRunning.store(false, std::memory_order_release);
+        warpProducerWake.signal();
+        if (warpProducerThread.joinable())
+            warpProducerThread.join();
+    }
+
+    // Background thread: keep every stream's output filled ahead of the playhead.
+    void warpProducerLoop()
+    {
+        while (warpProducerRunning.load(std::memory_order_acquire))
+        {
+            bool didWork = false;
+            std::vector<WarpStream*> snapshot;
+            {
+                const juce::ScopedLock sl(warpStreamLock);
+                snapshot.reserve(warpStreams.size());
+                for (auto& kv : warpStreams)
+                    snapshot.push_back(kv.second.get());
+            }
+            for (auto* s : snapshot)
+            {
+                const auto lookahead = static_cast<int>(s->out.sampleRate * 2.0);   // stay ~2s ahead
+                const auto want = juce::jmin(s->targetSamples, s->requestedSamples.load(std::memory_order_relaxed) + lookahead);
+                if (s->producedSamples.load(std::memory_order_relaxed) < want)
+                {
+                    produceWarpChunk(*s, want);
+                    didWork = true;
+                }
+            }
+            if (! didWork)
+                warpProducerWake.wait(20);
+        }
+    }
+
+    // Background thread: extend a stream's stretched output toward `want` (bounded step).
+    void produceWarpChunk(WarpStream& s, int want)
+    {
+        if (s.original == nullptr)
+            return;
+        want = juce::jmin(want, s.targetSamples);
+        const int ch = s.channels;
+        const double inRatio = static_cast<double>(s.originalSamples) / juce::jmax(1, s.targetSamples);
+
+        if (warpProducerScratch.getNumSamples() < 4096)
+            warpProducerScratch.setSize(2, 4096, false, false, true);
+        const int scratchCap = warpProducerScratch.getNumSamples();
+
+        const auto feed = [&](int inChunk)
+        {
+            for (int c = 0; c < ch; ++c)
+            {
+                auto* dst = warpProducerScratch.getWritePointer(c);
+                const auto srcCh = juce::jmin(c, s.original->buffer.getNumChannels() - 1);
+                for (int i = 0; i < inChunk; ++i)
+                {
+                    const auto idx = s.inputPos + i;
+                    dst[i] = idx < s.originalSamples ? s.original->buffer.getSample(srcCh, idx) : 0.0f;
+                }
+            }
+            s.inputPos += inChunk;
+        };
+
+        // One-time priming so the output aligns to the clip start (mirrors exact()).
+        if (! s.primed)
+        {
+            s.primed = true;
+            const int seekLength = juce::jmin(s.originalSamples, s.stretch.outputSeekLength(static_cast<float>(inRatio)));
+            if (seekLength > 0)
+            {
+                const float* inPtrs[2] = { s.original->buffer.getReadPointer(0),
+                                           ch > 1 ? s.original->buffer.getReadPointer(juce::jmin(1, s.original->buffer.getNumChannels() - 1)) : nullptr };
+                s.stretch.outputSeek(inPtrs, seekLength);
+                s.inputPos = seekLength;
+            }
+        }
+
+        int produced = s.producedSamples.load(std::memory_order_relaxed);
+        const int stepTarget = juce::jmin(want, produced + 32768);   // bound per call so the loop stays responsive
+        while (produced < stepTarget)
+        {
+            const int outChunk = juce::jmin(2048, stepTarget - produced);
+            const int inChunk = juce::jlimit(1, scratchCap, static_cast<int>(std::llround(outChunk * inRatio)));
+            feed(inChunk);
+            const float* inPtrs[2]  = { warpProducerScratch.getReadPointer(0), ch > 1 ? warpProducerScratch.getReadPointer(1) : nullptr };
+            float*       outPtrs[2] = { s.out.buffer.getWritePointer(0) + produced, ch > 1 ? s.out.buffer.getWritePointer(1) + produced : nullptr };
+            s.stretch.process(inPtrs, inChunk, outPtrs, outChunk);
+            produced += outChunk;
+            s.producedSamples.store(produced, std::memory_order_release);
+        }
+    }
+
+private:
     void renderAudioIntoBuffer(juce::AudioBuffer<float>& targetBuffer,
                                int startSample,
                                int numSamples,
@@ -729,10 +937,31 @@ private:
                                               && clip.lengthInBeats > 0.0;
                 if (needsPitchRender)
                 {
-                    if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
-                        audioData = warpedAudioData;
-                    else
-                        continue;
+                    bool streamed = false;
+                    // Real-time streaming warp (filled by the background producer) for normal
+                    // playback; clip-editor preview and offline export keep the pre-render path.
+                    if (isRealtime && ! useClipEditorPreview && realtimeWarpEnabled.load(std::memory_order_relaxed))
+                    {
+                        const auto warpLen = clip.warpTargetLengthInBeats > 0.0 ? clip.warpTargetLengthInBeats : clip.lengthInBeats;
+                        const int targetSamples = juce::jmax(1, static_cast<int>(std::round((warpLen / beatsPerSecond) * originalAudioData->sampleRate)));
+                        const int semis = computeKeyShiftSemitones(clip);
+                        const auto blockEndBeat = blockStartBeat + static_cast<double>(numSamples) * beatAdvancePerSample;
+                        const auto endProgress = juce::jlimit(0.0, 1.0, (blockEndBeat - clipStartBeat) / clip.lengthInBeats);
+                        const auto srcRatioEnd = trimStart + endProgress * trimSpan;
+                        const int neededOut = juce::jmin(targetSamples, static_cast<int>(std::ceil(srcRatioEnd * targetSamples)) + 8);
+                        if (const auto* sd = streamWarpData(clip.sourcePath, targetSamples, semis, neededOut))
+                        {
+                            audioData = sd;
+                            streamed = true;
+                        }
+                    }
+                    if (! streamed)
+                    {
+                        if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
+                            audioData = warpedAudioData;
+                        else
+                            continue;
+                    }
                 }
 
                 for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
@@ -952,8 +1181,15 @@ private:
     const AudioFileData* getAudioFileData(const juce::String& path)
     {
         const auto key = path.toStdString();
-        if (const auto it = audioCache.find(key); it != audioCache.end())
-            return it->second.get();
+
+        // Thread-safe: read from the audio thread AND the message/producer threads. Entries
+        // are never erased, so a pointer returned under the lock stays valid. The slow file
+        // decode happens outside the lock (build-outside-lock); the lock only guards find/emplace.
+        {
+            const juce::ScopedLock sl(audioCacheLock);
+            if (const auto it = audioCache.find(key); it != audioCache.end())
+                return it->second.get();
+        }
 
         juce::File file(path);
         if (! file.existsAsFile())
@@ -968,6 +1204,9 @@ private:
         data->buffer.setSize(static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
         reader->read(&data->buffer, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
 
+        const juce::ScopedLock sl(audioCacheLock);
+        if (const auto it = audioCache.find(key); it != audioCache.end())
+            return it->second.get();   // another thread won the race
         const auto* dataPtr = data.get();
         audioCache.emplace(key, std::move(data));
         return dataPtr;
@@ -1282,6 +1521,17 @@ private:
     std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
     juce::CriticalSection warpCacheLock;   // guards warpedAudioCache (audio vs message thread)
+    juce::CriticalSection audioCacheLock;  // guards audioCache (audio vs producer/message threads)
+
+    // Real-time streaming warp: streams + background producer thread.
+    std::map<std::string, std::unique_ptr<WarpStream>> warpStreams;
+    juce::CriticalSection warpStreamLock;
+    std::thread warpProducerThread;
+    std::atomic<bool> warpProducerRunning { false };
+    juce::WaitableEvent warpProducerWake;
+    juce::AudioBuffer<float> warpProducerScratch;   // producer-thread input scratch
+    std::atomic<bool> realtimeWarpEnabled { true };
+
     juce::CriticalSection instrumentLock;
     std::map<int, std::unique_ptr<InstrumentSlot>> instruments;
 
