@@ -18,6 +18,12 @@
 
 namespace
 {
+// Harmonic suppression coefficients (overridable via argv). Measured to HURT accuracy
+// on every test pack — the remaining errors are genuine harmonic ambiguity, not overtone
+// artifacts — so the default is 0 (disabled), matching the shipping engine.
+double g_b3 = 0.0;   // 3rd-harmonic (fifth) suppression
+double g_b5 = 0.0;   // 5th-harmonic (major third) suppression
+
 juce::AudioBuffer<float> loadMonoForAnalysis(const juce::File& file, double& sampleRateOut, double maxSeconds = 30.0)
 {
     sampleRateOut = 0.0;
@@ -70,13 +76,19 @@ std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, doubl
         coeffs[static_cast<std::size_t>(midi - loMidi)] = (freq > sr * 0.45) ? -100.0 : 2.0 * std::cos(twoPi * freq / sr);
     }
 
+    // TUNABLE: harmonic suppression. A note's 3rd harmonic lands +19 semitones (octave+5th)
+    // and its 5th harmonic +28 (2oct+major-3rd). Those phantom peaks cause the fifth and
+    // mode confusion, so subtract a fraction of the fundamental's energy from them.
+    const double b3 = g_b3;   // 3rd-harmonic (fifth) suppression
+    const double b5 = g_b5;   // 5th-harmonic (major third) suppression
+    constexpr int numNotes = hiMidi - loMidi + 1;
+
     // Per-frame chroma, normalized then accumulated, so loud sustained notes don't swamp
     // the tonal profile — each moment contributes its harmonic "shape" equally.
-    int frames = 0;
     for (int start = 0; start + frame <= n; start += hop)
     {
-        std::array<double, 12> frameChroma {};
-        frameChroma.fill(0.0);
+        std::array<double, numNotes> noteMag {};
+        noteMag.fill(0.0);
         for (int midi = loMidi; midi <= hiMidi; ++midi)
         {
             const auto coeff = coeffs[static_cast<std::size_t>(midi - loMidi)];
@@ -89,22 +101,29 @@ std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, doubl
                 s1 = s0;
             }
             const auto power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
-            frameChroma[static_cast<std::size_t>(midi % 12)] += std::sqrt(juce::jmax(0.0, power));
+            noteMag[static_cast<std::size_t>(midi - loMidi)] = std::sqrt(juce::jmax(0.0, power));
         }
+
+        std::array<double, 12> frameChroma {};
+        frameChroma.fill(0.0);
+        for (int idx = 0; idx < numNotes; ++idx)
+        {
+            double m = noteMag[static_cast<std::size_t>(idx)];
+            if (idx - 19 >= 0) m -= b3 * noteMag[static_cast<std::size_t>(idx - 19)];
+            if (idx - 28 >= 0) m -= b5 * noteMag[static_cast<std::size_t>(idx - 28)];
+            frameChroma[static_cast<std::size_t>((loMidi + idx) % 12)] += juce::jmax(0.0, m);
+        }
+
         double fsum = 0.0;
         for (auto v : frameChroma) fsum += v;
         if (fsum > 1.0e-9)
-        {
             for (int i = 0; i < 12; ++i) chroma[static_cast<std::size_t>(i)] += frameChroma[static_cast<std::size_t>(i)] / fsum;
-            ++frames;
-        }
     }
 
     double sum = 0.0;
     for (auto v : chroma) sum += v;
     if (sum > 0.0)
         for (auto& v : chroma) v /= sum;
-    juce::ignoreUnused(frames);
     return chroma;
 }
 
@@ -185,6 +204,8 @@ int main(int argc, char* argv[])
     if (argc < 2) { std::cout << "usage: OrionKeyTest <folder> [confThreshold]\n"; return 1; }
     const juce::File folder(juce::String::fromUTF8(argv[1]));
     const double confThreshold = argc >= 3 ? juce::String(argv[2]).getDoubleValue() : 0.0;
+    if (argc >= 4) g_b3 = juce::String(argv[3]).getDoubleValue();
+    if (argc >= 5) g_b5 = juce::String(argv[4]).getDoubleValue();
 
     auto files = folder.findChildFiles(juce::File::findFiles, true, "*.wav;*.aif;*.aiff");
     files.sort();
