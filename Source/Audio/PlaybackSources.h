@@ -1371,7 +1371,9 @@ public:
                 clickPhase = 0.0;
                 const auto beatInBar = beatIndex % juce::jmax(1, project.getNumerator());
                 clickFrequency = (beatInBar == 0) ? 1760.0 : 1320.0;
-                currentAmplitude = (beatInBar == 0) ? 0.42f : 0.28f;
+                // Moderate level (~-14 / -18 dBFS): audible as a reference but doesn't
+                // dominate the mix the way the old hot default (0.42/0.28) did.
+                currentAmplitude = (beatInBar == 0) ? 0.20f : 0.13f;
             }
 
             float clickSample = 0.0f;
@@ -1411,14 +1413,24 @@ public:
     {
     }
 
+    // A monitor-only source (the metronome click) added AFTER the master meter is taken,
+    // so it's audible but never shows on the master meter or lands in an export — matching
+    // how Logic/Ableton treat the click.
+    void setMonitorSource(juce::AudioSource* source) noexcept { monitorSource = source; }
+
     void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override
     {
         downstream.prepareToPlay(samplesPerBlockExpected, newSampleRate);
+        if (monitorSource != nullptr)
+            monitorSource->prepareToPlay(samplesPerBlockExpected, newSampleRate);
+        monitorScratch.setSize(2, juce::jmax(1, samplesPerBlockExpected), false, false, true);
     }
 
     void releaseResources() override
     {
         downstream.releaseResources();
+        if (monitorSource != nullptr)
+            monitorSource->releaseResources();
     }
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
@@ -1446,6 +1458,19 @@ public:
 
         accumulate(meterPeakL, peakL);
         accumulate(meterPeakR, peakR);
+
+        // Mix the monitor click on top, AFTER metering (so it doesn't inflate the meter).
+        if (monitorSource != nullptr)
+        {
+            if (monitorScratch.getNumSamples() < info.numSamples)
+                monitorScratch.setSize(2, info.numSamples, false, false, true);
+            juce::AudioSourceChannelInfo mi(&monitorScratch, 0, info.numSamples);
+            mi.clearActiveBufferRegion();
+            monitorSource->getNextAudioBlock(mi);
+            const auto chn = juce::jmin(numCh, monitorScratch.getNumChannels());
+            for (int ch = 0; ch < chn; ++ch)
+                info.buffer->addFrom(ch, info.startSample, monitorScratch, ch, 0, info.numSamples);
+        }
     }
 
     void setGainDb(double db) noexcept
@@ -1469,6 +1494,8 @@ public:
 
 private:
     juce::AudioSource& downstream;
+    juce::AudioSource* monitorSource { nullptr };   // metronome click (post-meter monitor)
+    juce::AudioBuffer<float> monitorScratch;
     std::atomic<float> gainLinear { 1.0f };
     std::atomic<float> meterPeakL { 0.0f };
     std::atomic<float> meterPeakR { 0.0f };

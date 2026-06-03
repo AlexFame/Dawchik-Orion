@@ -1015,9 +1015,11 @@ MainComponent::MainComponent()
     masterMixerSource.addInputSource(&previewTransportSource, false);
     masterMixerSource.addInputSource(&clipEditorPreviewTransportSource, false);
     masterMixerSource.addInputSource(arrangementPlaybackSource.get(), false);
-    masterMixerSource.addInputSource(clickTrackSource.get(), false);
+    // NOTE: the click is NOT mixed here — it's a monitor-only signal attached to the
+    // master stage below, added after metering so it never inflates the master level.
     // Master stage (gain + level metering) sits between the mixer and the device.
     masterStripSource = std::make_unique<MasterStripSource>(masterMixerSource);
+    masterStripSource->setMonitorSource(clickTrackSource.get());
     masterStripSource->setGainDb(masterGainDb);
     previewSourcePlayer.setSource(masterStripSource.get());
 
@@ -1614,11 +1616,15 @@ MainComponent::~MainComponent()
     clipEditorPreviewTransportSource.stop();
     clipEditorPreviewTransportSource.setSource(nullptr);
     clipEditorPreviewBufferSource.reset();
+    // Stop the device pulling the master stage, then detach the click monitor BEFORE
+    // destroying the click (the master stage references it as its monitor source).
+    previewSourcePlayer.setSource(nullptr);
+    if (masterStripSource != nullptr)
+        masterStripSource->setMonitorSource(nullptr);
     clickTrackSource.reset();
     arrangementPlaybackSource.reset();
     currentPreviewFile = juce::File();
     currentPreviewTempoBpm = 0.0;
-    previewSourcePlayer.setSource(nullptr);
     masterStripSource.reset();
     if (audioInputRecorder != nullptr && audioRecorderCallbackAttached)
     {
