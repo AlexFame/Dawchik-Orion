@@ -966,10 +966,12 @@ TempoEstimate estimateTempoAutocorr(const juce::AudioBuffer<float>& mono, double
 }
 // Uncached worker. The expensive bits (audio decode + chroma key + autocorrelation
 // tempo) run here; the public wrapper below caches the result per file.
-static AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm, int numerator);
+static AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm,
+                                                          int numerator, bool deepAnalysis);
 }  // namespace
 
-AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator)
+AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator,
+                                           bool deepAnalysis)
 {
     // Cache by file identity + the tempo/numerator the bar-fit depends on. The heavy
     // signal analysis then runs at most ONCE per file — repeated calls (warp-length
@@ -982,7 +984,8 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
         + "|" + juce::String(file.getLastModificationTime().toMilliseconds())
         + "|" + juce::String(file.getSize())
         + "|" + juce::String(juce::roundToInt(projectTempoBpm * 100.0))
-        + "|" + juce::String(numerator);
+        + "|" + juce::String(numerator)
+        + "|" + (deepAnalysis ? "d" : "s");
 
     {
         const juce::ScopedLock sl(cacheLock);
@@ -991,7 +994,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
             return it->second;
     }
 
-    auto result = analyzeAudioWarpMetadataUncached(file, projectTempoBpm, numerator);
+    auto result = analyzeAudioWarpMetadataUncached(file, projectTempoBpm, numerator, deepAnalysis);
 
     {
         const juce::ScopedLock sl(cacheLock);
@@ -1003,7 +1006,8 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
 
 namespace
 {
-AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm, int numerator)
+AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, double projectTempoBpm,
+                                                   int numerator, bool deepAnalysis)
 {
     AudioWarpAnalysis result;
 
@@ -1044,7 +1048,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
     const auto parsedKey = parseKeyFromFileName(file);
     result.sourceKeyRoot    = parsedKey.root;
     result.sourceKeyIsMinor = parsedKey.minor;
-    if (parsedKey.root < 0 && ensureMono())
+    if (parsedKey.root < 0 && deepAnalysis && ensureMono())
     {
         const auto est = estimateKeyFromChroma(computeChroma(mono, monoSr));
         // Threshold tuned on a real melody pack: ~95% of tonal melodies clear it while
@@ -1109,7 +1113,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
     }
 
     // Pass 2: real onset-autocorrelation tempo (works on non-bar-aligned material).
-    if (ensureMono())
+    if (deepAnalysis && ensureMono())
     {
         const auto tempo = estimateTempoAutocorr(mono, monoSr, projectTempoBpm);
         if (tempo.bpm >= 60.0 && tempo.bpm <= 200.0 && tempo.confidence >= 0.18)

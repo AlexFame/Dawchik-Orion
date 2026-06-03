@@ -2296,6 +2296,7 @@ void MainComponent::timerCallback()
 
     updateTransportLabels();
     updateTrackMeterLevels();
+    maybeStartBackgroundAnalysis();
     if (clipEditorPanel.isVisible())
         refreshClipEditor();
 
@@ -4320,7 +4321,10 @@ void MainComponent::refreshAudioClipWarpLengths()
 
             if (needsAnalysis)
             {
-                const auto analysis = analyzeAudioWarpMetadata(sourceFile, projectState.getTempoBpm(), projectState.getNumerator());
+                // Fast (no audio decode) — this runs in bulk over every clip and on every
+                // tempo change, so it must not block. Deep key/tempo is filled by the
+                // background worker (maybeStartBackgroundAnalysis).
+                const auto analysis = analyzeAudioWarpMetadata(sourceFile, projectState.getTempoBpm(), projectState.getNumerator(), false);
                 if (clip.sourceDurationSeconds <= 0.0 && analysis.durationSeconds > 0.0)
                     clip.sourceDurationSeconds = analysis.durationSeconds;
                 if ((clip.sourceBpm <= 0.0 || namedBpm > 0.0) && analysis.sourceBpm > 0.0)
@@ -4361,6 +4365,81 @@ void MainComponent::refreshAudioClipWarpLengths()
                 clip.warpTargetLengthInBeats = 0.0;
             }
         }
+    }
+}
+
+void MainComponent::maybeStartBackgroundAnalysis()
+{
+    if (analysisJobActive.load(std::memory_order_acquire))
+        return;
+
+    // Distinct files of clips still awaiting the (expensive) signal analysis.
+    juce::StringArray paths;
+    for (const auto& track : projectState.getTracks())
+        for (const auto& clip : track.clips)
+            if (clip.signalAnalysisPending && clip.type == ClipType::audio && clip.sourcePath.isNotEmpty())
+                paths.addIfNotAlreadyThere(clip.sourcePath);
+
+    if (paths.isEmpty())
+        return;
+
+    const auto tempo = projectState.getTempoBpm();
+    const auto numerator = projectState.getNumerator();
+    analysisJobActive.store(true, std::memory_order_release);
+    juce::Component::SafePointer<MainComponent> safe(this);
+
+    analysisThreadPool.addJob([safe, paths, tempo, numerator]
+    {
+        // Heavy work off the message thread: decode + chroma key + autocorrelation tempo.
+        auto results = std::make_shared<std::map<juce::String, orion::AudioWarpAnalysis>>();
+        for (const auto& p : paths)
+            (*results)[p] = orion::analyzeAudioWarpMetadata(juce::File(p), tempo, numerator, true);
+
+        juce::MessageManager::callAsync([safe, results]
+        {
+            if (auto* self = safe.getComponent())
+                self->applyBackgroundAnalysis(*results);
+        });
+    });
+}
+
+void MainComponent::applyBackgroundAnalysis(const std::map<juce::String, orion::AudioWarpAnalysis>& results)
+{
+    bool changed = false;
+    for (auto& track : projectState.getTracks())
+        for (auto& clip : track.clips)
+        {
+            if (! clip.signalAnalysisPending)
+                continue;
+            const auto it = results.find(clip.sourcePath);
+            if (it == results.end())
+                continue;
+            const auto& a = it->second;
+            if (clip.sourceKeyRoot < 0 && a.sourceKeyRoot >= 0)
+            {
+                clip.sourceKeyRoot    = a.sourceKeyRoot;
+                clip.sourceKeyIsMinor = a.sourceKeyIsMinor;
+            }
+            if (clip.sourceBpm <= 0.0 && a.sourceBpm > 0.0)
+            {
+                clip.sourceBpm   = a.sourceBpm;
+                clip.bpmGuessed  = a.bpmGuessed;
+            }
+            if (clip.detectedBars <= 0 && a.detectedBars > 0)
+                clip.detectedBars = a.detectedBars;
+            if (clip.sourceDurationSeconds <= 0.0 && a.durationSeconds > 0.0)
+                clip.sourceDurationSeconds = a.durationSeconds;
+            clip.signalAnalysisPending = false;
+            changed = true;
+        }
+
+    analysisJobActive.store(false, std::memory_order_release);
+
+    if (changed)
+    {
+        refreshAudioClipWarpLengths();
+        refreshClipInspector();
+        arrangementTimeline.repaint();
     }
 }
 

@@ -79,6 +79,10 @@ struct TimelineClip
     // Transient UI/audio state: a clip currently being recorded is visible on
     // the timeline but must not play back until the take is finalized.
     bool recording { false };
+    // Transient: set when a dropped clip still needs the (expensive) signal
+    // analysis for key/tempo. A background worker fills it in and clears this,
+    // so dropping a clip stays instant (Ableton-style). Not serialized.
+    bool signalAnalysisPending { false };
 };
 
 // Maps a linear fade progress t in [0,1] (0 = silent end, 1 = full level) to a

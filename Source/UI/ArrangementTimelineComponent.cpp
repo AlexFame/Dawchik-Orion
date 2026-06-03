@@ -47,10 +47,31 @@ constexpr auto loopHandleHitWidth = 8;
 constexpr auto playheadHitWidth = 8;
 constexpr auto newTrackDropZoneHeight = 64;
 constexpr auto maxExpandedLaneHeight = 240;
-constexpr auto minPixelsPerBeat = 0.25;
+constexpr auto minPixelsPerBeat = 0.04;
 constexpr auto maxPixelsPerBeat = 160.0;
 constexpr auto minTimelineLengthInBeats = 4096.0;
 constexpr auto timelinePaddingInBeats = 64.0;
+
+int chooseGridStepBeats(double pixelsPerBeat, int beatsPerBar, double minimumSpacingPixels)
+{
+    const auto safeBeatsPerBar = juce::jmax(1, beatsPerBar);
+
+    if (pixelsPerBeat <= 0.0)
+        return safeBeatsPerBar;
+
+    const auto targetBeats = minimumSpacingPixels / pixelsPerBeat;
+    static constexpr std::array<int, 13> barMultipliers { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 };
+
+    for (const auto bars : barMultipliers)
+    {
+        const auto stepBeats = bars * safeBeatsPerBar;
+        if (static_cast<double>(stepBeats) >= targetBeats)
+            return stepBeats;
+    }
+
+    return barMultipliers.back() * safeBeatsPerBar;
+}
+
 juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 {
     auto bounds = component.getLocalBounds();
@@ -78,6 +99,9 @@ struct AudioImportAnalysis
     bool bpmGuessed { false };
     int  sourceKeyRoot { -1 };
     bool sourceKeyIsMinor { false };
+    // True when the (fast) drop-time analysis couldn't get key/tempo from the filename,
+    // so the background worker should run the full signal analysis to fill them in.
+    bool needsSignalAnalysis { false };
 };
 
 
@@ -94,10 +118,11 @@ AudioImportAnalysis analyzeImportedAudioClip(const juce::File& file, double temp
     if (! file.existsAsFile() || tempoBpm <= 0.0)
         return result;
 
-    // Delegate to the unified analyzer (filename → DSP key/tempo → short-sample fit), so
-    // dropped clips get the same detection as everywhere else — including key from the
-    // audio signal and a usable tempo for short loops/chops that don't fill a whole bar.
-    const auto warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator);
+    // Fast (deepAnalysis=false) analysis only — filename + duration heuristics, no audio
+    // decode — so dropping a clip is instant. If that can't resolve key/tempo from the
+    // name, the clip is flagged and a background worker runs the full signal analysis.
+    const auto warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator, false);
+    result.needsSignalAnalysis = (warp.sourceKeyRoot < 0) || (warp.bpmSource != "filename");
     result.durationSeconds  = warp.durationSeconds;
     result.sourceBpm        = warp.sourceBpm;
     result.detectedBars     = warp.detectedBars;
@@ -361,17 +386,12 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     const int maxBeat = juce::jmax(lastVisibleBeat, static_cast<int>(std::ceil(totalBeats)));
 
     const auto beatsPerBarInt = juce::jmax(1, static_cast<int>(beatsPerBar));
-    const auto barPixelWidth = pixelsPerBeat * beatsPerBar;
-    const auto minGridSpacingPixels = 28.0;
-    const auto minLabelSpacingPixels = 104.0;
-    const auto sectionStepBeats = beatsPerBarInt * 16;
-    const auto majorStepBeats = beatsPerBarInt * 4;
-    const auto barStepBeats = beatsPerBarInt;
-    const auto beatStepBeats = 1;
-    auto labelStepBars = 1;
-    while (static_cast<double>(labelStepBars) * barPixelWidth < minLabelSpacingPixels)
-        labelStepBars *= 2;
-    const auto labelStepBeats = beatsPerBarInt * labelStepBars;
+    const auto minGridSpacingPixels = 12.0;
+    const auto fineStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 18.0);
+    const auto barStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 42.0);
+    const auto majorStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 86.0);
+    const auto sectionStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 170.0);
+    const auto labelStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 58.0);
 
         auto drawGridLayer = [&](juce::Rectangle<int> verticalArea, int stepBeats, juce::Colour colour, float thickness, bool forceVisible = false)
         {
@@ -394,11 +414,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     g.saveState();
     g.reduceClipRegion(markerLane);
-    drawGridLayer(rulerGridArea, beatStepBeats, minorGridColour.withAlpha(0.22f), 1.0f);
-        drawGridLayer(rulerGridArea, barStepBeats, majorGridColour.withAlpha(0.36f), 1.0f);
-        drawGridLayer(rulerGridArea, majorStepBeats, majorGridColour.withAlpha(0.56f), 1.3f);
-        drawGridLayer(rulerGridArea, sectionStepBeats, majorGridColour.withAlpha(0.72f), 1.6f);
-        drawGridLayer(rulerGridArea, labelStepBeats, majorGridColour.withAlpha(0.82f), 1.7f, true);
+    drawGridLayer(rulerGridArea, fineStepBeats, minorGridColour.withAlpha(0.22f), 1.0f);
+    drawGridLayer(rulerGridArea, barStepBeats, majorGridColour.withAlpha(0.36f), 1.0f);
+    drawGridLayer(rulerGridArea, majorStepBeats, majorGridColour.withAlpha(0.56f), 1.3f);
+    drawGridLayer(rulerGridArea, sectionStepBeats, majorGridColour.withAlpha(0.72f), 1.6f);
+    drawGridLayer(rulerGridArea, labelStepBeats, majorGridColour.withAlpha(0.82f), 1.7f, true);
 
     const auto firstLabelBeat = (firstVisibleBeat / labelStepBeats) * labelStepBeats;
     for (int beat = firstLabelBeat; beat <= maxBeat; beat += labelStepBeats)
@@ -534,11 +554,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     g.reduceClipRegion(gridArea);
 
-    drawGridLayer(visibleTracksArea, beatStepBeats, minorGridColour.withAlpha(0.20f), 1.0f);
-        drawGridLayer(visibleTracksArea, barStepBeats, majorGridColour.withAlpha(0.30f), 1.0f);
-        drawGridLayer(visibleTracksArea, majorStepBeats, majorGridColour.withAlpha(0.48f), 1.15f);
-        drawGridLayer(visibleTracksArea, sectionStepBeats, majorGridColour.withAlpha(0.62f), 1.4f);
-        drawGridLayer(visibleTracksArea, labelStepBeats, majorGridColour.withAlpha(0.72f), 1.65f, true);
+    drawGridLayer(visibleTracksArea, fineStepBeats, minorGridColour.withAlpha(0.20f), 1.0f);
+    drawGridLayer(visibleTracksArea, barStepBeats, majorGridColour.withAlpha(0.30f), 1.0f);
+    drawGridLayer(visibleTracksArea, majorStepBeats, majorGridColour.withAlpha(0.48f), 1.15f);
+    drawGridLayer(visibleTracksArea, sectionStepBeats, majorGridColour.withAlpha(0.62f), 1.4f);
+    drawGridLayer(visibleTracksArea, labelStepBeats, majorGridColour.withAlpha(0.72f), 1.65f, true);
 
     // Draw Clips
     for (int trackIndex = 0; trackIndex < trackCount; ++trackIndex)
@@ -2364,6 +2384,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         true   // keyShiftEnabled — auto pitch to project key by default
     });
     auto& droppedClip = targetTrack.clips.back();
+    droppedClip.signalAnalysisPending = analysis.needsSignalAnalysis;
     if (isClipEditorDrop)
     {
         droppedClip.sampleStartRatio = sampleStartRatio;
@@ -2384,24 +2405,10 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
 
 void ArrangementTimelineComponent::ensureBeatVisible(double endBeat)
 {
-    if (endBeat <= 0.0) return;
+    juce::ignoreUnused(endBeat);
 
-    auto bounds = getTimelineContentBounds(*this);
-    auto gridArea = bounds.withTrimmedTop(42);
-    gridArea.removeFromLeft(trackHeaderWidth);
-    const auto fullWidth = static_cast<double>(gridArea.getWidth());
-    if (fullWidth <= 0.0 || pixelsPerBeat <= 0.0) return;
-
-    const auto visibleEndBeat = (scrollX + fullWidth) / pixelsPerBeat;
-    if (endBeat <= visibleEndBeat) return; // already fits, don't touch zoom
-
-    // Zoom out just enough to show endBeat with ~15% padding on the right.
-    const auto targetBeats = endBeat * 1.15;
-    const auto targetPpb   = fullWidth / targetBeats;
-    pixelsPerBeat = juce::jlimit(minPixelsPerBeat, maxPixelsPerBeat, juce::jmin(pixelsPerBeat, targetPpb));
-    scrollX = 0.0;
+    // Keep imports and drops from changing the user's timeline zoom.
     clampScrollOffsets();
-    repaint();
 }
 
 void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double verticalDelta, std::optional<juce::Point<int>> focusPoint)

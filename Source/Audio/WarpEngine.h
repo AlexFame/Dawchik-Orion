@@ -41,7 +41,12 @@ struct AudioWarpAnalysis
 double parseBpmFromFileName(const juce::File& file);
 
 // Reads a file's header + name to estimate tempo / key / bar count for warping.
-AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator);
+// deepAnalysis=false skips the expensive signal analysis (audio decode + chroma key
+// + autocorrelation tempo) and uses only filename + duration heuristics — fast enough
+// to run synchronously on a clip drop. Pass true (default) for the full analysis,
+// which a background worker runs to fill in key/tempo without stalling the UI.
+AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projectTempoBpm, int numerator,
+                                           bool deepAnalysis = true);
 
 // 4-point cubic Hermite interpolation used by the arrangement playback resampler.
 inline float cubicHermite(float t, float y0, float y1, float y2, float y3) noexcept

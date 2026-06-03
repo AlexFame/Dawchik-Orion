@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../Audio/ExportService.h"
+#include "../Audio/WarpEngine.h"
 #include "../Audio/TransportController.h"
 #include "../Audio/TransportEngine.h"
 #include "../Core/ProjectSerializer.h"
@@ -113,6 +114,9 @@ private:
     void exportProjectInteractively();
     void openSettingsDialog();
     void refreshAudioClipWarpLengths();
+    // Background key/tempo analysis for clips flagged signalAnalysisPending.
+    void maybeStartBackgroundAnalysis();
+    void applyBackgroundAnalysis(const std::map<juce::String, orion::AudioWarpAnalysis>& results);
     void refreshClipInspector();
     void refreshClipEditor();
     void setClipEditorLocalPreviewPosition(double sourceRatio);
@@ -157,6 +161,10 @@ private:
     // the UI never freezes; a generation counter discards stale builds.
     juce::ThreadPool clipEditorPreviewPool { 1 };
     std::atomic<int> clipEditorPreviewBuildGen { 0 };
+    // Background signal analysis (key/tempo) for freshly-dropped clips, so dropping is
+    // instant; results are applied back on the message thread.
+    juce::ThreadPool analysisThreadPool { 1 };
+    std::atomic<bool> analysisJobActive { false };
     double clipEditorPreviewResumeSeconds { -1.0 };
 
     juce::Label headerLabel;
