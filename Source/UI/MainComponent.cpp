@@ -1559,10 +1559,11 @@ MainComponent::MainComponent()
             resized();
         }
 
-        // Re-bake the warp cache so freshly-dropped clips pick up auto-detected pitch.
-        if (arrangementPlaybackSource != nullptr)
-            arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
-
+        // NOTE: do NOT re-bake the warp cache here. This handler fires on every clip
+        // selection (including the auto-select on drop), and prepareWarpCacheForCurrentTempo
+        // synchronously RubberBand-stretches every warp clip — for a 1-minute clip that's
+        // a multi-second UI freeze on drop. The warp cache is built on Play (togglePlayback)
+        // where it belongs.
         refreshClipInspector();
         refreshClipEditor();
         updateTransportLabels();
@@ -4762,7 +4763,9 @@ void MainComponent::refreshClipInspector()
             || (mutableClip->sourceBpm <= 0.0 && mutableClip->detectedBars == 0)
             || (namedBpm > 0.0 && std::abs(mutableClip->sourceBpm - namedBpm) > 0.01))
         {
-            const auto analysis = analyzeAudioWarpMetadata(sourceFile, projectState.getTempoBpm(), projectState.getNumerator());
+            // Fast (no audio decode) — the inspector must not stall on selection. Deep
+            // key/tempo is filled by the background worker.
+            const auto analysis = analyzeAudioWarpMetadata(sourceFile, projectState.getTempoBpm(), projectState.getNumerator(), false);
             if (mutableClip->sourceDurationSeconds <= 0.0 && analysis.durationSeconds > 0.0)
                 mutableClip->sourceDurationSeconds = analysis.durationSeconds;
             if ((mutableClip->sourceBpm <= 0.0 || namedBpm > 0.0) && analysis.sourceBpm > 0.0)
@@ -4781,8 +4784,9 @@ void MainComponent::refreshClipInspector()
             mutableClip->lengthInBeats = static_cast<double>(mutableClip->detectedBars * juce::jmax(1, projectState.getNumerator()));
             mutableClip->warpTargetLengthInBeats = mutableClip->lengthInBeats;
         }
-        if (arrangementPlaybackSource != nullptr)
-            arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+        // NOTE: no prepareWarpCacheForCurrentTempo() here — it RubberBand-stretches every
+        // warp clip synchronously, which froze the UI on drop/selection (a 1-minute clip
+        // took ~4s). The warp cache is built on Play.
     }
 
     auto sourceFile = juce::File(clip->sourcePath);

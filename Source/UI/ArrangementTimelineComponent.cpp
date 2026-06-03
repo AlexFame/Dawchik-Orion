@@ -2983,57 +2983,73 @@ const ArrangementTimelineComponent::AudioPeaks* ArrangementTimelineComponent::ge
     if (const auto it = waveformCache.find(key); it != waveformCache.end())
         return &it->second;
 
-    juce::File file(path);
-    if (! file.existsAsFile())
-        return nullptr;
-
-    auto& fm = getSharedWaveformFormatManager();
-    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
-    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels <= 0)
-        return nullptr;
-
-    constexpr int samplesPerBucket = 256;
-    const auto totalSamples = static_cast<int>(juce::jmin<juce::int64>(reader->lengthInSamples,
-                                                                       static_cast<juce::int64>(std::numeric_limits<int>::max())));
-    const auto numChannels = static_cast<int>(reader->numChannels);
-    const auto numBuckets = (totalSamples + samplesPerBucket - 1) / samplesPerBucket;
-
-    AudioPeaks peaks;
-    peaks.samplesPerBucket = samplesPerBucket;
-    peaks.minVals.assign(static_cast<size_t>(numBuckets), 0.0f);
-    peaks.maxVals.assign(static_cast<size_t>(numBuckets), 0.0f);
-
-    constexpr int chunkSize = 8192;
-    juce::AudioBuffer<float> chunk(numChannels, chunkSize);
-    int samplesProcessed = 0;
-
-    while (samplesProcessed < totalSamples)
+    // Not cached: build the peaks on a background thread (reading a long file to compute
+    // the waveform must not block the UI — that was the small freeze on drop). Draw nothing
+    // for this clip until the peaks are ready, then repaint. Enqueue each file only once.
+    if (waveformPending.find(key) == waveformPending.end())
     {
-        const auto toRead = juce::jmin(chunkSize, totalSamples - samplesProcessed);
-        if (! reader->read(&chunk, 0, toRead, samplesProcessed, true, true))
-            break;
-
-        for (int i = 0; i < toRead; ++i)
+        waveformPending.insert(key);
+        juce::Component::SafePointer<ArrangementTimelineComponent> safe(this);
+        waveformPool.addJob([safe, path, key]
         {
-            const auto bucketIdx = (samplesProcessed + i) / samplesPerBucket;
-            if (bucketIdx >= numBuckets)
-                break;
+            auto peaks = std::make_shared<AudioPeaks>();
+            bool ok = false;
 
-            float val = 0.0f;
-            for (int ch = 0; ch < numChannels; ++ch)
-                val += chunk.getSample(ch, i);
-            val /= static_cast<float>(numChannels);
+            juce::File file(path);
+            if (file.existsAsFile())
+            {
+                auto& fm = getSharedWaveformFormatManager();
+                std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+                if (reader != nullptr && reader->lengthInSamples > 0 && reader->numChannels > 0)
+                {
+                    constexpr int samplesPerBucket = 256;
+                    const auto totalSamples = static_cast<int>(juce::jmin<juce::int64>(reader->lengthInSamples,
+                                                                                       static_cast<juce::int64>(std::numeric_limits<int>::max())));
+                    const auto numChannels = static_cast<int>(reader->numChannels);
+                    const auto numBuckets = (totalSamples + samplesPerBucket - 1) / samplesPerBucket;
 
-            auto& mn = peaks.minVals[static_cast<size_t>(bucketIdx)];
-            auto& mx = peaks.maxVals[static_cast<size_t>(bucketIdx)];
-            mn = juce::jmin(mn, val);
-            mx = juce::jmax(mx, val);
-        }
-        samplesProcessed += toRead;
+                    peaks->samplesPerBucket = samplesPerBucket;
+                    peaks->minVals.assign(static_cast<size_t>(numBuckets), 0.0f);
+                    peaks->maxVals.assign(static_cast<size_t>(numBuckets), 0.0f);
+
+                    constexpr int chunkSize = 8192;
+                    juce::AudioBuffer<float> chunk(numChannels, chunkSize);
+                    int samplesProcessed = 0;
+                    while (samplesProcessed < totalSamples)
+                    {
+                        const auto toRead = juce::jmin(chunkSize, totalSamples - samplesProcessed);
+                        if (! reader->read(&chunk, 0, toRead, samplesProcessed, true, true))
+                            break;
+                        for (int i = 0; i < toRead; ++i)
+                        {
+                            const auto bucketIdx = (samplesProcessed + i) / samplesPerBucket;
+                            if (bucketIdx >= numBuckets)
+                                break;
+                            float val = 0.0f;
+                            for (int ch = 0; ch < numChannels; ++ch)
+                                val += chunk.getSample(ch, i);
+                            val /= static_cast<float>(numChannels);
+                            peaks->minVals[static_cast<size_t>(bucketIdx)] = juce::jmin(peaks->minVals[static_cast<size_t>(bucketIdx)], val);
+                            peaks->maxVals[static_cast<size_t>(bucketIdx)] = juce::jmax(peaks->maxVals[static_cast<size_t>(bucketIdx)], val);
+                        }
+                        samplesProcessed += toRead;
+                    }
+                    ok = true;
+                }
+            }
+
+            juce::MessageManager::callAsync([safe, key, peaks, ok]
+            {
+                if (auto* self = safe.getComponent())
+                {
+                    self->waveformPending.erase(key);
+                    if (ok)
+                        self->waveformCache.emplace(key, std::move(*peaks));
+                    self->repaint();
+                }
+            });
+        });
     }
-
-    auto [it, inserted] = waveformCache.emplace(key, std::move(peaks));
-    juce::ignoreUnused(inserted);
-    return &it->second;
+    return nullptr;
 }
 }  // namespace orion

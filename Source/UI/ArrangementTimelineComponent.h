@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -282,6 +283,11 @@ private:
     };
     const AudioPeaks* getOrComputePeaks(const juce::String& path);
     std::map<std::string, AudioPeaks> waveformCache;
+    // Waveform peaks are built on a background thread so dropping a clip stays seamless
+    // (reading a long file to compute peaks must not block the UI). Cache + pending set
+    // are touched only on the message thread; results are posted back via callAsync.
+    std::set<std::string> waveformPending;
+    juce::ThreadPool waveformPool { 1 };
 
     ProjectState& project;
     TransportEngine& transport;
