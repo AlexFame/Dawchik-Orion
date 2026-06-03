@@ -47,9 +47,9 @@ constexpr auto loopHandleHitWidth = 8;
 constexpr auto playheadHitWidth = 8;
 constexpr auto newTrackDropZoneHeight = 64;
 constexpr auto maxExpandedLaneHeight = 240;
-constexpr auto minPixelsPerBeat = 0.04;
+constexpr auto minPixelsPerBeat = 0.12;
 constexpr auto maxPixelsPerBeat = 160.0;
-constexpr auto minTimelineLengthInBeats = 4096.0;
+constexpr auto minTimelineLengthInBeats = 512.0;
 constexpr auto timelinePaddingInBeats = 64.0;
 
 int chooseGridStepBeats(double pixelsPerBeat, int beatsPerBar, double minimumSpacingPixels)
@@ -60,7 +60,7 @@ int chooseGridStepBeats(double pixelsPerBeat, int beatsPerBar, double minimumSpa
         return safeBeatsPerBar;
 
     const auto targetBeats = minimumSpacingPixels / pixelsPerBeat;
-    static constexpr std::array<int, 13> barMultipliers { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 };
+    static constexpr std::array<int, 10> barMultipliers { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 };
 
     for (const auto bars : barMultipliers)
     {
@@ -118,11 +118,17 @@ AudioImportAnalysis analyzeImportedAudioClip(const juce::File& file, double temp
     if (! file.existsAsFile() || tempoBpm <= 0.0)
         return result;
 
-    // Fast (deepAnalysis=false) analysis only — filename + duration heuristics, no audio
-    // decode — so dropping a clip is instant. If that can't resolve key/tempo from the
-    // name, the clip is flagged and a background worker runs the full signal analysis.
-    const auto warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator, false);
-    result.needsSignalAnalysis = (warp.sourceKeyRoot < 0) || (warp.bpmSource != "filename");
+    // Fast pass first (filename + duration heuristics, no audio decode) — gives the
+    // duration instantly. For SHORT files the full signal analysis (chroma key +
+    // autocorrelation tempo) is cheap (~0.1s), so we run it synchronously right here so
+    // loops snap to tempo/key immediately on drop. Only LONG files (full tracks, where
+    // decoding/stretching is expensive) defer to the background worker.
+    auto warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator, false);
+    const bool incomplete = (warp.sourceKeyRoot < 0) || (warp.bpmSource != "filename");
+    const bool shortFile = warp.durationSeconds > 0.0 && warp.durationSeconds <= 20.0;
+    if (incomplete && shortFile)
+        warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator, true);   // cheap for short clips
+    result.needsSignalAnalysis = incomplete && ! shortFile;   // only long files use the background pass
     result.durationSeconds  = warp.durationSeconds;
     result.sourceBpm        = warp.sourceBpm;
     result.detectedBars     = warp.detectedBars;
