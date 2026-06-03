@@ -27,6 +27,9 @@ public:
     std::function<void(int)> onTrackHeaderDoubleClick;
     std::function<void(int)> onTrackHeaderRightClick;
     std::function<void()> onTogglePlayback;
+    // Fired when the playhead is moved by clicking/scrubbing the ruler, so the host can
+    // re-sync the audio engine to the new position (jump even while playing).
+    std::function<void()> onTransportSeek;
     // Returns the current 0..1 output level for a track (for the header meter).
     std::function<float(int)> onRequestTrackLevel;
     // Returns the current 0..1 left/right output levels for a track (stereo meter).

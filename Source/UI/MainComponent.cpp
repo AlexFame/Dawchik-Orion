@@ -78,6 +78,15 @@ juce::String formatTransportPosition(double playheadBeat, int numerator)
         + juce::String(tick).paddedLeft('0', 2);
 }
 
+// Playhead position as real elapsed time "M:SS.t" (minutes : seconds . tenths).
+juce::String formatTransportTime(double playheadBeat, double bpm)
+{
+    const auto seconds = bpm > 0.0 ? juce::jmax(0.0, playheadBeat) * 60.0 / bpm : 0.0;
+    const auto mins = static_cast<int>(seconds) / 60;
+    const auto secs = seconds - mins * 60.0;
+    return juce::String(mins) + ":" + juce::String(secs, 1).paddedLeft('0', 4);
+}
+
 class TransportButtonLookAndFeel final : public juce::LookAndFeel_V4
 {
 public:
@@ -1463,6 +1472,13 @@ MainComponent::MainComponent()
         else
             toggleTransportFromUi();
     };
+    arrangementTimeline.onTransportSeek = [this]()
+    {
+        // Jump the audio engine to the new playhead position (works while playing too).
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->syncToTransportPosition();
+        updateTransportLabels();
+    };
     midiEditorOverlay.onScaleLockChanged = [this](bool enabled)
     {
         projectState.setScaleLockEnabled(enabled);
@@ -2558,7 +2574,7 @@ void MainComponent::updateTransportLabels()
     TransportBarState transportState;
     transportState.tempoBpm = projectState.getTempoBpm();
     transportState.keyText = formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor());
-    transportState.positionText = formatTransportPosition(transportEngine.getPlayheadBeat(), projectState.getNumerator());
+    transportState.positionText = formatTransportTime(transportEngine.getPlayheadBeat(), projectState.getTempoBpm());
     transportState.playing = transportEngine.isPlaying() || transportEngine.isCountInActive();
     transportState.recording = transportEngine.isRecordArmed();
     transportState.loop = transportEngine.isLoopEnabled();

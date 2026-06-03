@@ -215,7 +215,7 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.setColour(theme::text::tertiary.withAlpha(0.62f));
     g.setFont(juce::FontOptions(15.0f, juce::Font::plain));
     g.drawText("KEY", keyValue, juce::Justification::centredTop);
-    g.drawText("POSITION", positionValue, juce::Justification::centredTop);
+    g.drawText("TIME", positionValue, juce::Justification::centredTop);
 
     if (state.scanVisible)
     {

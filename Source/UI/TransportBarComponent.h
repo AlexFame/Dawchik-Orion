@@ -10,7 +10,7 @@ struct TransportBarState
 {
     double tempoBpm { 126.0 };
     juce::String keyText { "Cm" };
-    juce::String positionText { "001.01.01" };
+    juce::String positionText { "0:00.0" };
     bool playing { false };
     bool recording { false };
     bool loop { false };

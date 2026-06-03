@@ -1084,6 +1084,18 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
+    // Click anywhere on the ruler (the bar-number strip / empty loop lane) jumps the
+    // playhead to that position and starts a scrub-drag — so you can move to any point.
+    if (rulerArea.contains(event.getPosition()) && event.getPosition().x >= gridArea.getX())
+    {
+        playheadDragState.active = true;
+        transport.setPlayheadBeat(juce::jmax(0.0, snapBeatValue(xToBeatPosition(event.getPosition().x))));
+        if (onTransportSeek)
+            onTransportSeek();
+        repaint();
+        return;
+    }
+
     const auto trackHeaderHit = hitTestTrackHeader(event.getPosition());
     if (trackHeaderHit.has_value())
     {
@@ -1257,7 +1269,9 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 
     if (playheadDragState.active)
     {
-        transport.setPlayheadBeat(snapBeatValue(xToBeatPosition(event.getPosition().x)));
+        transport.setPlayheadBeat(juce::jmax(0.0, snapBeatValue(xToBeatPosition(event.getPosition().x))));
+        if (onTransportSeek)
+            onTransportSeek();
         repaint();
         return;
     }
