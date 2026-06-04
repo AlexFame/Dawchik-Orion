@@ -1402,26 +1402,71 @@ MainComponent::MainComponent()
     addTrackDialog.onCreate = [this](const AddTrackDialogComponent::Result& r)
     {
         using TT = AddTrackDialogComponent::TrackType;
+        auto& tracks = projectState.getTracks();
+
         if (r.type == TT::folder)
         {
-            // Group/folder tracks aren't implemented yet — coming in the groups feature.
-            statusLabel.setText("Group tracks — coming soon", juce::dontSendNotification);
+            // A folder/group track owns a dedicated aux bus; its children route into that bus,
+            // so the existing bus engine handles group volume / mute / inserts for free.
+            auto& buses = projectState.getBuses();
+            const auto folderName = r.name.isNotEmpty() ? r.name : juce::String("Group");
+            const auto folderColour = r.autoColour ? juce::Colour(0xff3a7bd5) : r.colour;
+
+            BusState bus;
+            bus.name = folderName;
+            bus.colour = folderColour;
+            buses.push_back(bus);
+            const int busIndex = static_cast<int>(buses.size()) - 1;
+            const int gid = projectState.allocateGroupId();
+
+            TrackState folder;
+            folder.name = folderName;
+            folder.isFolder = true;
+            folder.groupId = gid;
+            folder.folderBusIndex = busIndex;
+            folder.colour = folderColour;
+            tracks.push_back(std::move(folder));
+            arrangementTimeline.selectTrack(static_cast<int>(tracks.size()) - 1);
+
+            syncFoldersToBuses();
+            refreshClipInspector();
+            resized();
+            repaint();
             return;
         }
 
         const bool midiLike = (r.type == TT::midi || r.type == TT::sampler);
         auto baseName = r.name.isNotEmpty() ? r.name : juce::String(midiLike ? "MIDI" : "Audio");
+
+        // If a folder (or one of its children) is currently selected, new tracks join that
+        // folder: they're inserted at the end of its child block and routed to its bus.
+        const auto sel = arrangementTimeline.getSelectedTrackIndex();
+        int targetFolder = sel.has_value() ? arrangementTimeline.owningFolderIndex(*sel) : -1;
+
         for (int i = 0; i < r.count; ++i)
         {
-            if (midiLike) arrangementTimeline.addMidiTrack();
-            else          arrangementTimeline.addAudioTrack();
-            auto& tracks = projectState.getTracks();
-            if (tracks.empty()) break;
-            auto& t = tracks.back();
-            t.name = r.count > 1 ? (baseName + " " + juce::String(i + 1)) : baseName;
-            if (! r.autoColour) t.colour = r.colour;
-            t.outputBus = r.outputBus;
+            const auto trackName = r.count > 1 ? (baseName + " " + juce::String(i + 1)) : baseName;
+
+            if (targetFolder >= 0)
+            {
+                const auto at = arrangementTimeline.folderChildInsertIndex(targetFolder);
+                const auto newIdx = arrangementTimeline.insertTrackAt(at, midiLike, trackName, r.colour, r.autoColour);
+                auto& nt = tracks[static_cast<std::size_t>(newIdx)];
+                nt.parentGroup = tracks[static_cast<std::size_t>(targetFolder)].groupId;
+                nt.outputBus   = tracks[static_cast<std::size_t>(targetFolder)].folderBusIndex;
+            }
+            else
+            {
+                if (midiLike) arrangementTimeline.addMidiTrack();
+                else          arrangementTimeline.addAudioTrack();
+                if (tracks.empty()) break;
+                auto& t = tracks.back();
+                t.name = trackName;
+                if (! r.autoColour) t.colour = r.colour;
+                t.outputBus = r.outputBus;
+            }
         }
+        syncFoldersToBuses();
         refreshClipInspector();
         resized();
         repaint();
@@ -1941,6 +1986,31 @@ void MainComponent::paint(juce::Graphics& g)
         g.fillRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f);
         g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.42f : 0.18f));
         g.drawRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f, 1.0f);
+    }
+}
+
+void MainComponent::syncFoldersToBuses()
+{
+    auto& tracks = projectState.getTracks();
+    auto& buses  = projectState.getBuses();
+    for (auto& t : tracks)
+    {
+        if (! t.isFolder)
+            continue;
+        if (t.folderBusIndex >= 0 && t.folderBusIndex < static_cast<int>(buses.size()))
+        {
+            auto& bus = buses[static_cast<std::size_t>(t.folderBusIndex)];
+            // Only write when something actually changed — avoids churning juce::String /
+            // double values that the audio thread reads every single frame.
+            if (bus.name != t.name)           bus.name     = t.name;
+            if (bus.colour != t.colour)       bus.colour   = t.colour;
+            if (bus.volumeDb != t.volumeDb)   bus.volumeDb = t.volumeDb;
+            if (bus.muted != t.muted)         bus.muted    = t.muted;
+        }
+        // Solo on the folder solos all its children (so the group plays in isolation).
+        for (auto& c : tracks)
+            if (c.parentGroup == t.groupId && c.solo != t.solo)
+                c.solo = t.solo;
     }
 }
 
@@ -2484,6 +2554,7 @@ void MainComponent::timerCallback()
 
     updateClipEditorPreviewPlayhead();
 
+    syncFoldersToBuses();
     updateTransportLabels();
     updateTrackMeterLevels();
     maybeStartBackgroundAnalysis();

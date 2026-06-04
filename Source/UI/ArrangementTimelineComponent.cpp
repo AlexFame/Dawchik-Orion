@@ -293,16 +293,13 @@ void ArrangementTimelineComponent::addAudioTrack()
 {
     pushUndoSnapshot();
     const auto index = static_cast<int>(project.getTracks().size());
-    project.getTracks().push_back(TrackState {
-        makeUniqueTrackName("Audio Track"),
-        false,
-        theme::tracks::colourForIndex(index),
-        false,
-        false,
-        false,
-        0.0,
-        {}
-    });
+    {
+        TrackState t;
+        t.name = makeUniqueTrackName("Audio Track");
+        t.isMidiTrack = false;
+        t.colour = theme::tracks::colourForIndex(index);
+        project.getTracks().push_back(std::move(t));
+    }
 
     setSingleSelection(std::nullopt);
     selectedTrackIndex = index;
@@ -315,22 +312,95 @@ void ArrangementTimelineComponent::addMidiTrack()
 {
     pushUndoSnapshot();
     const auto index = static_cast<int>(project.getTracks().size());
-    project.getTracks().push_back(TrackState {
-        makeUniqueTrackName("MIDI Track"),
-        true,
-        theme::tracks::colourForIndex(index),
-        false,
-        false,
-        false,
-        0.0,
-        {}
-    });
+    {
+        TrackState t;
+        t.name = makeUniqueTrackName("MIDI Track");
+        t.isMidiTrack = true;
+        t.colour = theme::tracks::colourForIndex(index);
+        project.getTracks().push_back(std::move(t));
+    }
 
     setSingleSelection(std::nullopt);
     // Auto-select the freshly created track so subsequent actions (double-click on a
     // browser sample, etc.) target it instead of creating yet another track.
     selectedTrackIndex = index;
     notifyClipSelectionChanged();
+    clampScrollOffsets();
+    repaint();
+}
+
+int ArrangementTimelineComponent::insertTrackAt(int atIndex, bool isMidi, const juce::String& name, juce::Colour colour, bool autoColour)
+{
+    pushUndoSnapshot();
+    auto& tracks = project.getTracks();
+    atIndex = juce::jlimit(0, static_cast<int>(tracks.size()), atIndex);
+
+    TrackState t;
+    t.name = name.isNotEmpty() ? makeUniqueTrackName(name) : makeUniqueTrackName(isMidi ? "MIDI Track" : "Audio Track");
+    t.isMidiTrack = isMidi;
+    t.colour = autoColour ? theme::tracks::colourForIndex(atIndex) : colour;
+    tracks.insert(tracks.begin() + atIndex, std::move(t));
+
+    // Structural change shifts indices; custom lane heights keyed by index would point at
+    // the wrong track, so drop them (they revert to default height — acceptable & rare).
+    customTrackHeights.clear();
+
+    setSingleSelection(std::nullopt);
+    selectedTrackIndex = atIndex;
+    notifyClipSelectionChanged();
+    clampScrollOffsets();
+    repaint();
+    return atIndex;
+}
+
+int ArrangementTimelineComponent::folderChildInsertIndex(int folderIndex) const noexcept
+{
+    const auto& tracks = project.getTracks();
+    if (folderIndex < 0 || folderIndex >= static_cast<int>(tracks.size()) || ! tracks[static_cast<std::size_t>(folderIndex)].isFolder)
+        return folderIndex + 1;
+    const auto gid = tracks[static_cast<std::size_t>(folderIndex)].groupId;
+    int i = folderIndex + 1;
+    while (i < static_cast<int>(tracks.size()) && tracks[static_cast<std::size_t>(i)].parentGroup == gid)
+        ++i;
+    return i;
+}
+
+int ArrangementTimelineComponent::owningFolderIndex(int trackIndex) const noexcept
+{
+    const auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return -1;
+    const auto& t = tracks[static_cast<std::size_t>(trackIndex)];
+    if (t.isFolder)
+        return trackIndex;
+    if (t.parentGroup < 0)
+        return -1;
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        if (tracks[static_cast<std::size_t>(i)].isFolder && tracks[static_cast<std::size_t>(i)].groupId == t.parentGroup)
+            return i;
+    return -1;
+}
+
+bool ArrangementTimelineComponent::isTrackHidden(int trackIndex) const noexcept
+{
+    const auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return false;
+    const auto& t = tracks[static_cast<std::size_t>(trackIndex)];
+    if (t.parentGroup < 0)
+        return false;
+    for (const auto& f : tracks)
+        if (f.isFolder && f.groupId == t.parentGroup)
+            return f.folderCollapsed;
+    return false;
+}
+
+void ArrangementTimelineComponent::toggleFolderCollapsed(int folderIndex)
+{
+    auto& tracks = project.getTracks();
+    if (folderIndex < 0 || folderIndex >= static_cast<int>(tracks.size()) || ! tracks[static_cast<std::size_t>(folderIndex)].isFolder)
+        return;
+    tracks[static_cast<std::size_t>(folderIndex)].folderCollapsed = ! tracks[static_cast<std::size_t>(folderIndex)].folderCollapsed;
     clampScrollOffsets();
     repaint();
 }
@@ -479,6 +549,40 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         // Border brightens with the signal so it's obvious which track is sounding.
         g.setColour(trackColour.withAlpha(isAudible ? juce::jlimit(0.72f, 1.0f, 0.72f + trackLevel * 0.6f) : 0.72f));
         g.drawRoundedRectangle(cardBounds.reduced(1.0f), 14.0f, isAudible ? 1.6f + trackLevel * 1.4f : 1.6f);
+
+        // Folder collapse triangle (▾ open / ▸ collapsed) + a coloured spine down children.
+        if (tracks[trackArrayIndex].isFolder && ! layout.collapseTriangle.isEmpty())
+        {
+            const auto tri = layout.collapseTriangle.toFloat().reduced(2.0f);
+            const auto cx = tri.getCentreX(), cy = tri.getCentreY();
+            const auto s = juce::jmin(tri.getWidth(), tri.getHeight()) * 0.5f;
+            juce::Path p;
+            if (tracks[trackArrayIndex].folderCollapsed)
+            {
+                p.startNewSubPath(cx - s * 0.5f, cy - s);
+                p.lineTo(cx + s * 0.7f, cy);
+                p.lineTo(cx - s * 0.5f, cy + s);
+            }
+            else
+            {
+                p.startNewSubPath(cx - s, cy - s * 0.5f);
+                p.lineTo(cx + s, cy - s * 0.5f);
+                p.lineTo(cx, cy + s * 0.7f);
+            }
+            p.closeSubPath();
+            g.setColour(trackColour.withAlpha(0.95f));
+            g.fillPath(p);
+        }
+        else if (tracks[trackArrayIndex].parentGroup >= 0)
+        {
+            // Coloured spine on the left edge of a child card, tinted with the folder's colour.
+            juce::Colour spine = trackColour;
+            for (const auto& f : tracks)
+                if (f.isFolder && f.groupId == tracks[trackArrayIndex].parentGroup) { spine = f.colour; break; }
+            auto sp = layout.card.toFloat();
+            g.setColour(spine.withAlpha(0.75f));
+            g.fillRoundedRectangle(sp.getX() - 6.0f, sp.getY() + 2.0f, 3.0f, sp.getHeight() - 4.0f, 1.5f);
+        }
 
         g.setColour(textColour.withAlpha(0.94f));
         g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
@@ -1110,6 +1214,23 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     const auto trackHeaderHit = hitTestTrackHeader(event.getPosition());
     if (trackHeaderHit.has_value())
     {
+        // Folder collapse triangle: toggle show/hide of the folder's children.
+        {
+            const auto idx = trackHeaderHit->trackIndex;
+            if (idx >= 0 && idx < static_cast<int>(project.getTracks().size())
+                && project.getTracks()[static_cast<std::size_t>(idx)].isFolder)
+            {
+                const auto tri = computeHeaderLayout(idx).collapseTriangle;
+                if (! tri.isEmpty() && tri.expanded(4, 4).contains(event.getPosition()))
+                {
+                    toggleFolderCollapsed(idx);
+                    selectedTrackIndex = idx;
+                    notifyClipSelectionChanged();
+                    return;
+                }
+            }
+        }
+
         // Right-click anywhere on the header body (not on a control) opens the
         // track context menu (used for loading / managing VST instruments).
         if (event.mods.isPopupMenu() && trackHeaderHit->control == TrackHeaderControl::none)
@@ -2053,15 +2174,25 @@ ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::compute
     // the track rather than looking shorter.
     layout.card = headerArea.reduced(8, 2);
 
+    // Children of a folder are indented to the right so the grouping reads visually.
+    const auto& tracks = project.getTracks();
+    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
+        && tracks[static_cast<std::size_t>(trackIndex)].parentGroup >= 0)
+        layout.card.removeFromLeft(folderChildIndentPx);
+
     // Content is anchored to the top of the card with consistent gaps, so it looks
     // identical regardless of how tall the track lane is. A thin vertical level meter
     // runs down the right edge (space-efficient on the default 78px lane).
     auto inner = layout.card.reduced(13, 6);
+    const bool isFolderTrack = trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
+                            && tracks[static_cast<std::size_t>(trackIndex)].isFolder;
 
     layout.meter = inner.removeFromRight(9);
     inner.removeFromRight(10);
 
     layout.title = inner.removeFromTop(18);
+    if (isFolderTrack)
+        layout.collapseTriangle = layout.title.removeFromLeft(folderTriangleGutterPx);
     inner.removeFromTop(4);
 
     constexpr int buttonSize = 18;
@@ -2380,16 +2511,13 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         if (trackName.isEmpty())
             trackName = clipName.isNotEmpty() ? clipName : juce::String("Audio Track");
         const auto trackColour = theme::tracks::colourForIndex(trackCountBeforeDrop);
-        tracks.push_back(TrackState {
-            trackName,
-            false,
-            trackColour,
-            false,
-            false,
-            false,
-            0.0,
-            {}
-        });
+        {
+            TrackState t;
+            t.name = trackName;
+            t.isMidiTrack = false;
+            t.colour = trackColour;
+            tracks.push_back(std::move(t));
+        }
         targetTrackIndex = static_cast<int>(tracks.size()) - 1;
     }
 
@@ -2525,6 +2653,11 @@ double ArrangementTimelineComponent::getTimelineEndBeats() const noexcept
 
 int ArrangementTimelineComponent::getLaneHeightForTrack(int trackIndex) const noexcept
 {
+    // Children of a collapsed folder are hidden: zero height removes them from every layout
+    // calculation (lane bounds, total height, hit-testing) without special-casing each call.
+    if (isTrackHidden(trackIndex))
+        return 0;
+
     const auto defaultHeight = juce::jlimit(
         minimumLaneHeight,
         maximumLaneHeight,

@@ -110,6 +110,19 @@ struct TrackState
 {
     juce::String name;
     bool isMidiTrack { false };
+
+    // --- Group / folder tracks -------------------------------------------------------
+    // A folder track has isFolder=true, a unique groupId (>=0), and an associated audio
+    // bus (folderBusIndex) into which all its children route. Child tracks reference the
+    // folder via parentGroup (== folder.groupId). Children are kept contiguous, directly
+    // below their folder. The folder's fader/mute/solo map onto its bus + children.
+    bool isFolder { false };
+    bool folderCollapsed { false };
+    int  groupId { -1 };          // folders: own stable id; otherwise -1
+    int  parentGroup { -1 };      // children: their folder's groupId; otherwise -1
+    int  folderBusIndex { -1 };   // folders: index into buses for the group's audio bus
+    // ---------------------------------------------------------------------------------
+
     juce::Colour colour { juce::Colour(0xffe8401f) };
     bool muted { false };
     bool solo { false };
@@ -217,6 +230,10 @@ public:
     const std::vector<TrackState::InsertFx>& getMasterInserts() const noexcept { return masterInserts; }
     std::vector<TrackState::InsertFx>& getMasterInserts() noexcept { return masterInserts; }
 
+    // Allocate a fresh, never-reused group id for a new folder track.
+    int allocateGroupId() noexcept { return nextGroupId++; }
+    void noteUsedGroupId(int id) noexcept { if (id >= nextGroupId) nextGroupId = id + 1; }
+
 private:
     double tempoBpm { 126.0 };
     int timeSigNumerator { 4 };
@@ -232,6 +249,7 @@ private:
     std::vector<TrackState> tracks;
     std::vector<BusState> buses;
     std::vector<TrackState::InsertFx> masterInserts;
+    int nextGroupId { 0 };   // monotonic allocator for folder groupIds
 
     // Per-track output routing: -1 = master (default), >=0 = aux bus index.
     // Stored on TrackState; this comment documents the convention.

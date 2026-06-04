@@ -341,6 +341,10 @@ private:
     // Attaches/detaches the input callback so an armed audio track shows live input
     // level (monitoring) even before recording starts.
     void updateInputMonitoring();
+    // Mirror each folder track's volume/mute onto its group bus (one-way), and propagate
+    // the folder's solo state down to its children, so the timeline folder controls drive
+    // the whole group via the existing bus engine.
+    void syncFoldersToBuses();
     juce::File getAudioRecordingDirectory() const;
     int browserPanelWidth { 300 };
     int exportSampleRate { 44100 };

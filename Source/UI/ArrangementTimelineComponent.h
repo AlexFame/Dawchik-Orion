@@ -70,6 +70,18 @@ public:
     bool redo();
     void addAudioTrack();
     void addMidiTrack();
+    // --- Group / folder tracks ---
+    // Inserts a track at a specific index (used to place children inside a folder block).
+    // Returns the index of the inserted track. Clears custom lane heights to keep them in sync.
+    int  insertTrackAt(int atIndex, bool isMidi, const juce::String& name, juce::Colour colour, bool autoColour = false);
+    // Index just past a folder's contiguous child block (where the next child should go).
+    int  folderChildInsertIndex(int folderIndex) const noexcept;
+    // The folder that owns trackIndex (if it's a folder, itself; if a child, its folder), else -1.
+    int  owningFolderIndex(int trackIndex) const noexcept;
+    // Toggle a folder's collapsed state (hides/shows its children).
+    void toggleFolderCollapsed(int folderIndex);
+    // True if the track is a child of a currently-collapsed folder (hidden from the timeline).
+    bool isTrackHidden(int trackIndex) const noexcept;
     // Clears selection, hover and undo/redo history. Call after a project is
     // loaded so stale indices and snapshots from the previous project are dropped.
     void resetForNewProject();
@@ -221,8 +233,12 @@ private:
         juce::Rectangle<int> slider;
         juce::Rectangle<int> volumeValue;
         juce::Rectangle<int> meter;
+        juce::Rectangle<int> collapseTriangle;   // folders only (empty otherwise)
     };
     HeaderLayout computeHeaderLayout(int trackIndex) const noexcept;
+
+    static constexpr int folderChildIndentPx     = 16;   // child header card right-shift
+    static constexpr int folderTriangleGutterPx  = 20;   // folder collapse-triangle gutter
 
     void timerCallback() override;
     float beatToX(double beat, juce::Rectangle<int> laneArea) const noexcept;

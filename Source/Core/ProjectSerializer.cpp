@@ -98,6 +98,11 @@ juce::var trackStateToVar(const orion::TrackState& track)
     auto* object = new juce::DynamicObject();
     object->setProperty("name", track.name);
     object->setProperty("isMidiTrack", track.isMidiTrack);
+    object->setProperty("isFolder", track.isFolder);
+    object->setProperty("folderCollapsed", track.folderCollapsed);
+    object->setProperty("groupId", track.groupId);
+    object->setProperty("parentGroup", track.parentGroup);
+    object->setProperty("folderBusIndex", track.folderBusIndex);
     object->setProperty("colour", track.colour.toString());
     object->setProperty("muted", track.muted);
     object->setProperty("solo", track.solo);
@@ -258,6 +263,11 @@ orion::TrackState trackStateFromVar(const juce::var& value)
 
     track.name                        = getString(*obj, "name");
     track.isMidiTrack                 = getBool(*obj, "isMidiTrack", track.isMidiTrack);
+    track.isFolder                    = getBool(*obj, "isFolder", track.isFolder);
+    track.folderCollapsed             = getBool(*obj, "folderCollapsed", track.folderCollapsed);
+    track.groupId                     = getInt(*obj, "groupId", track.groupId);
+    track.parentGroup                 = getInt(*obj, "parentGroup", track.parentGroup);
+    track.folderBusIndex              = getInt(*obj, "folderBusIndex", track.folderBusIndex);
     track.colour                      = getColour(*obj, "colour", track.colour);
     track.muted                       = getBool(*obj, "muted", track.muted);
     track.solo                        = getBool(*obj, "solo", track.solo);
@@ -439,6 +449,10 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
         projectState.clearLoopRange();
 
     projectState.getTracks() = std::move(newTracks);
+    // Restore the group-id allocator so new folders don't collide with loaded ones.
+    for (const auto& t : projectState.getTracks())
+        if (t.isFolder && t.groupId >= 0)
+            projectState.noteUsedGroupId(t.groupId);
 
     std::vector<orion::BusState> newBuses;
     if (auto* buses = root->getProperty("buses").getArray())

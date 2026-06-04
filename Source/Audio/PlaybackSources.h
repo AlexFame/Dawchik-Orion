@@ -617,11 +617,22 @@ public:
                 s->out.sampleRate = original->sampleRate;
                 s->out.buffer.setSize(s->channels, targetSamples);
                 s->out.buffer.clear();
+                // Pre-fill the ENTIRE loop while stopped (loops are short), so the first Play
+                // never reads samples the producer is still writing — that race was the crackle.
+                s->requestedSamples.store(targetSamples, std::memory_order_relaxed);
                 {
                     const juce::ScopedLock sl(warpStreamLock);
                     warpStreams[key] = std::move(s);
                 }
             }
+
+        // Make sure every existing stream is also targeted for a full fill (e.g. created
+        // before this clip's request) so nothing is left half-stretched at Play time.
+        {
+            const juce::ScopedLock sl(warpStreamLock);
+            for (auto& kv : warpStreams)
+                kv.second->requestedSamples.store(kv.second->targetSamples, std::memory_order_relaxed);
+        }
 
         startWarpProducer();
         warpProducerWake.signal();
@@ -647,6 +658,13 @@ public:
             s->requestedSamples.store(neededOut, std::memory_order_relaxed);
             warpProducerWake.signal();
         }
+        // Only hand back the buffer once the producer has actually written past what this
+        // block needs (acquire pairs with the producer's release). If it's still catching up,
+        // return nullptr so the caller falls back / skips — a brief silence beats reading
+        // half-written samples (which is what crackled). With full pre-fill while stopped this
+        // never trips during normal playback.
+        if (s->producedSamples.load(std::memory_order_acquire) < neededOut)
+            return nullptr;
         return &s->out;
     }
 
@@ -761,6 +779,11 @@ private:
                                bool wrapToProjectEnd,
                                bool isRealtime)
     {
+        // Flush-to-zero: stretched/reverb tails produce denormal floats which are ~100x
+        // slower to process on x86. Without this, routing through an extra bus buffer (e.g.
+        // group/folder tracks) can spike CPU and crackle. Standard in every DAW.
+        juce::ScopedNoDenormals noDenormals;
+
         const auto beatsPerSecond = project.getTempoBpm() / 60.0;
         if (beatsPerSecond <= 0.0 || renderSampleRate <= 0.0 || numSamples <= 0)
             return;
@@ -1054,9 +1077,11 @@ private:
                 // place. Tracks with no inserts/sends are untouched (byte-identical).
                 trackFxScratch.setSize(meterChannels, numSamples, false, false, true);
                 for (int ch = 0; ch < meterChannels; ++ch)
-                    for (int s = 0; s < numSamples; ++s)
-                        trackFxScratch.setSample(ch, s, targetBuffer.getSample(ch, startSample + s)
-                                                        - trackMeterBefore.getSample(ch, s));
+                {
+                    // scratch = (targetBuffer slice) − before, via vectorised block ops.
+                    trackFxScratch.copyFrom(ch, 0, targetBuffer, ch, startSample, numSamples);
+                    trackFxScratch.addFrom(ch, 0, trackMeterBefore, ch, 0, numSamples, -1.0f);
+                }
 
                 if (hasInserts)
                     processTrackInserts(trackIndex, trackFxScratch);
@@ -1087,16 +1112,18 @@ private:
                     const auto bc = juce::jmin(meterChannels, outBuf.getNumChannels());
                     for (int ch = 0; ch < bc; ++ch)
                         outBuf.addFrom(ch, 0, trackFxScratch, ch, 0, numSamples, 1.0f);
+                    // Restore the master to its pre-track state (block copy).
                     for (int ch = 0; ch < meterChannels; ++ch)
-                        for (int s = 0; s < numSamples; ++s)
-                            targetBuffer.setSample(ch, startSample + s, trackMeterBefore.getSample(ch, s));
+                        targetBuffer.copyFrom(ch, startSample, trackMeterBefore, ch, 0, numSamples);
                 }
                 else
                 {
+                    // master = before + processed contribution (block ops).
                     for (int ch = 0; ch < meterChannels; ++ch)
-                        for (int s = 0; s < numSamples; ++s)
-                            targetBuffer.setSample(ch, startSample + s,
-                                                   trackMeterBefore.getSample(ch, s) + trackFxScratch.getSample(ch, s));
+                    {
+                        targetBuffer.copyFrom(ch, startSample, trackMeterBefore, ch, 0, numSamples);
+                        targetBuffer.addFrom(ch, startSample, trackFxScratch, ch, 0, numSamples, 1.0f);
+                    }
                 }
 
                 if (isRealtime)
@@ -1685,6 +1712,7 @@ public:
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
     {
+        juce::ScopedNoDenormals noDenormals;   // flush denormals across the whole render chain
         downstream.getNextAudioBlock(info);
 
         if (info.buffer == nullptr || info.numSamples <= 0)
