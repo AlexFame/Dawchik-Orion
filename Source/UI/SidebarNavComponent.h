@@ -30,6 +30,9 @@ public:
 
     void setActiveItem(SidebarNavItem item);
 
+    // Bounds of a nav item in this component's coordinates (e.g. to anchor a popup menu).
+    juce::Rectangle<int> getNavItemBounds(SidebarNavItem item) const noexcept { return getItemBounds(item); }
+
     void paint(juce::Graphics& g) override;
     void mouseMove(const juce::MouseEvent& event) override;
     void mouseExit(const juce::MouseEvent& event) override;

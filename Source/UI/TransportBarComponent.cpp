@@ -236,16 +236,19 @@ void TransportBarComponent::resized()
     area.removeFromLeft(24);
     positionCardBounds = area.removeFromLeft(214).withSizeKeepingCentre(176, 44);
 
-    auto rightControls = getLocalBounds().reduced(26, 12).removeFromRight(290);
-    metronomeButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
-    rightControls.removeFromLeft(12);
-    stopButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
-    rightControls.removeFromLeft(12);
-    playButton.setBounds(rightControls.removeFromLeft(66).withSizeKeepingCentre(60, 60));
-    rightControls.removeFromLeft(12);
-    recordButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
-    rightControls.removeFromLeft(12);
-    loopButton.setBounds(rightControls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    // Transport controls are centred in the bar (info on the left, transport in the middle).
+    auto bar = getLocalBounds().reduced(26, 12);
+    constexpr int controlsWidth = 50 + 12 + 50 + 12 + 66 + 12 + 50 + 12 + 50;   // buttons + gaps
+    auto controls = bar.withSizeKeepingCentre(controlsWidth, bar.getHeight());
+    metronomeButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    controls.removeFromLeft(12);
+    stopButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    controls.removeFromLeft(12);
+    playButton.setBounds(controls.removeFromLeft(66).withSizeKeepingCentre(60, 60));
+    controls.removeFromLeft(12);
+    recordButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    controls.removeFromLeft(12);
+    loopButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
 }
 
 void TransportBarComponent::mouseDown(const juce::MouseEvent& event)

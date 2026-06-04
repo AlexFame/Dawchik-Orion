@@ -87,6 +87,75 @@ juce::String formatTransportTime(double playheadBeat, double bpm)
     return juce::String(mins) + ":" + juce::String(secs, 1).paddedLeft('0', 4);
 }
 
+// A modern, rounded popup menu look (dark panel, accent hover) — for the app's own menus
+// so they feel native to the UI instead of the default system-grey list.
+class OrionPopupMenuLookAndFeel final : public juce::LookAndFeel_V4
+{
+public:
+    OrionPopupMenuLookAndFeel()
+    {
+        setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff1b2027));
+        setColour(juce::PopupMenu::textColourId, juce::Colours::white.withAlpha(0.92f));
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xffe8401f));
+        setColour(juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
+    }
+
+    void drawPopupMenuBackgroundWithOptions(juce::Graphics& g, int width, int height,
+                                            const juce::PopupMenu::Options&) override
+    {
+        auto r = juce::Rectangle<float>(0.0f, 0.0f, (float) width, (float) height).reduced(1.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.35f));
+        g.fillRoundedRectangle(r.translated(0.0f, 2.0f), 10.0f);
+        g.setColour(findColour(juce::PopupMenu::backgroundColourId));
+        g.fillRoundedRectangle(r, 10.0f);
+        g.setColour(juce::Colour(0xff2b3640));
+        g.drawRoundedRectangle(r, 10.0f, 1.0f);
+    }
+
+    void getIdealPopupMenuItemSizeWithOptions(const juce::String& text, bool isSeparator,
+                                              int standardMenuItemHeight, int& idealWidth, int& idealHeight,
+                                              const juce::PopupMenu::Options& o) override
+    {
+        juce::LookAndFeel_V4::getIdealPopupMenuItemSizeWithOptions(text, isSeparator, standardMenuItemHeight,
+                                                                   idealWidth, idealHeight, o);
+        if (! isSeparator)
+        {
+            idealHeight = juce::jmax(idealHeight, 32);
+            idealWidth += 28;
+        }
+    }
+
+    void drawPopupMenuItemWithOptions(juce::Graphics& g, const juce::Rectangle<int>& area,
+                                      bool isHighlighted, const juce::PopupMenu::Item& item,
+                                      const juce::PopupMenu::Options& o) override
+    {
+        if (item.isSeparator)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.08f));
+            g.fillRect(area.reduced(10, 0).removeFromTop(1).translated(0, area.getHeight() / 2));
+            return;
+        }
+        auto r = area.reduced(5, 2);
+        if (isHighlighted && item.isEnabled)
+        {
+            g.setColour(findColour(juce::PopupMenu::highlightedBackgroundColourId).withAlpha(0.92f));
+            g.fillRoundedRectangle(r.toFloat(), 6.0f);
+        }
+        g.setColour(item.isEnabled ? (isHighlighted ? findColour(juce::PopupMenu::highlightedTextColourId)
+                                                     : findColour(juce::PopupMenu::textColourId))
+                                   : juce::Colours::white.withAlpha(0.4f));
+        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.drawText(item.text, r.reduced(12, 0), juce::Justification::centredLeft, true);
+        juce::ignoreUnused(o);
+    }
+};
+
+juce::LookAndFeel& orionPopupMenuLookAndFeel()
+{
+    static OrionPopupMenuLookAndFeel lnf;
+    return lnf;
+}
+
 class TransportButtonLookAndFeel final : public juce::LookAndFeel_V4
 {
 public:
@@ -857,9 +926,10 @@ MainComponent::MainComponent()
     // Replaced by the small triangle arrow in the top-left corner.
     browserButton.setVisible(false);
 
+    // Collapse arrow removed — browser show/hide now lives on the FILES sidebar button.
     browserCollapseArrow.setToggleState(browserPanelVisible, juce::dontSendNotification);
     browserCollapseArrow.addListener(this);
-    addAndMakeVisible(browserCollapseArrow);
+    addChildComponent(browserCollapseArrow);   // kept as a hidden listener target, never shown
     recordButton.setClickingTogglesState(true);
     metronomeButton.setToggleState(false, juce::dontSendNotification);
     loopButton.setToggleState(false, juce::dontSendNotification);
@@ -1257,8 +1327,8 @@ MainComponent::MainComponent()
     {
         // Wired to the × button inside the browser header — collapses the panel and
         // lets the playlist expand into the freed horizontal space.
-        browserPanelVisible = false;
-        browserPanel.setVisible(false);
+        browserPanelVisible = false;       // timer slides it closed smoothly
+        startTimerHz(60);
         resized();
         repaint();
     };
@@ -1266,9 +1336,13 @@ MainComponent::MainComponent()
     {
         if (item == SidebarNavItem::files || item == SidebarNavItem::samples)
         {
-            browserPanelVisible = true;
-            browserButton.setToggleState(true, juce::dontSendNotification);
-            browserCollapseArrow.setToggleState(true, juce::dontSendNotification);
+            // FILES now toggles the browser (show/hide) — replaces the collapse arrow.
+            // The timer eases browserAnim toward the new target for a smooth slide.
+            browserPanelVisible = ! browserPanelVisible;
+            browserButton.setToggleState(browserPanelVisible, juce::dontSendNotification);
+            if (browserPanelVisible)
+                browserPanel.setVisible(true);   // reveal immediately so it can slide in
+            startTimerHz(60);
             resized();
             repaint();
             return;
@@ -1276,31 +1350,85 @@ MainComponent::MainComponent()
 
         if (item == SidebarNavItem::vst)
         {
-            showTrackInstrumentMenu(arrangementTimeline.getSelectedTrackIndex().value_or(0));
+            // Open the instrument loader for the selected MIDI track; if there's no suitable
+            // track, create a new MIDI (instrument) track first so VST always does something.
+            auto& tracks = projectState.getTracks();
+            const auto sel = arrangementTimeline.getSelectedTrackIndex();
+            int target = -1;
+            if (sel.has_value() && *sel >= 0 && *sel < static_cast<int>(tracks.size())
+                && tracks[static_cast<std::size_t>(*sel)].isMidiTrack)
+                target = *sel;
+
+            if (target < 0)
+            {
+                arrangementTimeline.addMidiTrack();
+                target = static_cast<int>(projectState.getTracks().size()) - 1;
+                refreshClipInspector();
+                resized();
+                repaint();
+            }
+            showInstrumentPicker(target);
             return;
         }
 
         if (item == SidebarNavItem::add)
         {
-            juce::PopupMenu menu;
-            menu.addItem(1, "Audio Track");
-            menu.addItem(2, "MIDI Track");
-            menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(&sidebarNav),
-                [this](int result)
-                {
-                    if (result == 1)
-                        arrangementTimeline.addAudioTrack();
-                    else if (result == 2)
-                        arrangementTimeline.addMidiTrack();
-                    else
-                        return;
-
-                    refreshClipInspector();
-                    resized();
-                    repaint();
-                });
+            juce::StringArray busNames;
+            for (const auto& b : projectState.getBuses())
+                busNames.add(b.name);
+            addTrackDialog.setBounds(getLocalBounds());
+            addTrackDialog.show(static_cast<int>(projectState.getTracks().size()), busNames);
+            addTrackDialog.toFront(true);
         }
     };
+
+    // Modern instrument picker overlay (replaces the native instrument popup menu).
+    pluginPicker.onPick = [this](const juce::PluginDescription& desc)
+    {
+        loadInstrumentOnTrack(pluginPickerTargetTrack, desc);
+    };
+    pluginPicker.onRescan = [this]()
+    {
+        scanPluginsInteractively([this]()
+        {
+            if (pluginPicker.isVisible())
+                pluginPicker.show("Load Instrument", pluginManager.getInstrumentDescriptions(), pluginManager.isScanning());
+        });
+    };
+    pluginPicker.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
+    addChildComponent(pluginPicker);
+
+    // Modern "Add Track" dialog (replaces the small +/menu).
+    addTrackDialog.onCreate = [this](const AddTrackDialogComponent::Result& r)
+    {
+        using TT = AddTrackDialogComponent::TrackType;
+        if (r.type == TT::folder)
+        {
+            // Group/folder tracks aren't implemented yet — coming in the groups feature.
+            statusLabel.setText("Group tracks — coming soon", juce::dontSendNotification);
+            return;
+        }
+
+        const bool midiLike = (r.type == TT::midi || r.type == TT::sampler);
+        auto baseName = r.name.isNotEmpty() ? r.name : juce::String(midiLike ? "MIDI" : "Audio");
+        for (int i = 0; i < r.count; ++i)
+        {
+            if (midiLike) arrangementTimeline.addMidiTrack();
+            else          arrangementTimeline.addAudioTrack();
+            auto& tracks = projectState.getTracks();
+            if (tracks.empty()) break;
+            auto& t = tracks.back();
+            t.name = r.count > 1 ? (baseName + " " + juce::String(i + 1)) : baseName;
+            if (! r.autoColour) t.colour = r.colour;
+            t.outputBus = r.outputBus;
+        }
+        refreshClipInspector();
+        resized();
+        repaint();
+    };
+    addTrackDialog.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
+    addChildComponent(addTrackDialog);
+
     samplerPanel.onClose = [this]()
     {
         resized();
@@ -1788,8 +1916,8 @@ void MainComponent::paint(juce::Graphics& g)
     workArea.removeFromBottom(bottomStatusBarHeight);
     workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 8);
     juce::Rectangle<int> browserPanelBounds;
-    if (browserPanelVisible)
-        browserPanelBounds = workArea.removeFromLeft(browserPanelWidth);
+    if (browserPanelShown())
+        browserPanelBounds = workArea.removeFromLeft(currentBrowserWidth());
     auto arrangementPanel = workArea;
 
     g.setColour(panelColour);
@@ -1802,11 +1930,11 @@ void MainComponent::paint(juce::Graphics& g)
         g.setColour(panelStroke);
         g.drawRoundedRectangle(panel.toFloat(), 14.0f, 1.0f);
     };
-    if (browserPanelVisible)
+    if (browserPanelShown())
         paintPanel(browserPanelBounds);
     paintPanel(arrangementPanel);
 
-    if (browserPanelVisible)
+    if (browserPanelVisible && browserAnim >= 0.999f)
     {
         const auto resizeHandleBounds = getBrowserResizeHandleBounds();
         g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.18f : 0.08f));
@@ -1814,6 +1942,19 @@ void MainComponent::paint(juce::Graphics& g)
         g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.42f : 0.18f));
         g.drawRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f, 1.0f);
     }
+}
+
+int MainComponent::currentBrowserWidth() const noexcept
+{
+    // Cubic ease-out on the linear progress for a smooth slide.
+    const auto t = juce::jlimit(0.0f, 1.0f, browserAnim);
+    const auto eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+    return static_cast<int>(std::round(browserPanelWidth * eased));
+}
+
+bool MainComponent::browserPanelShown() const noexcept
+{
+    return browserAnim > 0.001f;
 }
 
 void MainComponent::resized()
@@ -1916,8 +2057,11 @@ void MainComponent::resized()
     settingsButton.setBounds(utilityButtons.removeFromLeft(62));
     scanPluginsButton.setBounds({});
 
-    // Matches paint() — minimal margins so the playlist fills the work area.
+    // Matches paint() — minimal margins so the playlist fills the work area. `bounds` was
+    // reduced(8) all round; paint() draws the panels without that top inset, so pull the
+    // content up by 8 to sit flush with the painted panel (no dead band under the transport).
     auto workArea = bounds.withTrimmedTop(2);
+    workArea.setTop(juce::jmax(0, workArea.getY() - 8));
     auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth);
     sidebarNav.setBounds(sidebarBounds);
     sidebarNav.toFront(false);
@@ -1932,13 +2076,13 @@ void MainComponent::resized()
     browserCollapseArrow.toFront(false);
 
     juce::Rectangle<int> browserPanelBounds;
-    if (browserPanelVisible)
-        browserPanelBounds = workArea.removeFromLeft(browserPanelWidth);
+    if (browserPanelShown())
+        browserPanelBounds = workArea.removeFromLeft(currentBrowserWidth());
     auto arrangementPanel = workArea;
 
     auto playlistArea = arrangementPanel;
     playlistArea.removeFromLeft(2);
-    playlistArea.removeFromRight(8);
+    playlistArea.removeFromRight(2);
     playlistArea.removeFromTop(2);
 
     const auto samplerOpen = samplerPanel.isVisible();
@@ -1951,7 +2095,7 @@ void MainComponent::resized()
 
     arrangementTimeline.setBounds(arrangementArea);
 
-    if (browserPanelVisible)
+    if (browserPanelShown())
     {
         auto browserInner = browserPanelBounds.reduced(16);
         browserPanel.setBounds(browserInner);
@@ -1989,6 +2133,14 @@ void MainComponent::resized()
     // is open it must stay on top of them, otherwise they overlap and clip it.
     if (mixerPanel.isVisible())
         mixerPanel.toFront(false);
+
+    pluginPicker.setBounds(getLocalBounds());
+    if (pluginPicker.isVisible())
+        pluginPicker.toFront(false);
+
+    addTrackDialog.setBounds(getLocalBounds());
+    if (addTrackDialog.isVisible())
+        addTrackDialog.toFront(false);
 }
 
 void MainComponent::mouseMove(const juce::MouseEvent& event)
@@ -2315,6 +2467,21 @@ void MainComponent::updateTrackMeterLevels()
 
 void MainComponent::timerCallback()
 {
+    // Smoothly slide the browser panel open/closed.
+    {
+        const float target = browserPanelVisible ? 1.0f : 0.0f;
+        if (std::abs(browserAnim - target) > 0.001f)
+        {
+            const float step = 0.08f;   // matches the Add Track dialog's open speed
+            browserAnim += (target - browserAnim > 0.0f ? 1.0f : -1.0f) * step;
+            browserAnim = juce::jlimit(0.0f, 1.0f, browserAnim);
+            if (std::abs(browserAnim - target) <= step)
+                browserAnim = target;
+            resized();
+            repaint();
+        }
+    }
+
     updateClipEditorPreviewPlayhead();
 
     updateTransportLabels();
@@ -2525,7 +2692,9 @@ void MainComponent::buttonClicked(juce::Button* button)
         browserPanelVisible = button->getToggleState();
         browserButton.setToggleState(browserPanelVisible, juce::dontSendNotification);
         browserCollapseArrow.setToggleState(browserPanelVisible, juce::dontSendNotification);
-        browserPanel.setVisible(browserPanelVisible);
+        if (browserPanelVisible)
+            browserPanel.setVisible(true);
+        startTimerHz(60);
         resized();
         repaint();
     }
@@ -2761,6 +2930,14 @@ int MainComponent::getCurrentPluginBlockSize() const noexcept
             return device->getCurrentBufferSizeSamples();
 
     return 512;
+}
+
+void MainComponent::showInstrumentPicker(int trackIndex)
+{
+    pluginPickerTargetTrack = trackIndex;
+    pluginPicker.setBounds(getLocalBounds());
+    pluginPicker.show("Load Instrument", pluginManager.getInstrumentDescriptions(), pluginManager.isScanning());
+    pluginPicker.toFront(true);
 }
 
 void MainComponent::showTrackInstrumentMenu(int trackIndex)

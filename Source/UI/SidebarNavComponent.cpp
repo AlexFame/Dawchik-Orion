@@ -18,12 +18,11 @@ namespace orion
 SidebarNavComponent::SidebarNavComponent()
 {
     setWantsKeyboardFocus(false);
+    // SAMPLES/HISTORY/CLOUD hidden for now — SAMPLES duplicated FILES (no dedicated sample
+    // library yet); the others are placeholders. Easy to re-add when they do something real.
     navEntries = {
         { SidebarNavItem::files, "FILES" },
-        { SidebarNavItem::vst, "VST" },
-        { SidebarNavItem::samples, "SAMPLES" },
-        { SidebarNavItem::history, "HISTORY" },
-        { SidebarNavItem::cloud, "CLOUD" }
+        { SidebarNavItem::vst, "VST" }
     };
 }
 

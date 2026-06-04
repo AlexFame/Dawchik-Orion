@@ -76,7 +76,9 @@ target_sources(
         Source/UI/ClipEditorComponent.cpp
         Source/UI/MainComponent.cpp
         Source/UI/MidiEditorOverlayComponent.cpp
+        Source/UI/AddTrackDialogComponent.cpp
         Source/UI/MixerPanelComponent.cpp
+        Source/UI/PluginPickerComponent.cpp
         Source/UI/SelectionInspectorComponent.cpp
         Source/UI/SidebarNavComponent.cpp
         Source/UI/TransportBarComponent.cpp

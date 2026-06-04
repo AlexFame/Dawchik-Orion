@@ -42,6 +42,7 @@ constexpr auto minimumLaneHeight = 42;
 constexpr auto maximumLaneHeight = 176;
 constexpr auto minimumVerticalZoom = 0.54;
 constexpr auto maximumVerticalZoom = 2.26;
+constexpr auto timelineRulerHeight = 30;
 constexpr auto loopLaneHeight = 11;
 constexpr auto loopHandleHitWidth = 8;
 constexpr auto playheadHitWidth = 8;
@@ -75,16 +76,16 @@ int chooseGridStepBeats(double pixelsPerBeat, int beatsPerBar, double minimumSpa
 juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 {
     auto bounds = component.getLocalBounds();
-    bounds.removeFromLeft(18);
-    bounds.removeFromRight(18);
-    bounds.removeFromTop(18);
+    bounds.removeFromLeft(6);
+    bounds.removeFromRight(6);
+    bounds.removeFromTop(4);
     return bounds;
 }
 
 juce::Rectangle<int> getVisibleTrackAreaBounds(const juce::Component& component)
 {
     auto bounds = getTimelineContentBounds(component);
-    bounds.removeFromTop(42);
+    bounds.removeFromTop(timelineRulerHeight);
     return bounds.getIntersection(component.getLocalBounds());
 }
 
@@ -342,7 +343,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.fillAll(timelineBackground);
 
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerArea = bounds.removeFromTop(42);
+    auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto tracksArea = bounds;
     auto gridArea = tracksArea;
     gridArea.removeFromLeft(trackHeaderWidth);
@@ -930,12 +931,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 juce::Rectangle<int> ArrangementTimelineComponent::getToolButtonBounds(int index) const noexcept
 {
     const auto bounds = getTimelineContentBounds(*this);
-    constexpr int w = 30, h = 26, gap = 6, padX = 12, padY = 8;
+    constexpr int w = 28, h = 24, gap = 6, padX = 10, padY = 3;
     return juce::Rectangle<int>(bounds.getX() + padX + index * (w + gap), bounds.getY() + padY, w, h);
 }
 
 void ArrangementTimelineComponent::paintToolPalette(juce::Graphics& g)
 {
+    // Tool palette hidden for now — placement is being reconsidered.
+    juce::ignoreUnused(g);
+    return;
+
     const std::array<const char*, 2> tips { "Select / Move (V)", "Knife / Split (B)" };
     juce::ignoreUnused(tips);
     for (int i = 0; i < 2; ++i)
@@ -993,15 +998,15 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     if (volumeEditorTrackIndex.has_value() && ! trackVolumeInlineEditor.getBounds().contains(event.getPosition()))
         commitTrackVolumeEditor(true);
 
-    // Tool-palette buttons (top-left corner) take priority over everything else.
-    if (getToolButtonBounds(0).contains(event.getPosition()))
+    // Tool palette hidden for now — click handling disabled.
+    if ((false) && getToolButtonBounds(0).contains(event.getPosition()))
     {
         currentTool = ToolMode::pointer;
         setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint();
         return;
     }
-    if (getToolButtonBounds(1).contains(event.getPosition()))
+    if ((false) && getToolButtonBounds(1).contains(event.getPosition()))
     {
         currentTool = ToolMode::knife;
         repaint();
@@ -1009,7 +1014,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     }
 
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerArea = bounds.removeFromTop(42);
+    auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto tracksArea = bounds;
     auto gridArea = tracksArea;
     gridArea.removeFromLeft(trackHeaderWidth);
@@ -1464,7 +1469,7 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(42);
+    bounds.removeFromTop(timelineRulerHeight);
     const auto tracksArea = bounds;
     const auto headerResizeX = tracksArea.getX() + trackHeaderWidth;
     if (tracksArea.contains(event.getPosition())
@@ -1540,7 +1545,7 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& event)
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerArea = bounds.removeFromTop(42);
+    auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto rulerGridArea = rulerArea;
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto loopLane = rulerGridArea.removeFromTop(loopLaneHeight);
@@ -1973,7 +1978,7 @@ juce::String ArrangementTimelineComponent::makeUniqueTrackName(const juce::Strin
 juce::Rectangle<int> ArrangementTimelineComponent::getAddTrackButtonBounds() const noexcept
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerArea = bounds.removeFromTop(42);
+    auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto headerArea = rulerArea.removeFromLeft(trackHeaderWidth);
     return headerArea.withSizeKeepingCentre(28, 28);
 }
@@ -2044,7 +2049,9 @@ ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::compute
 
     auto lane = getTrackLaneBounds(trackIndex);
     auto headerArea = lane.removeFromLeft(trackHeaderWidth);
-    layout.card = headerArea.reduced(8, 6);
+    // Rounded header card, sized to the full lane height (clips inset ~1-2px) so it matches
+    // the track rather than looking shorter.
+    layout.card = headerArea.reduced(8, 2);
 
     // Content is anchored to the top of the card with consistent gaps, so it looks
     // identical regardless of how tall the track lane is. A thin vertical level meter
@@ -2161,7 +2168,7 @@ void ArrangementTimelineComponent::deleteSelectedTrack()
 void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(42);
+    bounds.removeFromTop(timelineRulerHeight);
 
     const auto visibleTracksArea = getVisibleTrackAreaBounds(*this);
     auto visibleGridArea = visibleTracksArea;
@@ -2299,7 +2306,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         // Not on an existing track. Allow creating a new track anywhere in the empty
         // timeline area below the ruler — not only inside the next-track ghost lane.
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(42); // skip ruler
+        tracksBounds.removeFromTop(timelineRulerHeight); // skip ruler
 
         if (tracksBounds.contains(tracksBounds.getX() + 1, dragSourceDetails.localPosition.y))
         {
@@ -2364,10 +2371,17 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
 
     if (createNewTrack)
     {
-        const auto categoryName = payload->getProperty("category").toString();
+        // Name the track after the dropped sample (not the pack/folder). Strip a leading
+        // "Pack - " prefix so the distinguishing part (e.g. "Armageddon - 140 BPM G# Min")
+        // shows first in the header instead of an identical truncated pack name.
+        juce::String trackName = clipName;
+        if (const auto dash = trackName.indexOf(" - "); dash > 0)
+            trackName = trackName.substring(dash + 3);
+        if (trackName.isEmpty())
+            trackName = clipName.isNotEmpty() ? clipName : juce::String("Audio Track");
         const auto trackColour = theme::tracks::colourForIndex(trackCountBeforeDrop);
         tracks.push_back(TrackState {
-            categoryName + " Track",
+            trackName,
             false,
             trackColour,
             false,
@@ -2578,7 +2592,7 @@ double ArrangementTimelineComponent::xToBeatDelta(int xDelta) const noexcept
 double ArrangementTimelineComponent::xToBeatPosition(int x) const noexcept
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(42);
+    bounds.removeFromTop(timelineRulerHeight);
     bounds.removeFromLeft(trackHeaderWidth);
 
     const auto localX = static_cast<double>(x - bounds.getX());
@@ -2849,7 +2863,7 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
     {
         // Anywhere in the empty timeline area = new-track drop zone.
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(42);
+        tracksBounds.removeFromTop(timelineRulerHeight);
 
         if (tracksBounds.contains(tracksBounds.getX() + 1, position.y))
         {

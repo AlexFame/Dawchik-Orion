@@ -23,7 +23,9 @@
 #include "BrowserPanelComponent.h"
 #include "ClipEditorComponent.h"
 #include "MidiEditorOverlayComponent.h"
+#include "AddTrackDialogComponent.h"
 #include "MixerPanelComponent.h"
+#include "PluginPickerComponent.h"
 #include "SelectionInspectorComponent.h"
 #include "SidebarNavComponent.h"
 #include "TransportBarComponent.h"
@@ -75,6 +77,7 @@ private:
 
     // VST instrument hosting (right-click track header → menu).
     void showTrackInstrumentMenu(int trackIndex);
+    void showInstrumentPicker(int trackIndex);
     void scanPluginsInteractively(std::function<void()> onFinished = {});
     void loadInstrumentOnTrack(int trackIndex, const juce::PluginDescription& description);
     void removeInstrumentFromTrack(int trackIndex);
@@ -149,6 +152,9 @@ private:
     ClipEditorComponent clipEditorPanel;
     SamplerPanelComponent samplerPanel;
     MixerPanelComponent mixerPanel;
+    AddTrackDialogComponent addTrackDialog;
+    PluginPickerComponent pluginPicker;
+    int pluginPickerTargetTrack { 0 };
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
     std::map<std::pair<int, int>, std::unique_ptr<PluginEditorWindow>> insertEditorWindows;
@@ -340,6 +346,10 @@ private:
     int exportSampleRate { 44100 };
     // When false the browser panel is hidden and the playlist expands to fill the window.
     bool browserPanelVisible { true };
+    // Smooth slide-open animation: linear progress 0..1 eased toward browserPanelVisible.
+    float browserAnim { 1.0f };
+    int currentBrowserWidth() const noexcept;   // animated effective width (0 when fully closed)
+    bool browserPanelShown() const noexcept;     // true while any sliver is visible
     bool isResizingBrowserPanel { false };
     int browserResizeStartX { 0 };
     int browserResizeStartWidth { 300 };
