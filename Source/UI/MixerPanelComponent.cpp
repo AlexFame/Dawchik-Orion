@@ -5,16 +5,19 @@
 #include <array>
 #include <cmath>
 
+#include "OrionTheme.h"
+
 namespace
 {
-const auto panelBackground = juce::Colour(0xff121417);
-const auto panelStroke     = juce::Colour(0xff2b3640);
-const auto stripBackground = juce::Colour(0xff1b1e22);
-const auto stripStroke     = juce::Colour(0xff2a2f36);
-const auto slotBackground  = juce::Colour(0xff14171b);
-const auto accentColour    = juce::Colour(0xffe8401f);
-const auto cyan            = juce::Colour(0xff35c9d6);
-const auto mutedText       = juce::Colours::white.withAlpha(0.70f);
+namespace th = orion::theme;
+const auto panelBackground = th::core::deepSpace;
+const auto panelStroke     = th::line::subtle;
+const auto stripBackground = th::surface::primary;
+const auto stripStroke     = th::line::subtle;
+const auto slotBackground  = th::core::deepSpace;
+const auto accentColour    = th::warm::red;
+const auto cyan            = th::cool::turquoise;
+const auto mutedText       = th::text::muted;
 
 constexpr double minGainDb = -60.0;
 constexpr double maxGainDb = 6.0;

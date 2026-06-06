@@ -11,6 +11,7 @@
 
 #include "../Audio/TransportEngine.h"
 #include "../Core/ProjectState.h"
+#include "OrionTheme.h"
 
 namespace orion
 {
@@ -340,7 +341,7 @@ private:
     bool fitTrackLanesToVisibleArea { false };
     std::map<int, int> customTrackHeights;
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
-    juce::Colour browserDropPreviewColour { juce::Colour(0xffe8401f) };
+    juce::Colour browserDropPreviewColour { orion::theme::warm::red };
     bool browserDropCreatesNewTrack { false };
     ToolMode currentTool { ToolMode::pointer };
 

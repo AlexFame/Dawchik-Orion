@@ -1,13 +1,16 @@
 #include "SidebarNavComponent.h"
 
+#include "OrionTheme.h"
+
 namespace
 {
-const auto railBackground = juce::Colour(0xff141414);
-const auto railStroke = juce::Colours::white.withAlpha(0.08f);
-const auto activeColour = juce::Colour(0xffff543d);
-const auto cyanColour = juce::Colour(0xff18e5ef);
-const auto textColour = juce::Colours::white.withAlpha(0.82f);
-const auto mutedText = juce::Colours::white.withAlpha(0.68f);
+namespace th = orion::theme;
+const auto railBackground = th::core::deepSpace;
+const auto railStroke     = th::line::subtle.withAlpha(0.45f);
+const auto activeColour   = th::warm::red;
+const auto cyanColour     = th::cool::cyan;
+const auto textColour     = th::text::secondary;
+const auto mutedText      = th::text::muted;
 constexpr int topPadding = 22;
 constexpr int itemHeight = 72;
 constexpr int itemGap = 10;

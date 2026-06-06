@@ -53,7 +53,7 @@ void BottomStatusBarComponent::paint(juce::Graphics& g)
     auto fill = meter.toFloat();
     fill.setWidth(fill.getWidth() * juce::jlimit(0.0f, 1.0f, state.masterLevel));
     juce::ColourGradient meterGradient(juce::Colour(0xff39d36b), fill.getX(), fill.getCentreY(),
-                                       juce::Colour(0xffe8401f), fill.getRight(), fill.getCentreY(), false);
+                                       orion::theme::warm::red, fill.getRight(), fill.getCentreY(), false);
     meterGradient.addColour(0.72, juce::Colour(0xffe7c93a));
     g.setGradientFill(meterGradient);
     g.fillRect(fill);

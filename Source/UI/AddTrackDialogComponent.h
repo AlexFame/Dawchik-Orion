@@ -5,6 +5,8 @@
 
 #include <functional>
 
+#include "OrionTheme.h"
+
 namespace orion
 {
 // Modern, rounded "Add Track" dialog overlay that fades/zooms in (no background dim).
@@ -66,7 +68,7 @@ private:
     juce::ToggleButton autoColourToggle { "Auto-Color" };
     juce::TextButton cancelButton { "Cancel" };
     juce::TextButton createButton { "Create" };
-    juce::Colour chosenColour { juce::Colour(0xffe8401f) };
+    juce::Colour chosenColour { orion::theme::warm::red };
     juce::StringArray instrumentIds;
 
     float anim { 0.0f };

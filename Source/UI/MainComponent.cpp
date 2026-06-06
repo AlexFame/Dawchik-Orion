@@ -11,22 +11,24 @@
 #include "../Audio/PlaybackSources.h"
 #include "../Audio/WarpEngine.h"
 #include "../Sampler/SamplerEngine.h"
+#include "OrionTheme.h"
 
 namespace
 {
-const auto backgroundColour = juce::Colour(0xff0a0a0b);
-const auto panelColour = juce::Colour(0xff161616);
-const auto accentColour = juce::Colour(0xffe8401f);
-const auto panelStroke = juce::Colour(0xff25313c);
-const auto mutedText = juce::Colours::white.withAlpha(0.64f);
-const auto transportShelfColour = juce::Colour(0xff070b10);
-const auto transportShelfStroke = juce::Colour(0xff263441);
-const auto transportButtonColour = juce::Colour(0xff161017);
-const auto transportButtonText = juce::Colours::white.withAlpha(0.76f);
-const auto transportDarkPanel = juce::Colour(0xff120f16);
-const auto transportSectionFill = juce::Colour(0xff0d1117);
-const auto transportSectionStroke = juce::Colours::white.withAlpha(0.11f);
-const auto recordAccent = juce::Colour(0xffd95050);
+namespace th = orion::theme;
+const auto backgroundColour      = th::core::canvas;
+const auto panelColour           = th::core::studio;
+const auto accentColour          = th::warm::red;
+const auto panelStroke           = th::line::subtle;
+const auto mutedText             = th::text::muted;
+const auto transportShelfColour  = th::core::voidBlack;
+const auto transportShelfStroke  = th::line::subtle;
+const auto transportButtonColour = th::core::studio;
+const auto transportButtonText   = th::text::secondary;
+const auto transportDarkPanel    = th::core::voidBlack;
+const auto transportSectionFill  = th::core::canvas;
+const auto transportSectionStroke = th::line::subtle.withAlpha(0.45f);
+const auto recordAccent          = th::status::error;
 constexpr double previewMaxLengthSeconds = 12.0;
 constexpr int minBrowserPanelWidth = 220;
 constexpr int maxBrowserPanelWidth = 520;
@@ -106,8 +108,8 @@ public:
     {
         setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff1b2027));
         setColour(juce::PopupMenu::textColourId, juce::Colours::white.withAlpha(0.92f));
-        setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xffe8401f));
-        setColour(juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, th::warm::red);
+        setColour(juce::PopupMenu::highlightedTextColourId, th::text::inverse);
     }
 
     void drawPopupMenuBackgroundWithOptions(juce::Graphics& g, int width, int height,

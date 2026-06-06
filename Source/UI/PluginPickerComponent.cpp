@@ -1,15 +1,18 @@
 #include "PluginPickerComponent.h"
 
+#include "OrionTheme.h"
+
 namespace
 {
-const auto panelColour   = juce::Colour(0xff15191f);
-const auto panelStroke   = juce::Colour(0xff2b3640);
-const auto rowFill       = juce::Colour(0xff1b2027);
-const auto rowSelected   = juce::Colour(0xff2f6df0);
-const auto accent        = juce::Colour(0xffe8401f);
-const auto cyan          = juce::Colour(0xff35c9d6);
-const auto textColour    = juce::Colours::white.withAlpha(0.92f);
-const auto mutedText     = juce::Colours::white.withAlpha(0.70f);
+namespace th = orion::theme;
+const auto panelColour   = th::surface::primary;
+const auto panelStroke   = th::line::subtle;
+const auto rowFill       = th::surface::primary;
+const auto rowSelected   = th::cool::blue;
+const auto accent        = th::warm::red;
+const auto cyan          = th::cool::turquoise;
+const auto textColour    = th::text::primary;
+const auto mutedText     = th::text::muted;
 
 constexpr int panelW = 520;
 constexpr int panelH = 560;

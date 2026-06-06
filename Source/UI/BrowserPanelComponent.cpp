@@ -5,14 +5,17 @@
 #include <optional>
 #include <regex>
 
+#include "OrionTheme.h"
+
 namespace
 {
-const auto mutedText = juce::Colours::white.withAlpha(0.72f);
-const auto rowBackground = juce::Colours::white.withAlpha(0.035f);
-const auto rowHover = juce::Colours::white.withAlpha(0.06f);
-const auto rowSelected = juce::Colours::white.withAlpha(0.09f);
-const auto buttonColour = juce::Colour(0xff1b232b);
-const auto buttonOutlineColour = juce::Colours::white.withAlpha(0.18f);
+namespace th = orion::theme;
+const auto mutedText          = th::text::muted;
+const auto rowBackground      = juce::Colours::white.withAlpha(0.035f);
+const auto rowHover           = juce::Colours::white.withAlpha(0.06f);
+const auto rowSelected        = juce::Colours::white.withAlpha(0.09f);
+const auto buttonColour       = th::surface::primary;
+const auto buttonOutlineColour = th::line::normal.withAlpha(0.6f);
 constexpr int rowHeight = 46;
 constexpr int rowGap = 7;
 constexpr int dragThresholdPx = 5;

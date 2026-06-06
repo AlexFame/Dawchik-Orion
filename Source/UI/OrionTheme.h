@@ -79,7 +79,7 @@ static const juce::Colour palette[] {
     cool::violet.withSaturation(0.88f).brighter(0.03f),
     warm::coral.withSaturation(0.90f),
     cool::aqua.withSaturation(0.84f).darker(0.03f),
-    warm::peach.withSaturation(0.86f),
+    warm::peach.withSaturation(0.86f).darker(0.06f),
     cool::indigo.withSaturation(0.86f).brighter(0.02f),
     warm::salmon.withSaturation(0.88f)
 };

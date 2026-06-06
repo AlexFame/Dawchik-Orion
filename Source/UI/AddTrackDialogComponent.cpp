@@ -4,15 +4,18 @@
 
 #include <array>
 
+#include "OrionTheme.h"
+
 namespace
 {
-const auto panelColour = juce::Colour(0xff15191f);
-const auto panelStroke = juce::Colour(0xff2b3640);
-const auto fieldFill   = juce::Colour(0xff0c0e10);
-const auto cardIdle    = juce::Colour(0xff20262f);
-const auto accent      = juce::Colour(0xffe8401f);
-const auto textColour  = juce::Colours::white.withAlpha(0.94f);
-const auto mutedText   = juce::Colours::white.withAlpha(0.68f);
+namespace th = orion::theme;
+const auto panelColour = th::surface::primary;
+const auto panelStroke = th::line::subtle;
+const auto fieldFill   = th::core::canvas;
+const auto cardIdle    = th::surface::elevated;
+const auto accent      = th::warm::red;
+const auto textColour  = th::text::primary;
+const auto mutedText   = th::text::muted;
 
 constexpr int panelW = 540;
 constexpr int panelH = 492;
@@ -25,10 +28,10 @@ constexpr int labelW = 80;
 
 struct TypeInfo { const char* name; const char* sub; juce::uint32 colour; };
 const std::array<TypeInfo, 4> kTypes {{
-    { "Audio",   "Record and edit", 0xffe8401f },
-    { "MIDI",    "Compose and edit", 0xff35c9d6 },
-    { "Sampler", "Drum and sample",  0xfff0a93a },
-    { "Folder",  "Group tracks",     0xff3a7bd5 }
+    { "Audio",   "Record and edit",  th::warm::red.getARGB() },
+    { "MIDI",    "Compose and edit", th::cool::turquoise.getARGB() },
+    { "Sampler", "Drum and sample",  th::warm::amber.getARGB() },
+    { "Folder",  "Group tracks",     th::cool::blue.getARGB() }
 }};
 }  // namespace
 

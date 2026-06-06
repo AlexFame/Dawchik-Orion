@@ -698,7 +698,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 // Gradient anchored to the full bar so a given height is always the same
                 // colour, regardless of how full the bar is.
                 juce::ColourGradient grad(juce::Colour(0xff39d36b), bar.getX(), bar.getBottom(),
-                                          juce::Colour(0xffe8401f), bar.getX(), bar.getY(), false);
+                                          orion::theme::warm::red, bar.getX(), bar.getY(), false);
                 grad.addColour(0.72, juce::Colour(0xffe7c93a));
                 auto fill = bar.removeFromBottom(juce::jmax(bar.getWidth(), bar.getHeight() * level));
                 g.setGradientFill(grad);
@@ -971,7 +971,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                     {
                         g.setColour(juce::Colours::black.withAlpha(0.55f));
                         g.fillEllipse(cx - r - 1.0f, cy - r - 1.0f, (r + 1.0f) * 2.0f, (r + 1.0f) * 2.0f);
-                        g.setColour(juce::Colour(0xffe8401f).brighter(0.4f));
+                        g.setColour(orion::theme::warm::red.brighter(0.4f));
                         g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
                         g.setColour(juce::Colours::white);
                         g.fillEllipse(cx - 1.8f, cy - 1.8f, 3.6f, 3.6f);
@@ -1099,7 +1099,7 @@ void ArrangementTimelineComponent::paintToolPalette(juce::Graphics& g)
         const auto b = getToolButtonBounds(i).toFloat();
         const auto active = (i == 0 && currentTool == ToolMode::pointer)
                          || (i == 1 && currentTool == ToolMode::knife);
-        g.setColour(active ? juce::Colour(0xffe8401f).withAlpha(0.92f) : juce::Colours::black.withAlpha(0.42f));
+        g.setColour(active ? orion::theme::warm::red.withAlpha(0.92f) : juce::Colours::black.withAlpha(0.42f));
         g.fillRoundedRectangle(b, 6.0f);
         g.setColour(juce::Colours::white.withAlpha(active ? 0.85f : 0.16f));
         g.drawRoundedRectangle(b, 6.0f, 1.0f);

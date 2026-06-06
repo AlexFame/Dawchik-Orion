@@ -4,6 +4,8 @@
 
 #include <functional>
 
+#include "OrionTheme.h"
+
 namespace orion
 {
 struct SelectionInspectorModel
@@ -11,7 +13,7 @@ struct SelectionInspectorModel
     juce::String title;
     juce::String subtitle;
     juce::String detail;
-    juce::Colour accent { juce::Colour(0xffe8401f) };
+    juce::Colour accent { theme::warm::red };
     double gainDb { 0.0 };
     bool muted { false };
     bool solo { false };
