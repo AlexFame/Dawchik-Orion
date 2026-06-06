@@ -3,7 +3,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <map>
 #include <set>
+#include <vector>
 
 #include "../Core/ProjectState.h"
 
@@ -37,6 +39,8 @@ public:
     void resized() override;
     bool keyPressed(const juce::KeyPress& key) override;
     bool keyStateChanged(bool isKeyDown) override;
+    bool stepWriteMidiNoteOn(int midiNote, int velocity);
+    bool stepWriteMidiNoteOff(int midiNote);
     void focusLost(FocusChangeType cause) override;
     void mouseMove(const juce::MouseEvent& event) override;
     void mouseExit(const juce::MouseEvent& event) override;
@@ -97,6 +101,8 @@ private:
         int scaleRoot { 0 };
         int scalePatternIndex { 0 };
         double snapSizeInBeats { 0.25 };
+        double stepWriteCursorBeat { 0.0 };
+        double stepWriteStepLengthInBeats { 0.25 };
         bool focusModeEnabled { false };
     };
 
@@ -162,6 +168,7 @@ private:
     int laneIndexToPitch(int laneIndex) const noexcept;
     double xToBeat(double x) const noexcept;
     double snapBeat(double beat) const noexcept;
+    double snapBeatNearest(double beat) const noexcept;
     int pitchToLane(int pitch) const noexcept;
     int getDisplayedLaneCount() const noexcept;
     bool isPitchInScale(int pitch) const noexcept;
@@ -188,7 +195,16 @@ private:
     juce::String getSnapName() const;
     void showScaleMenu();
     void showSnapMenu();
+    void showStepLengthMenu();
     bool updateLiveKeyboardPitches();
+    bool updateStepWriteKeyboardPitches();
+    void commitStepWritePendingChord();
+    void advanceStepWriteCursor(int stepCount);
+    void restStepWrite();
+    void backstepStepWrite();
+    void extendStepWritePreviousNotes();
+    double getSnappedStepWriteCursorBeat() const noexcept;
+    int defaultStepWriteVelocity() const noexcept;
     bool appendSlidePoint(PitchSlide& slide, juce::Point<int> position) const;
     std::optional<PitchSlide> makeSlideAt(juce::Point<int> position) const;
     void smoothSlide(PitchSlide& slide) const;
@@ -198,6 +214,9 @@ private:
     std::optional<int> keyboardPitchForPoint(juce::Point<int> position) const noexcept;
     void setMousePreviewPitch(std::optional<int> pitch);
     void releaseMousePreviewPitch();
+    void releaseLiveKeyboardPitches();
+    void auditionPlacedNote(int pitch, int velocity);
+    void releasePlacedNotePreview();
 
     juce::String trackName;
     juce::String clipName;
@@ -208,6 +227,8 @@ private:
     std::optional<int> selectedSlide;
     std::set<int> liveKeyboardPitches;
     std::optional<int> mousePreviewPitch;
+    std::optional<int> placedNotePreviewPitch;
+    double placedNotePreviewOffMs { 0.0 };
     std::optional<NoteHit> hoverNote;
     std::optional<NoteDragState> noteDragState;
     std::optional<MarqueeState> marqueeState;
@@ -226,6 +247,11 @@ private:
     juce::TextButton quantizeButton;
     juce::TextButton slidePenButton;
     juce::TextButton slideVisibilityButton;
+    juce::TextButton stepWriteButton;
+    juce::TextButton stepLengthButton;
+    juce::TextButton stepRestButton;
+    juce::TextButton stepBackButton;
+    juce::TextButton stepTieButton;
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;
     juce::Label scaleLockLabel;
@@ -238,12 +264,17 @@ private:
     int scaleRoot { 0 };
     int scalePatternIndex { 0 };
     double snapSizeInBeats { 0.25 };
+    double stepWriteCursorBeat { 0.0 };
+    double stepWriteStepLengthInBeats { 0.25 };
     bool focusModeEnabled { false };
     bool scaleLockEnabled { true };  // new notes snap to in-scale pitches when true
+    bool stepWriteEnabled { false };
     bool slidePenEnabled { false };
     SlideVisibilityMode slideVisibilityMode { SlideVisibilityMode::ghost };
     bool hasStoredViewportBeforeFocus { false };
     bool ignoreNextMouseDown { false };
+    std::set<int> stepWriteLivePitches;
+    std::map<int, int> stepWritePendingVelocities;
     std::vector<NoteSnapshot> undoStack;
     std::vector<NoteSnapshot> redoStack;
 };

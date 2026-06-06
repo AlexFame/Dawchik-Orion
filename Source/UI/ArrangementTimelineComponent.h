@@ -27,6 +27,9 @@ public:
     std::function<void(int, int)> onClipSelectionChanged;
     std::function<void(int)> onTrackHeaderDoubleClick;
     std::function<void(int)> onTrackHeaderRightClick;
+    // Fired when the instrument button on a MIDI track header is clicked. The host opens
+    // the plugin editor if an instrument is loaded, or the instrument picker if not.
+    std::function<void(int)> onTrackInstrumentClicked;
     std::function<void()> onTogglePlayback;
     // Fired when the playhead is moved by clicking/scrubbing the ruler, so the host can
     // re-sync the audio engine to the new position (jump even while playing).
@@ -85,6 +88,7 @@ public:
     // Clears selection, hover and undo/redo history. Call after a project is
     // loaded so stale indices and snapshots from the previous project are dropped.
     void resetForNewProject();
+    void setFitTrackLanesToVisibleArea(bool shouldFit);
     // Live waveform for the clip currently being recorded (drawn until the file exists).
     void setLiveRecordingWaveform(int trackIndex, int clipIndex,
                                   std::vector<float> mins, std::vector<float> maxs);
@@ -135,6 +139,7 @@ private:
         mute,
         solo,
         record,
+        instrument,
         inspector,
         volume,
         volumeValue
@@ -230,6 +235,7 @@ private:
         juce::Rectangle<int> muteButton;
         juce::Rectangle<int> soloButton;
         juce::Rectangle<int> recordButton;
+        juce::Rectangle<int> instrumentButton;   // MIDI tracks only (empty otherwise)
         juce::Rectangle<int> slider;
         juce::Rectangle<int> volumeValue;
         juce::Rectangle<int> meter;
@@ -331,6 +337,7 @@ private:
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };
     int trackHeaderWidth { 214 };
+    bool fitTrackLanesToVisibleArea { false };
     std::map<int, int> customTrackHeights;
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
     juce::Colour browserDropPreviewColour { juce::Colour(0xffe8401f) };

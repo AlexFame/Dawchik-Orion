@@ -17,10 +17,10 @@ const auto pianoGridBase = orion::theme::core::deepSpace;
 const auto pianoGridScaleRow = orion::theme::surface::elevated.withAlpha(0.55f);
 const auto pianoGridBlackRow = orion::theme::core::canvas.withAlpha(0.52f);
 constexpr int resizeHandleWidth = 10;
-constexpr double minimumNoteLengthInBeats = 0.25;
+constexpr double minimumNoteLengthInBeats = 0.125;
 constexpr int minimumNoteWidthPx = 4;
 constexpr int marqueeThresholdPx = 4;
-constexpr int noteDragThresholdPx = 4;
+constexpr int noteDragThresholdPx = 2;
 constexpr int slideDrawThresholdPx = 3;
 constexpr float slideHandleRadiusPx = 6.0f;
 constexpr int baseLaneHeightPx = 24;
@@ -35,6 +35,7 @@ constexpr double maximumHorizontalZoom = 6.0;
 constexpr double maximumVerticalZoom = 3.0;
 constexpr double maximumAutoFocusVerticalZoom = 1.45;
 constexpr double minimumSlidePointBeatDistance = 0.02;
+constexpr double placedNoteAuditionMs = 180.0;
 
 struct ScalePattern
 {
@@ -171,6 +172,43 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     slideVisibilityButton.addListener(this);
     addAndMakeVisible(slideVisibilityButton);
 
+    stepWriteButton.setButtonText("Step Write");
+    stepWriteButton.setClickingTogglesState(true);
+    stepWriteButton.setTooltip("Step Write mode: type/play notes one grid step at a time");
+    stepWriteButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    stepWriteButton.setColour(juce::TextButton::buttonOnColourId, theme::warm::red);
+    stepWriteButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    stepWriteButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
+    stepWriteButton.addListener(this);
+    addAndMakeVisible(stepWriteButton);
+
+    stepLengthButton.setTooltip("Step Write length");
+    stepLengthButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    stepLengthButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    stepLengthButton.addListener(this);
+    addAndMakeVisible(stepLengthButton);
+
+    stepRestButton.setButtonText("Rest");
+    stepRestButton.setTooltip("Step Write rest: advance without a note");
+    stepRestButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    stepRestButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    stepRestButton.addListener(this);
+    addAndMakeVisible(stepRestButton);
+
+    stepBackButton.setButtonText("Back");
+    stepBackButton.setTooltip("Step Write backstep");
+    stepBackButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    stepBackButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    stepBackButton.addListener(this);
+    addAndMakeVisible(stepBackButton);
+
+    stepTieButton.setButtonText("Tie");
+    stepTieButton.setTooltip("Step Write tie: extend previous note/chord");
+    stepTieButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    stepTieButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    stepTieButton.addListener(this);
+    addAndMakeVisible(stepTieButton);
+
     scaleLockLabel.setText("Scale Lock", juce::dontSendNotification);
     scaleLockLabel.setColour(juce::Label::textColourId, theme::text::secondary.withAlpha(0.82f));
     scaleLockLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
@@ -208,15 +246,16 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     clipName = clipState.name;
     trackColour = trackState.colour;
     clearSelection();
-    liveKeyboardPitches.clear();
+    releaseLiveKeyboardPitches();
     releaseMousePreviewPitch();
+    releasePlacedNotePreview();
     hoverNote.reset();
     noteDragState.reset();
     marqueeState.reset();
     velocityDragState.reset();
     slideDrawState.reset();
     slideEditState.reset();
-    liveKeyboardPitches.clear();
+    releaseLiveKeyboardPitches();
     undoStack.clear();
     redoStack.clear();
     horizontalZoom = 1.0;
@@ -231,13 +270,19 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     scaleLockEnabled  = initialScaleLock;
     scaleLockToggle.setToggleState(scaleLockEnabled, juce::dontSendNotification);
     snapSizeInBeats = 0.25;
+    stepWriteCursorBeat = 0.0;
+    stepWriteStepLengthInBeats = 0.25;
+    stepWriteEnabled = false;
+    stepWriteLivePitches.clear();
+    stepWritePendingVelocities.clear();
     focusModeEnabled = false;
     slidePenEnabled = false;
     slideVisibilityMode = SlideVisibilityMode::ghost;
     hasStoredViewportBeforeFocus = false;
-    ignoreNextMouseDown = true;
+    ignoreNextMouseDown = false;
     focusToggle.setToggleState(false, juce::dontSendNotification);
     slidePenButton.setToggleState(false, juce::dontSendNotification);
+    stepWriteButton.setToggleState(false, juce::dontSendNotification);
     slideVisibilityButton.setButtonText(getSlideVisibilityName());
 
     titleLabel.setText("Piano Roll", juce::dontSendNotification);
@@ -253,6 +298,10 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
 
 void MidiEditorOverlayComponent::closeEditor()
 {
+    commitStepWritePendingChord();
+    releaseLiveKeyboardPitches();
+    releaseMousePreviewPitch();
+    releasePlacedNotePreview();
     setVisible(false);
     clearSelection();
     hoverNote.reset();
@@ -260,7 +309,6 @@ void MidiEditorOverlayComponent::closeEditor()
     marqueeState.reset();
     velocityDragState.reset();
     slideDrawState.reset();
-    releaseMousePreviewPitch();
 
     if (onClose)
         onClose();
@@ -283,6 +331,12 @@ void MidiEditorOverlayComponent::setScaleLockExternally(bool enabled)
 
 void MidiEditorOverlayComponent::timerCallback()
 {
+    if (placedNotePreviewPitch.has_value()
+        && juce::Time::getMillisecondCounterHiRes() >= placedNotePreviewOffMs)
+    {
+        releasePlacedNotePreview();
+    }
+
     if (! isVisible())
         return;
 
@@ -343,6 +397,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         }
     }
     activePlaybackPitches.insert(liveKeyboardPitches.begin(), liveKeyboardPitches.end());
+    activePlaybackPitches.insert(stepWriteLivePitches.begin(), stepWriteLivePitches.end());
     if (mousePreviewPitch.has_value())
         activePlaybackPitches.insert(*mousePreviewPitch);
 
@@ -803,6 +858,30 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         g.drawLine(playheadX, static_cast<float>(visibleGrid.getY()), playheadX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
     }
 
+    if (stepWriteEnabled && activeClip != nullptr)
+    {
+        const auto cursorBeat = getSnappedStepWriteCursorBeat();
+        const auto cursorX = static_cast<float>(gridArea.getX())
+            + static_cast<float>((cursorBeat * pixelsPerBeat) - scrollX);
+
+        if (cursorX >= static_cast<float>(visibleGrid.getX() - 4)
+            && cursorX <= static_cast<float>(visibleGrid.getRight() + 4))
+        {
+            g.setColour(theme::cool::aqua.withAlpha(0.18f));
+            const auto stepWidth = static_cast<float>(stepWriteStepLengthInBeats * pixelsPerBeat);
+            g.fillRect(juce::Rectangle<float>(cursorX,
+                                              static_cast<float>(visibleGrid.getY()),
+                                              juce::jmax(2.0f, stepWidth),
+                                              static_cast<float>(visibleGrid.getHeight())));
+            g.setColour(theme::cool::aqua.withAlpha(0.96f));
+            g.drawLine(cursorX,
+                       static_cast<float>(visibleGrid.getY()),
+                       cursorX,
+                       static_cast<float>(visibleGrid.getBottom()),
+                       2.0f);
+        }
+    }
+
     if (marqueeState.has_value() && marqueeState->movedEnough)
     {
         const auto clippedMarquee = marqueeState->bounds.getIntersection(visibleGrid);
@@ -848,12 +927,15 @@ void MidiEditorOverlayComponent::resized()
     auto bounds = getLocalBounds().reduced(8);
     auto topBar = bounds.removeFromTop(88).reduced(20, 16);
 
-    auto leftArea = topBar.removeFromLeft(topBar.proportionOfWidth(0.42f));
-    auto centerArea = topBar.removeFromLeft(topBar.proportionOfWidth(0.34f));
-    auto titleArea = leftArea;
-    titleLabel.setBounds(titleArea.removeFromTop(30));
+    auto closeArea = topBar.removeFromRight(210);
+    closeButton.setBounds(closeArea.reduced(0, 8));
+
+    auto titleRow = topBar.removeFromTop(30);
+    titleLabel.setBounds(titleRow.removeFromLeft(220));
+    contextLabel.setBounds(titleRow.reduced(8, 0));
     subtitleLabel.setBounds(0, 0, 0, 0);
-    auto controlsArea = titleArea.removeFromTop(28);
+    auto controlsArea = topBar.removeFromTop(28);
+
     scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 2));
     controlsArea.removeFromLeft(8);
     snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 2));
@@ -864,44 +946,69 @@ void MidiEditorOverlayComponent::resized()
     controlsArea.removeFromLeft(6);
     slideVisibilityButton.setBounds(controlsArea.removeFromLeft(104).reduced(0, 2));
     controlsArea.removeFromLeft(12);
+    stepWriteButton.setBounds(controlsArea.removeFromLeft(96).reduced(0, 2));
+    controlsArea.removeFromLeft(6);
+    stepLengthButton.setBounds(controlsArea.removeFromLeft(58).reduced(0, 2));
+    controlsArea.removeFromLeft(6);
+    stepRestButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 2));
+    controlsArea.removeFromLeft(6);
+    stepBackButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 2));
+    controlsArea.removeFromLeft(6);
+    stepTieButton.setBounds(controlsArea.removeFromLeft(44).reduced(0, 2));
+    controlsArea.removeFromLeft(10);
     scaleLockToggle.setBounds(controlsArea.removeFromLeft(22).reduced(0, 4));
     scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 2));
-    contextLabel.setBounds(centerArea.reduced(8, 4));
-    closeButton.setBounds(topBar.removeFromRight(190).reduced(0, 8));
     clampScrollOffsets();
 }
 
 bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
 {
+    const auto modifiers = key.getModifiers();
+    const auto lowerKeyCode = juce::CharacterFunctions::toLowerCase(static_cast<juce::juce_wchar>(key.getKeyCode()));
+    const auto commandShortcut = modifiers.isCommandDown() && ! modifiers.isCtrlDown() && ! modifiers.isAltDown();
+    const auto shiftedCommandShortcut = commandShortcut && modifiers.isShiftDown();
+
     if (! key.getModifiers().isCommandDown()
         && ! key.getModifiers().isCtrlDown()
         && ! key.getModifiers().isAltDown()
         && pitchForTypingKeyCode(key.getKeyCode()).has_value())
     {
+        if (stepWriteEnabled)
+        {
+            updateStepWriteKeyboardPitches();
+            return true;
+        }
+
         updateLiveKeyboardPitches();
         // Consume the event so macOS doesn't play the system alert beep when the
         // key isn't otherwise handled (e.g. a MIDI track with no instrument loaded).
         return true;
     }
 
-    if ((key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)) && ! undoStack.empty())
+    if (commandShortcut && ! shiftedCommandShortcut && lowerKeyCode == 'z')
     {
+        if (undoStack.empty())
+            return true;
+
         redoStack.push_back(NoteSnapshot { activeClip != nullptr ? activeClip->midiNotes : std::vector<MidiNote> {},
                                            activeClip != nullptr ? activeClip->pitchSlides : std::vector<PitchSlide> {},
-                                           selectedNotes, selectedSlide, horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex, snapSizeInBeats, false });
+                                           selectedNotes, selectedSlide, horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex,
+                                           snapSizeInBeats, stepWriteCursorBeat, stepWriteStepLengthInBeats, false });
         restoreSnapshot(undoStack.back());
         undoStack.pop_back();
         repaint();
         return true;
     }
 
-    if ((key == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)
-         || key == juce::KeyPress('y', juce::ModifierKeys::commandModifier, 0))
-        && ! redoStack.empty())
+    if (commandShortcut && ((shiftedCommandShortcut && lowerKeyCode == 'z') || lowerKeyCode == 'y'))
     {
+        if (redoStack.empty())
+            return true;
+
         undoStack.push_back(NoteSnapshot { activeClip != nullptr ? activeClip->midiNotes : std::vector<MidiNote> {},
                                            activeClip != nullptr ? activeClip->pitchSlides : std::vector<PitchSlide> {},
-                                           selectedNotes, selectedSlide, horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex, snapSizeInBeats, false });
+                                           selectedNotes, selectedSlide, horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex,
+                                           snapSizeInBeats, stepWriteCursorBeat, stepWriteStepLengthInBeats, false });
         restoreSnapshot(redoStack.back());
         redoStack.pop_back();
         repaint();
@@ -926,7 +1033,7 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier, 0) && activeClip != nullptr)
+    if (commandShortcut && lowerKeyCode == 'a' && activeClip != nullptr)
     {
         selectedNotes.clear();
         for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
@@ -935,7 +1042,7 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    if (key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0) && ! selectedNotes.empty())
+    if (commandShortcut && lowerKeyCode == 'd' && ! selectedNotes.empty())
     {
         duplicateSelectedNotes();
         return true;
@@ -972,14 +1079,22 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
 
 bool MidiEditorOverlayComponent::keyStateChanged(bool)
 {
+    if (stepWriteEnabled)
+    {
+        updateStepWriteKeyboardPitches();
+        return true;
+    }
+
     updateLiveKeyboardPitches();
     return false;
 }
 
 void MidiEditorOverlayComponent::focusLost(FocusChangeType)
 {
-    ignoreNextMouseDown = true;
-    liveKeyboardPitches.clear();
+    ignoreNextMouseDown = false;
+    commitStepWritePendingChord();
+    releaseLiveKeyboardPitches();
+    releasePlacedNotePreview();
     repaint();
 }
 
@@ -1003,10 +1118,11 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
     if (activeClip == nullptr)
         return;
 
+    ignoreNextMouseDown = false;
+    grabKeyboardFocus();
+
     if (getKeyboardBounds().contains(event.getPosition()))
     {
-        ignoreNextMouseDown = false;
-        grabKeyboardFocus();
         setMousePreviewPitch(keyboardPitchForPoint(event.getPosition()));
         return;
     }
@@ -1015,7 +1131,6 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
     {
         ignoreNextMouseDown = false;
         grabKeyboardFocus();
-        return;
     }
 
     if (getVelocityLaneBounds().contains(event.getPosition()))
@@ -1046,13 +1161,14 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
         pushUndoSnapshot();
         velocityDragState->historyCaptured = true;
         updateVelocityFromPosition(event.getPosition().y);
-        grabKeyboardFocus();
         repaint();
         return;
     }
 
     if (! getVisibleGridViewport().contains(event.getPosition()))
         return;
+
+    const auto hit = hitTestNote(event.getPosition());
 
     if (slidePenEnabled)
     {
@@ -1061,13 +1177,11 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
             clearSelection();
             selectedSlide.reset();
             slideDrawState = SlideDrawState { *slide, false };
-            grabKeyboardFocus();
             repaint();
         }
         return;
     }
 
-    const auto hit = hitTestNote(event.getPosition());
     const auto hitSlide = hitTestSlide(event.getPosition());
     const auto slideHandleHit = hitSlide.has_value() && hitSlide->mode != SlideEditMode::move;
 
@@ -1102,7 +1216,6 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
             activeClip->pitchSlides[static_cast<std::size_t>(hitSlide->slideIndex)],
             false
         };
-        grabKeyboardFocus();
         repaint();
         return;
     }
@@ -1131,14 +1244,12 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
             selectedIndices,
             false
         };
-        grabKeyboardFocus();
         repaint();
         return;
     }
 
     clearSelection();
     marqueeState = MarqueeState { event.getPosition(), juce::Rectangle<int>(event.getPosition(), { 1, 1 }), false };
-    grabKeyboardFocus();
     repaint();
 }
 
@@ -1289,19 +1400,19 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
         noteDragState->historyCaptured = true;
     }
 
-    auto& note = activeClip->midiNotes[static_cast<std::size_t>(noteDragState->selected.noteIndex)];
     const auto pixelsPerBeat = getPixelsPerBeat();
-    const auto beatDelta = snapBeat((event.position.x - noteDragState->mouseDownPosition.x) / pixelsPerBeat);
+    const auto beatDelta = (event.position.x - noteDragState->mouseDownPosition.x) / pixelsPerBeat;
+    const auto snappedBeatDelta = snapBeatNearest(beatDelta);
     const auto laneHeight = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
 
     if (noteDragState->mode == NoteDragMode::move)
     {
-        const auto pitchDelta = static_cast<int>((noteDragState->mouseDownPosition.y - event.position.y) / laneHeight);
+        const auto pitchDelta = static_cast<int>(std::round((noteDragState->mouseDownPosition.y - event.position.y) / laneHeight));
         for (std::size_t i = 0; i < noteDragState->selectedIndices.size(); ++i)
         {
             auto& movedNote = activeClip->midiNotes[static_cast<std::size_t>(noteDragState->selectedIndices[i])];
             const auto& originalNote = noteDragState->originalSelectedNotes[i];
-            movedNote.startBeat = juce::jlimit(0.0, activeClip->lengthInBeats - movedNote.lengthInBeats, snapBeat(originalNote.startBeat + beatDelta));
+            movedNote.startBeat = juce::jlimit(0.0, activeClip->lengthInBeats - movedNote.lengthInBeats, originalNote.startBeat + snappedBeatDelta);
             auto newPitch = juce::jlimit(lowestPitch, highestPitch, originalNote.pitch + pitchDelta);
             if (scaleLockEnabled && ! isPitchInScale(newPitch))
                 newPitch = snapPitchToScale(newPitch);
@@ -1310,10 +1421,15 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
     }
     else
     {
-        note.lengthInBeats = juce::jlimit(
-            minimumNoteLengthInBeats,
-            activeClip->lengthInBeats - note.startBeat,
-            snapBeat(noteDragState->originalLengthInBeats + beatDelta));
+        for (std::size_t i = 0; i < noteDragState->selectedIndices.size(); ++i)
+        {
+            auto& resizedNote = activeClip->midiNotes[static_cast<std::size_t>(noteDragState->selectedIndices[i])];
+            const auto& originalNote = noteDragState->originalSelectedNotes[i];
+            resizedNote.lengthInBeats = juce::jlimit(
+                minimumNoteLengthInBeats,
+                activeClip->lengthInBeats - resizedNote.startBeat,
+                originalNote.lengthInBeats + snappedBeatDelta);
+        }
     }
 
     repaint();
@@ -1322,7 +1438,6 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
 void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
 {
     releaseMousePreviewPitch();
-
     if (slideDrawState.has_value())
     {
         if (activeClip != nullptr && slideDrawState->movedEnough && slideDrawState->slide.points.size() >= 2)
@@ -1358,10 +1473,38 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
         const auto newLength = juce::jmax(minimumNoteLengthInBeats, snapSizeInBeats);
         activeClip->midiNotes.push_back(MidiNote { pitch, snappedBeat, newLength, 100 });
         selectSingleNote(static_cast<int>(activeClip->midiNotes.size()) - 1);
+        auditionPlacedNote(pitch, 100);
     }
 
-    if (noteDragState.has_value() && noteDragState->historyCaptured && ! undoStack.empty() && ! notesChangedSince(undoStack.back()))
-        undoStack.pop_back();
+    if (noteDragState.has_value() && activeClip != nullptr && noteDragState->historyCaptured)
+    {
+        if (noteDragState->mode == NoteDragMode::move)
+        {
+            for (const auto index : noteDragState->selectedIndices)
+            {
+                auto& movedNote = activeClip->midiNotes[static_cast<std::size_t>(index)];
+                movedNote.startBeat = juce::jlimit(0.0,
+                                                   activeClip->lengthInBeats - movedNote.lengthInBeats,
+                                                   snapBeatNearest(movedNote.startBeat));
+            }
+        }
+        else
+        {
+            for (const auto index : noteDragState->selectedIndices)
+            {
+                if (index < 0 || index >= static_cast<int>(activeClip->midiNotes.size()))
+                    continue;
+
+                auto& resizedNote = activeClip->midiNotes[static_cast<std::size_t>(index)];
+                resizedNote.lengthInBeats = juce::jlimit(minimumNoteLengthInBeats,
+                                                         activeClip->lengthInBeats - resizedNote.startBeat,
+                                                         snapBeatNearest(resizedNote.lengthInBeats));
+            }
+        }
+
+        if (! undoStack.empty() && ! notesChangedSince(undoStack.back()))
+            undoStack.pop_back();
+    }
 
     if (velocityDragState.has_value() && velocityDragState->historyCaptured && ! undoStack.empty() && ! notesChangedSince(undoStack.back()))
         undoStack.pop_back();
@@ -1450,9 +1593,50 @@ void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
         showSnapMenu();
     else if (button == &quantizeButton)
         quantizeSelectedNotes();
+    else if (button == &stepWriteButton)
+    {
+        stepWriteEnabled = stepWriteButton.getToggleState();
+        commitStepWritePendingChord();
+        releaseLiveKeyboardPitches();
+        releasePlacedNotePreview();
+
+        if (stepWriteEnabled)
+        {
+            slidePenEnabled = false;
+            slidePenButton.setToggleState(false, juce::dontSendNotification);
+
+            if (activeClip != nullptr)
+            {
+                const auto playheadBeat = onRequestPlayheadBeat ? onRequestPlayheadBeat() : activeClip->startBeat;
+                const auto localBeat = playheadBeat - activeClip->startBeat;
+                if (localBeat >= 0.0 && localBeat <= activeClip->lengthInBeats)
+                    stepWriteCursorBeat = std::round(localBeat / stepWriteStepLengthInBeats) * stepWriteStepLengthInBeats;
+                else
+                    stepWriteCursorBeat = getSnappedStepWriteCursorBeat();
+
+                stepWriteCursorBeat = juce::jlimit(0.0, activeClip->lengthInBeats, stepWriteCursorBeat);
+            }
+        }
+
+        repaint();
+    }
+    else if (button == &stepLengthButton)
+        showStepLengthMenu();
+    else if (button == &stepRestButton)
+        restStepWrite();
+    else if (button == &stepBackButton)
+        backstepStepWrite();
+    else if (button == &stepTieButton)
+        extendStepWritePreviousNotes();
     else if (button == &slidePenButton)
     {
         slidePenEnabled = slidePenButton.getToggleState();
+        if (slidePenEnabled)
+        {
+            stepWriteEnabled = false;
+            stepWriteButton.setToggleState(false, juce::dontSendNotification);
+            commitStepWritePendingChord();
+        }
         selectedSlide.reset();
         clearSelection();
         repaint();
@@ -1505,12 +1689,305 @@ bool MidiEditorOverlayComponent::updateLiveKeyboardPitches()
         }
     }
 
-    if (nextPitches == liveKeyboardPitches)
+    const auto previousPitches = liveKeyboardPitches;
+    if (nextPitches == previousPitches)
         return false;
+
+    if (onPreviewNoteOff)
+        for (const auto pitch : previousPitches)
+            if (! nextPitches.contains(pitch))
+                onPreviewNoteOff(pitch);
+
+    if (onPreviewNoteOn)
+        for (const auto pitch : nextPitches)
+            if (! previousPitches.contains(pitch))
+                onPreviewNoteOn(pitch, 108);
 
     liveKeyboardPitches = std::move(nextPitches);
     repaint();
     return true;
+}
+
+bool MidiEditorOverlayComponent::stepWriteMidiNoteOn(int midiNote, int velocity)
+{
+    if (! stepWriteEnabled || activeClip == nullptr)
+        return false;
+
+    auto pitch = juce::jlimit(lowestPitch, highestPitch, midiNote);
+    if (scaleLockEnabled && ! isPitchInScale(pitch))
+        pitch = snapPitchToScale(pitch);
+
+    const auto safeVelocity = juce::jlimit(1, 127, velocity > 0 ? velocity : defaultStepWriteVelocity());
+    stepWriteLivePitches.insert(pitch);
+    stepWritePendingVelocities[pitch] = safeVelocity;
+
+    if (onPreviewNoteOn)
+        onPreviewNoteOn(pitch, safeVelocity);
+
+    repaint();
+    return true;
+}
+
+bool MidiEditorOverlayComponent::stepWriteMidiNoteOff(int midiNote)
+{
+    if (! stepWriteEnabled)
+        return false;
+
+    auto pitch = juce::jlimit(lowestPitch, highestPitch, midiNote);
+    if (scaleLockEnabled && ! isPitchInScale(pitch))
+        pitch = snapPitchToScale(pitch);
+
+    stepWriteLivePitches.erase(pitch);
+
+    if (onPreviewNoteOff)
+        onPreviewNoteOff(pitch);
+
+    if (stepWriteLivePitches.empty())
+        commitStepWritePendingChord();
+
+    repaint();
+    return true;
+}
+
+bool MidiEditorOverlayComponent::updateStepWriteKeyboardPitches()
+{
+    static constexpr std::array<int, 39> keyCodes {
+        'q', '2', 'w', '3', 'e', 'r', '5', 't', '6', 'y', '7', 'u', 'i', '9', 'o', '0', 'p', '[', ']', '+', '=',
+        'z', 's', 'x', 'd', 'c', 'v', 'g', 'b', 'h', 'n', 'j', 'm', ',', 'l', '.', ';', '/', '\''
+    };
+
+    std::set<int> nextPitches;
+    std::map<int, int> nextVelocities;
+    const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
+    if (! modifiers.isCommandDown() && ! modifiers.isCtrlDown() && ! modifiers.isAltDown())
+    {
+        for (const auto keyCode : keyCodes)
+        {
+            if (! juce::KeyPress::isKeyCurrentlyDown(keyCode))
+                continue;
+
+            auto pitch = pitchForTypingKeyCode(keyCode);
+            if (! pitch.has_value())
+                continue;
+
+            auto playablePitch = *pitch;
+            if (activeTrack != nullptr)
+                playablePitch += activeTrack->samplerKeyboardOctaveOffset * 12
+                               + activeTrack->samplerTransposeSemitones;
+
+            if (scaleLockEnabled && ! isPitchInScale(playablePitch))
+                playablePitch = snapPitchToScale(playablePitch);
+
+            playablePitch = juce::jlimit(lowestPitch, highestPitch, playablePitch);
+            nextPitches.insert(playablePitch);
+            nextVelocities[playablePitch] = defaultStepWriteVelocity();
+        }
+    }
+
+    const auto previousPitches = stepWriteLivePitches;
+    if (nextPitches == previousPitches)
+        return false;
+
+    if (onPreviewNoteOff)
+        for (const auto pitch : previousPitches)
+            if (! nextPitches.contains(pitch))
+                onPreviewNoteOff(pitch);
+
+    if (onPreviewNoteOn)
+        for (const auto pitch : nextPitches)
+            if (! previousPitches.contains(pitch))
+                onPreviewNoteOn(pitch, nextVelocities[pitch]);
+
+    for (const auto& [pitch, velocity] : nextVelocities)
+        stepWritePendingVelocities[pitch] = velocity;
+
+    stepWriteLivePitches = std::move(nextPitches);
+
+    if (stepWriteLivePitches.empty())
+        commitStepWritePendingChord();
+
+    repaint();
+    return true;
+}
+
+void MidiEditorOverlayComponent::commitStepWritePendingChord()
+{
+    if (! stepWriteLivePitches.empty())
+    {
+        if (onPreviewNoteOff)
+            for (const auto pitch : stepWriteLivePitches)
+                onPreviewNoteOff(pitch);
+
+        stepWriteLivePitches.clear();
+    }
+
+    if (activeClip == nullptr || stepWritePendingVelocities.empty())
+    {
+        stepWritePendingVelocities.clear();
+        return;
+    }
+
+    const auto startBeat = getSnappedStepWriteCursorBeat();
+    if (startBeat >= activeClip->lengthInBeats - beatEpsilon)
+    {
+        stepWritePendingVelocities.clear();
+        return;
+    }
+
+    const auto remainingBeats = activeClip->lengthInBeats - startBeat;
+    if (remainingBeats <= beatEpsilon)
+    {
+        stepWritePendingVelocities.clear();
+        return;
+    }
+
+    const auto noteLength = juce::jmin(stepWriteStepLengthInBeats, remainingBeats);
+
+    pushUndoSnapshot();
+    selectedNotes.clear();
+    selectedSlide.reset();
+
+    for (const auto& [pitch, velocity] : stepWritePendingVelocities)
+    {
+        activeClip->midiNotes.push_back(MidiNote {
+            pitch,
+            startBeat,
+            noteLength,
+            juce::jlimit(1, 127, velocity)
+        });
+        selectedNotes.insert(static_cast<int>(activeClip->midiNotes.size()) - 1);
+    }
+
+    stepWritePendingVelocities.clear();
+    advanceStepWriteCursor(1);
+    repaint();
+}
+
+void MidiEditorOverlayComponent::advanceStepWriteCursor(int stepCount)
+{
+    if (activeClip == nullptr)
+        return;
+
+    const auto nextBeat = getSnappedStepWriteCursorBeat() + static_cast<double>(stepCount) * stepWriteStepLengthInBeats;
+    const auto step = juce::jmax(0.001, stepWriteStepLengthInBeats);
+    stepWriteCursorBeat = juce::jlimit(0.0, activeClip->lengthInBeats, std::round(nextBeat / step) * step);
+}
+
+void MidiEditorOverlayComponent::restStepWrite()
+{
+    if (! stepWriteEnabled || activeClip == nullptr)
+        return;
+
+    commitStepWritePendingChord();
+    pushUndoSnapshot();
+    advanceStepWriteCursor(1);
+    repaint();
+}
+
+void MidiEditorOverlayComponent::backstepStepWrite()
+{
+    if (! stepWriteEnabled || activeClip == nullptr)
+        return;
+
+    commitStepWritePendingChord();
+    pushUndoSnapshot();
+    advanceStepWriteCursor(-1);
+    repaint();
+}
+
+void MidiEditorOverlayComponent::extendStepWritePreviousNotes()
+{
+    if (! stepWriteEnabled || activeClip == nullptr || activeClip->midiNotes.empty())
+        return;
+
+    commitStepWritePendingChord();
+    const auto cursorBeat = getSnappedStepWriteCursorBeat();
+    const auto targetEnd = juce::jlimit(0.0, activeClip->lengthInBeats, cursorBeat + stepWriteStepLengthInBeats);
+    bool changed = false;
+
+    pushUndoSnapshot();
+
+    if (! selectedNotes.empty())
+    {
+        for (const auto index : selectedNotes)
+        {
+            if (index < 0 || index >= static_cast<int>(activeClip->midiNotes.size()))
+                continue;
+
+            auto& note = activeClip->midiNotes[static_cast<std::size_t>(index)];
+            const auto noteEnd = note.startBeat + note.lengthInBeats;
+            if (std::abs(noteEnd - cursorBeat) > stepWriteStepLengthInBeats + beatEpsilon
+                && noteEnd > cursorBeat + beatEpsilon)
+                continue;
+
+            const auto newLength = juce::jlimit(minimumNoteLengthInBeats,
+                                                activeClip->lengthInBeats - note.startBeat,
+                                                targetEnd - note.startBeat);
+            if (std::abs(newLength - note.lengthInBeats) > beatEpsilon)
+            {
+                note.lengthInBeats = newLength;
+                changed = true;
+            }
+        }
+    }
+
+    if (! changed)
+    {
+        double latestStart = -1.0;
+        for (const auto& note : activeClip->midiNotes)
+            if (note.startBeat <= cursorBeat + beatEpsilon)
+                latestStart = juce::jmax(latestStart, note.startBeat);
+
+        if (latestStart >= 0.0)
+        {
+            selectedNotes.clear();
+            for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
+            {
+                auto& note = activeClip->midiNotes[static_cast<std::size_t>(i)];
+                if (std::abs(note.startBeat - latestStart) > beatEpsilon)
+                    continue;
+
+                const auto newLength = juce::jlimit(minimumNoteLengthInBeats,
+                                                    activeClip->lengthInBeats - note.startBeat,
+                                                    targetEnd - note.startBeat);
+                if (std::abs(newLength - note.lengthInBeats) > beatEpsilon)
+                {
+                    note.lengthInBeats = newLength;
+                    changed = true;
+                }
+                selectedNotes.insert(i);
+            }
+        }
+    }
+
+    if (changed)
+        advanceStepWriteCursor(1);
+    else if (! undoStack.empty())
+        undoStack.pop_back();
+
+    repaint();
+}
+
+double MidiEditorOverlayComponent::getSnappedStepWriteCursorBeat() const noexcept
+{
+    if (activeClip == nullptr)
+        return 0.0;
+
+    const auto step = juce::jmax(0.001, stepWriteStepLengthInBeats);
+    const auto snapped = std::round(stepWriteCursorBeat / step) * step;
+    return juce::jlimit(0.0, activeClip->lengthInBeats, snapped);
+}
+
+int MidiEditorOverlayComponent::defaultStepWriteVelocity() const noexcept
+{
+    if (activeClip != nullptr && ! selectedNotes.empty())
+    {
+        const auto index = *selectedNotes.rbegin();
+        if (index >= 0 && index < static_cast<int>(activeClip->midiNotes.size()))
+            return juce::jlimit(1, 127, activeClip->midiNotes[static_cast<std::size_t>(index)].velocity);
+    }
+
+    return 100;
 }
 
 std::optional<PitchSlide> MidiEditorOverlayComponent::makeSlideAt(juce::Point<int> position) const
@@ -1757,6 +2234,41 @@ void MidiEditorOverlayComponent::releaseMousePreviewPitch()
     repaint();
 }
 
+void MidiEditorOverlayComponent::releaseLiveKeyboardPitches()
+{
+    if (liveKeyboardPitches.empty())
+        return;
+
+    if (onPreviewNoteOff)
+        for (const auto pitch : liveKeyboardPitches)
+            onPreviewNoteOff(pitch);
+
+    liveKeyboardPitches.clear();
+    repaint();
+}
+
+void MidiEditorOverlayComponent::auditionPlacedNote(int pitch, int velocity)
+{
+    releasePlacedNotePreview();
+
+    placedNotePreviewPitch = pitch;
+    placedNotePreviewOffMs = juce::Time::getMillisecondCounterHiRes() + placedNoteAuditionMs;
+    if (onPreviewNoteOn)
+        onPreviewNoteOn(pitch, velocity);
+}
+
+void MidiEditorOverlayComponent::releasePlacedNotePreview()
+{
+    if (! placedNotePreviewPitch.has_value())
+        return;
+
+    const auto pitch = *placedNotePreviewPitch;
+    placedNotePreviewPitch.reset();
+    placedNotePreviewOffMs = 0.0;
+    if (onPreviewNoteOff)
+        onPreviewNoteOff(pitch);
+}
+
 juce::Rectangle<int> MidiEditorOverlayComponent::getTopBarBounds() const noexcept
 {
     auto bounds = getLocalBounds().reduced(24);
@@ -1995,6 +2507,11 @@ double MidiEditorOverlayComponent::snapBeat(double beat) const noexcept
     return std::floor(beat / snapSizeInBeats) * snapSizeInBeats;
 }
 
+double MidiEditorOverlayComponent::snapBeatNearest(double beat) const noexcept
+{
+    return std::round(beat / snapSizeInBeats) * snapSizeInBeats;
+}
+
 int MidiEditorOverlayComponent::pitchToLane(int pitch) const noexcept
 {
     return juce::jlimit(0, totalPitchCount - 1, highestPitch - pitch);
@@ -2168,6 +2685,15 @@ void MidiEditorOverlayComponent::updateSubtitle()
 {
     scaleButton.setButtonText(getScaleName());
     snapButton.setButtonText(getSnapName());
+    const auto stepText = [this]
+    {
+        if (std::abs(stepWriteStepLengthInBeats - 1.0) < beatEpsilon) return juce::String("1/4");
+        if (std::abs(stepWriteStepLengthInBeats - 0.5) < beatEpsilon) return juce::String("1/8");
+        if (std::abs(stepWriteStepLengthInBeats - 0.25) < beatEpsilon) return juce::String("1/16");
+        if (std::abs(stepWriteStepLengthInBeats - 0.125) < beatEpsilon) return juce::String("1/32");
+        return juce::String(stepWriteStepLengthInBeats, 3);
+    }();
+    stepLengthButton.setButtonText(stepText);
     contextLabel.setText(trackName, juce::dontSendNotification);
 }
 
@@ -2182,7 +2708,9 @@ void MidiEditorOverlayComponent::pushUndoSnapshot()
     if (activeClip == nullptr)
         return;
 
-    undoStack.push_back(NoteSnapshot { activeClip->midiNotes, activeClip->pitchSlides, selectedNotes, selectedSlide, horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex, snapSizeInBeats, false });
+    undoStack.push_back(NoteSnapshot { activeClip->midiNotes, activeClip->pitchSlides, selectedNotes, selectedSlide,
+                                       horizontalZoom, verticalZoom, scaleRoot, scalePatternIndex, snapSizeInBeats,
+                                       stepWriteCursorBeat, stepWriteStepLengthInBeats, false });
     redoStack.clear();
 }
 
@@ -2200,6 +2728,8 @@ void MidiEditorOverlayComponent::restoreSnapshot(const NoteSnapshot& snapshot)
     scaleRoot = snapshot.scaleRoot;
     scalePatternIndex = snapshot.scalePatternIndex;
     snapSizeInBeats = snapshot.snapSizeInBeats;
+    stepWriteCursorBeat = snapshot.stepWriteCursorBeat;
+    stepWriteStepLengthInBeats = snapshot.stepWriteStepLengthInBeats;
     focusModeEnabled = false;
     hoverNote.reset();
     noteDragState.reset();
@@ -2438,6 +2968,37 @@ void MidiEditorOverlayComponent::showSnapMenu()
                                return;
 
                            snapSizeInBeats = snapSettings[static_cast<std::size_t>(selectedId - 1)].beats;
+                           updateSubtitle();
+                           repaint();
+                       });
+}
+
+void MidiEditorOverlayComponent::showStepLengthMenu()
+{
+    juce::PopupMenu menu;
+
+    const std::array<SnapSetting, 4> stepLengths {{
+        { "1/4", 1.0 },
+        { "1/8", 0.5 },
+        { "1/16", 0.25 },
+        { "1/32", 0.125 },
+    }};
+
+    for (int i = 0; i < static_cast<int>(stepLengths.size()); ++i)
+    {
+        const auto selected = std::abs(stepLengths[static_cast<std::size_t>(i)].beats - stepWriteStepLengthInBeats) < beatEpsilon;
+        menu.addItem(i + 1, stepLengths[static_cast<std::size_t>(i)].name, true, selected);
+    }
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&stepLengthButton),
+                       [this, stepLengths](int selectedId)
+                       {
+                           if (selectedId <= 0)
+                               return;
+
+                           commitStepWritePendingChord();
+                           stepWriteStepLengthInBeats = stepLengths[static_cast<std::size_t>(selectedId - 1)].beats;
+                           stepWriteCursorBeat = getSnappedStepWriteCursorBeat();
                            updateSubtitle();
                            repaint();
                        });

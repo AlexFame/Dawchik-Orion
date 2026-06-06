@@ -18,12 +18,29 @@ namespace orion
 SidebarNavComponent::SidebarNavComponent()
 {
     setWantsKeyboardFocus(false);
+    rebuildNavEntries();
+}
+
+void SidebarNavComponent::rebuildNavEntries()
+{
     // SAMPLES/HISTORY/CLOUD hidden for now — SAMPLES duplicated FILES (no dedicated sample
     // library yet); the others are placeholders. Easy to re-add when they do something real.
     navEntries = {
-        { SidebarNavItem::files, "FILES" },
-        { SidebarNavItem::vst, "VST" }
+        { SidebarNavItem::addFolder, "ADD", {} },
+        { SidebarNavItem::files, "FILES", {} },
+        { SidebarNavItem::vst, "VST", {} }
     };
+
+    for (const auto& folder : customFolders)
+    {
+        if (! folder.isDirectory())
+            continue;
+
+        auto label = folder.getFileName().toUpperCase();
+        if (label.isEmpty())
+            label = "FOLDER";
+        navEntries.push_back({ SidebarNavItem::customFolder, label.substring(0, 8), folder });
+    }
 }
 
 void SidebarNavComponent::setActiveItem(SidebarNavItem item)
@@ -32,6 +49,22 @@ void SidebarNavComponent::setActiveItem(SidebarNavItem item)
         return;
 
     activeItem = item;
+    if (item != SidebarNavItem::customFolder)
+        activeFolderPath.clear();
+    repaint();
+}
+
+void SidebarNavComponent::setActiveFolder(const juce::File& folder)
+{
+    activeItem = SidebarNavItem::customFolder;
+    activeFolderPath = folder.getFullPathName();
+    repaint();
+}
+
+void SidebarNavComponent::setCustomFolders(const std::vector<juce::File>& folders)
+{
+    customFolders = folders;
+    rebuildNavEntries();
     repaint();
 }
 
@@ -54,11 +87,14 @@ void SidebarNavComponent::paint(juce::Graphics& g)
     g.drawText("ORION", projectBounds.withY(projectBounds.getBottom() - 12).withHeight(10),
                juce::Justification::centred, true);
 
-    for (const auto& entry : navEntries)
+    for (int i = 0; i < static_cast<int>(navEntries.size()); ++i)
     {
-        const auto itemBounds = getItemBounds(entry.item);
-        const auto active = entry.item == activeItem;
-        const auto hovered = hoveredItem.has_value() && *hoveredItem == entry.item;
+        const auto& entry = navEntries[static_cast<std::size_t>(i)];
+        const auto itemBounds = getEntryBounds(i);
+        const auto active = entry.item == SidebarNavItem::customFolder
+            ? activeItem == SidebarNavItem::customFolder && entry.folder.getFullPathName() == activeFolderPath
+            : entry.item == activeItem;
+        const auto hovered = hoveredEntryIndex == i;
 
         if (active)
         {
@@ -92,22 +128,65 @@ void SidebarNavComponent::paint(juce::Graphics& g)
 
 void SidebarNavComponent::mouseMove(const juce::MouseEvent& event)
 {
-    const auto item = hitTestNavItem(event.getPosition());
-    if (item == hoveredItem)
+    const auto oldHoveredItem = hoveredItem;
+    const auto oldHoveredEntryIndex = hoveredEntryIndex;
+
+    hoveredItem = std::nullopt;
+    hoveredEntryIndex = -1;
+
+    if (getItemBounds(SidebarNavItem::project).contains(event.getPosition()))
+        hoveredItem = SidebarNavItem::project;
+    else if (getItemBounds(SidebarNavItem::add).contains(event.getPosition()))
+        hoveredItem = SidebarNavItem::add;
+    else
+    {
+        for (int i = 0; i < static_cast<int>(navEntries.size()); ++i)
+        {
+            if (getEntryBounds(i).contains(event.getPosition()))
+            {
+                hoveredEntryIndex = i;
+                break;
+            }
+        }
+    }
+
+    if (oldHoveredItem == hoveredItem && oldHoveredEntryIndex == hoveredEntryIndex)
         return;
 
-    hoveredItem = item;
     repaint();
 }
 
 void SidebarNavComponent::mouseExit(const juce::MouseEvent&)
 {
     hoveredItem.reset();
+    hoveredEntryIndex = -1;
     repaint();
 }
 
 void SidebarNavComponent::mouseDown(const juce::MouseEvent& event)
 {
+    for (int i = 0; i < static_cast<int>(navEntries.size()); ++i)
+    {
+        if (! getEntryBounds(i).contains(event.getPosition()))
+            continue;
+
+        const auto& entry = navEntries[static_cast<std::size_t>(i)];
+        if (entry.item == SidebarNavItem::customFolder)
+        {
+            setActiveFolder(entry.folder);
+            if (onFolderSelected)
+                onFolderSelected(entry.folder);
+            return;
+        }
+
+        if (entry.item != SidebarNavItem::addFolder)
+            setActiveItem(entry.item);
+
+        if (onItemSelected)
+            onItemSelected(entry.item);
+        return;
+    }
+
     if (const auto item = hitTestNavItem(event.getPosition()))
     {
         if (*item != SidebarNavItem::add && *item != SidebarNavItem::project)
@@ -137,16 +216,17 @@ juce::Rectangle<int> SidebarNavComponent::getItemBounds(SidebarNavItem item) con
     return {};
 }
 
+juce::Rectangle<int> SidebarNavComponent::getEntryBounds(int index) const noexcept
+{
+    return { 0, topPadding + 106 + index * (itemHeight + itemGap), getWidth(), itemHeight };
+}
+
 std::optional<SidebarNavItem> SidebarNavComponent::hitTestNavItem(juce::Point<int> position) const noexcept
 {
     if (getItemBounds(SidebarNavItem::project).contains(position))
         return SidebarNavItem::project;
     if (getItemBounds(SidebarNavItem::add).contains(position))
         return SidebarNavItem::add;
-
-    for (const auto& entry : navEntries)
-        if (getItemBounds(entry.item).contains(position))
-            return entry.item;
 
     return std::nullopt;
 }
@@ -162,7 +242,7 @@ void SidebarNavComponent::drawIcon(juce::Graphics& g, SidebarNavItem item, juce:
         return;
     }
 
-    if (item == SidebarNavItem::files)
+    if (item == SidebarNavItem::files || item == SidebarNavItem::customFolder)
     {
         auto folder = bounds.reduced(2.0f, 5.0f);
         juce::Path p;
@@ -222,7 +302,7 @@ void SidebarNavComponent::drawIcon(juce::Graphics& g, SidebarNavItem item, juce:
         return;
     }
 
-    if (item == SidebarNavItem::add)
+    if (item == SidebarNavItem::add || item == SidebarNavItem::addFolder)
     {
         g.drawLine(bounds.getCentreX(), bounds.getY(), bounds.getCentreX(), bounds.getBottom(), 2.0f);
         g.drawLine(bounds.getX(), bounds.getCentreY(), bounds.getRight(), bounds.getCentreY(), 2.0f);

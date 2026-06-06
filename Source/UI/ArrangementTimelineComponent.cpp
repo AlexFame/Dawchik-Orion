@@ -77,7 +77,6 @@ juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 {
     auto bounds = component.getLocalBounds();
     bounds.removeFromLeft(6);
-    bounds.removeFromRight(6);
     bounds.removeFromTop(4);
     return bounds;
 }
@@ -230,6 +229,16 @@ void ArrangementTimelineComponent::selectTrack(int trackIndex)
 bool ArrangementTimelineComponent::canRedo() const noexcept
 {
     return ! redoStack.empty();
+}
+
+void ArrangementTimelineComponent::setFitTrackLanesToVisibleArea(bool shouldFit)
+{
+    if (fitTrackLanesToVisibleArea == shouldFit)
+        return;
+
+    fitTrackLanesToVisibleArea = shouldFit;
+    clampScrollOffsets();
+    repaint();
 }
 
 bool ArrangementTimelineComponent::undo()
@@ -537,6 +546,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             ? juce::jlimit(0.0f, 1.0f, onRequestTrackLevel(trackIndex))
             : 0.0f;
         const auto isAudible = trackLevel > 0.015f;
+        const auto isSelectedTrack = (selectedTrackIndex.has_value() && *selectedTrackIndex == trackIndex)
+            || std::any_of(selectedClips.begin(), selectedClips.end(), [trackIndex](const auto& selected)
+            {
+                return selected.trackIndex == trackIndex;
+            });
 
         juce::ignoreUnused(trackNameArea);
         const auto layout = computeHeaderLayout(trackIndex);
@@ -544,11 +558,21 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         const auto cardBounds = layout.card.toFloat();
         g.setColour(juce::Colours::black.withAlpha(0.32f));
         g.fillRoundedRectangle(cardBounds.translated(0.0f, 2.0f), 14.0f);
-        g.setColour(juce::Colour(0xff141821).withAlpha(0.92f));
+        g.setColour(isSelectedTrack
+            ? trackColour.darker(0.72f).withAlpha(0.96f)
+            : juce::Colour(0xff141821).withAlpha(0.92f));
         g.fillRoundedRectangle(cardBounds, 14.0f);
+        if (isSelectedTrack)
+        {
+            juce::ColourGradient selectedGlow(trackColour.withAlpha(0.22f), cardBounds.getX(), cardBounds.getY(),
+                                              trackColour.withAlpha(0.04f), cardBounds.getRight(), cardBounds.getBottom(), false);
+            g.setGradientFill(selectedGlow);
+            g.fillRoundedRectangle(cardBounds.reduced(1.0f), 13.0f);
+        }
         // Border brightens with the signal so it's obvious which track is sounding.
-        g.setColour(trackColour.withAlpha(isAudible ? juce::jlimit(0.72f, 1.0f, 0.72f + trackLevel * 0.6f) : 0.72f));
-        g.drawRoundedRectangle(cardBounds.reduced(1.0f), 14.0f, isAudible ? 1.6f + trackLevel * 1.4f : 1.6f);
+        const auto borderAlpha = isSelectedTrack ? 0.98f : (isAudible ? juce::jlimit(0.72f, 1.0f, 0.72f + trackLevel * 0.6f) : 0.72f);
+        g.setColour(trackColour.withAlpha(borderAlpha));
+        g.drawRoundedRectangle(cardBounds.reduced(1.0f), 14.0f, isSelectedTrack ? 2.8f : (isAudible ? 1.6f + trackLevel * 1.4f : 1.6f));
 
         // Folder collapse triangle (▾ open / ▸ collapsed) + a coloured spine down children.
         if (tracks[trackArrayIndex].isFolder && ! layout.collapseTriangle.isEmpty())
@@ -603,6 +627,29 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             g.setColour(juce::Colours::white.withAlpha(active ? 0.98f : 0.84f));
             g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
             g.drawText(buttonText, buttonBounds, juce::Justification::centred);
+        }
+
+        // Instrument button (MIDI tracks only): a tiny piano-keys glyph. The background is
+        // tinted in the track colour when an instrument is loaded so it reads as "active".
+        if (! layout.instrumentButton.isEmpty())
+        {
+            const auto hasInstrument = tracks[trackArrayIndex].instrumentPluginId.isNotEmpty();
+            auto box = layout.instrumentButton.toFloat();
+            g.setColour(hasInstrument ? trackColour.withAlpha(0.82f) : juce::Colours::black.withAlpha(0.42f));
+            g.fillRoundedRectangle(box, 6.0f);
+
+            // Mini keyboard: a white-key base with three black-key ticks.
+            auto keys = box.reduced(box.getWidth() * 0.24f, box.getHeight() * 0.30f);
+            g.setColour(juce::Colours::white.withAlpha(hasInstrument ? 0.98f : 0.82f));
+            g.fillRoundedRectangle(keys, 1.5f);
+            g.setColour(hasInstrument ? trackColour.darker(0.6f) : juce::Colours::black.withAlpha(0.8f));
+            const auto bkW = keys.getWidth() * 0.16f;
+            const auto bkH = keys.getHeight() * 0.58f;
+            for (int k = 0; k < 3; ++k)
+            {
+                const auto cx = keys.getX() + keys.getWidth() * (0.28f + 0.22f * static_cast<float>(k));
+                g.fillRect(cx - bkW * 0.5f, keys.getY(), bkW, bkH);
+            }
         }
 
         auto sliderF = layout.slider.toFloat();
@@ -1254,6 +1301,15 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
             track.solo = ! track.solo;
         else if (trackHeaderHit->control == TrackHeaderControl::record)
             track.recordArmed = ! track.recordArmed;
+        else if (trackHeaderHit->control == TrackHeaderControl::instrument)
+        {
+            notifyClipSelectionChanged();
+            grabKeyboardFocus();
+            repaint();
+            if (onTrackInstrumentClicked)
+                onTrackInstrumentClicked(trackHeaderHit->trackIndex);
+            return;
+        }
         else if (trackHeaderHit->control == TrackHeaderControl::volume)
         {
             trackVolumeDragState = TrackVolumeDragState { true, trackHeaderHit->trackIndex, trackHeaderHit->bounds };
@@ -1967,6 +2023,8 @@ std::optional<ArrangementTimelineComponent::TrackHeaderHit> ArrangementTimelineC
             return TrackHeaderHit { trackIndex, TrackHeaderControl::solo, layout.soloButton };
         if (layout.recordButton.contains(position))
             return TrackHeaderHit { trackIndex, TrackHeaderControl::record, layout.recordButton };
+        if (! layout.instrumentButton.isEmpty() && layout.instrumentButton.contains(position))
+            return TrackHeaderHit { trackIndex, TrackHeaderControl::instrument, layout.instrumentButton };
 
         // Generous vertical hit zone around the thin slider so it's easy to grab.
         if (layout.slider.expanded(0, 6).contains(position))
@@ -2203,6 +2261,13 @@ ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::compute
     layout.soloButton = controlsRow.removeFromLeft(buttonSize);
     controlsRow.removeFromLeft(buttonGap);
     layout.recordButton = controlsRow.removeFromLeft(buttonSize);
+
+    // Instrument button on the right side of the controls row — MIDI tracks only,
+    // since audio / folder tracks have no hosted VST instrument.
+    const bool isMidiTrack = trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
+                          && tracks[static_cast<std::size_t>(trackIndex)].isMidiTrack;
+    if (isMidiTrack && controlsRow.getWidth() >= buttonSize)
+        layout.instrumentButton = controlsRow.removeFromRight(buttonSize);   // square, matches M/S/R
 
     inner.removeFromTop(5);
     auto volumeRow = inner.removeFromTop(14);
@@ -2657,6 +2722,22 @@ int ArrangementTimelineComponent::getLaneHeightForTrack(int trackIndex) const no
     // calculation (lane bounds, total height, hit-testing) without special-casing each call.
     if (isTrackHidden(trackIndex))
         return 0;
+
+    if (fitTrackLanesToVisibleArea)
+    {
+        int visibleTrackCount = 0;
+        const auto trackCount = static_cast<int>(project.getTracks().size());
+        for (int index = 0; index < trackCount; ++index)
+            if (! isTrackHidden(index))
+                ++visibleTrackCount;
+
+        if (visibleTrackCount > 0)
+        {
+            const auto availableHeight = getVisibleTrackAreaBounds(*this).getHeight();
+            const auto fittedHeight = availableHeight / visibleTrackCount;
+            return juce::jlimit(minimumLaneHeight, defaultLaneHeight, fittedHeight);
+        }
+    }
 
     const auto defaultHeight = juce::jlimit(
         minimumLaneHeight,

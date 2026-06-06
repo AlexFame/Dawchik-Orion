@@ -21,7 +21,13 @@ MainWindow::MainWindow(juce::String name)
     {
         const auto launchBounds = primaryDisplay->userArea;
         if (! launchBounds.isEmpty())
-            setBounds(launchBounds);
+        {
+            auto squareVisualBounds = launchBounds;
+            squareVisualBounds.setX(launchBounds.getX() - 8);
+            squareVisualBounds.setWidth(launchBounds.getWidth() + 8);
+            squareVisualBounds.setHeight(launchBounds.getHeight() + 8);
+            setBounds(squareVisualBounds);
+        }
         else
             centreWithSize(1440, 900);
     }

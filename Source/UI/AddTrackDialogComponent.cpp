@@ -15,7 +15,7 @@ const auto textColour  = juce::Colours::white.withAlpha(0.94f);
 const auto mutedText   = juce::Colours::white.withAlpha(0.5f);
 
 constexpr int panelW = 540;
-constexpr int panelH = 446;
+constexpr int panelH = 492;
 constexpr int pad    = 22;
 constexpr int titleH = 30;
 constexpr int tabsH  = 104;
@@ -59,6 +59,11 @@ AddTrackDialogComponent::AddTrackDialogComponent()
     outputCombo.setColour(juce::ComboBox::outlineColourId, panelStroke);
     addAndMakeVisible(outputCombo);
 
+    instrumentCombo.setColour(juce::ComboBox::backgroundColourId, fieldFill);
+    instrumentCombo.setColour(juce::ComboBox::textColourId, textColour);
+    instrumentCombo.setColour(juce::ComboBox::outlineColourId, panelStroke);
+    addAndMakeVisible(instrumentCombo);
+
     autoColourToggle.setColour(juce::ToggleButton::textColourId, textColour);
     autoColourToggle.setColour(juce::ToggleButton::tickColourId, accent);
     autoColourToggle.setToggleState(true, juce::dontSendNotification);
@@ -75,6 +80,9 @@ AddTrackDialogComponent::AddTrackDialogComponent()
         r.autoColour = autoColourToggle.getToggleState();
         r.colour = chosenColour;
         r.outputBus = outputCombo.getSelectedId() - 2;
+        const auto instrumentIndex = instrumentCombo.getSelectedId() - 2;
+        if (instrumentIndex >= 0 && instrumentIndex < instrumentIds.size())
+            r.instrumentPluginId = instrumentIds[instrumentIndex];
         const auto cb = onCreate;
         closeDialog();
         if (cb)
@@ -86,7 +94,7 @@ AddTrackDialogComponent::AddTrackDialogComponent()
     addAndMakeVisible(createButton);
 }
 
-void AddTrackDialogComponent::show(int existingTrackCount, const juce::StringArray& busNames)
+void AddTrackDialogComponent::show(int existingTrackCount, const juce::StringArray& busNames, juce::Array<juce::PluginDescription> instruments)
 {
     trackCountAtOpen = existingTrackCount;
     type = TrackType::audio;
@@ -96,6 +104,22 @@ void AddTrackDialogComponent::show(int existingTrackCount, const juce::StringArr
     for (int i = 0; i < busNames.size(); ++i)
         outputCombo.addItem(busNames[i], i + 2);
     outputCombo.setSelectedId(1, juce::dontSendNotification);
+
+    instrumentCombo.clear(juce::dontSendNotification);
+    instrumentIds.clear();
+    instrumentCombo.addItem("No Instrument", 1);
+    for (int i = 0; i < instruments.size(); ++i)
+    {
+        const auto& desc = instruments.getReference(i);
+        auto label = desc.name;
+        if (desc.manufacturerName.isNotEmpty())
+            label += " - " + desc.manufacturerName;
+        if (desc.pluginFormatName.isNotEmpty())
+            label += " (" + desc.pluginFormatName + ")";
+        instrumentCombo.addItem(label, i + 2);
+        instrumentIds.add(desc.createIdentifierString());
+    }
+    instrumentCombo.setSelectedId(1, juce::dontSendNotification);
 
     countBox.setText("1", juce::dontSendNotification);
     autoColourToggle.setToggleState(true, juce::dontSendNotification);
@@ -118,6 +142,8 @@ void AddTrackDialogComponent::applyTypeToFields()
                     juce::dontSendNotification);
     if (autoColourToggle.getToggleState())
         chosenColour = juce::Colour(kTypes[static_cast<std::size_t>(type)].colour);
+    instrumentCombo.setVisible(type == TrackType::midi || type == TrackType::sampler);
+    resized();
     repaint();
 }
 
@@ -286,6 +312,8 @@ void AddTrackDialogComponent::paint(juce::Graphics& g)
     g.drawText("Name",   lx, nameBox.getY(),        labelW, rowH, juce::Justification::centredLeft, false);
     g.drawText("Count",  lx, countBox.getY(),       labelW, rowH, juce::Justification::centredLeft, false);
     g.drawText("Color",  lx, getColourSwatchBounds().getY(), labelW, rowH, juce::Justification::centredLeft, false);
+    if (instrumentCombo.isVisible())
+        g.drawText("Instrument", lx, instrumentCombo.getY(), labelW, rowH, juce::Justification::centredLeft, false);
     g.drawText("Output", lx, outputCombo.getY(),    labelW, rowH, juce::Justification::centredLeft, false);
 
     // Colour swatch (always solid; Auto-Color just means it's picked automatically).
@@ -333,6 +361,18 @@ void AddTrackDialogComponent::resized()
     auto colourRow = inner.removeFromTop(rowH);
     autoColourToggle.setBounds(colourRow.withX(fieldX + 130).withWidth(fieldW - 130));
     inner.removeFromTop(rowGap);
+
+    if (type == TrackType::midi || type == TrackType::sampler)
+    {
+        instrumentCombo.setVisible(true);
+        instrumentCombo.setBounds(inner.removeFromTop(rowH).withX(fieldX).withWidth(fieldW));
+        inner.removeFromTop(rowGap);
+    }
+    else
+    {
+        instrumentCombo.setVisible(false);
+        instrumentCombo.setBounds({});
+    }
 
     outputCombo.setBounds(inner.removeFromTop(rowH).withX(fieldX).withWidth(fieldW));
 

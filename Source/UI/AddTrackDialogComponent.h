@@ -1,5 +1,6 @@
 #pragma once
 
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <functional>
@@ -24,6 +25,7 @@ public:
         juce::Colour colour;
         bool autoColour { true };
         int outputBus { -1 };       // -1 = Master, else bus index
+        juce::String instrumentPluginId;
     };
 
     AddTrackDialogComponent();
@@ -31,7 +33,7 @@ public:
     std::function<void(const Result&)> onCreate;
     std::function<void()> onClose;
 
-    void show(int existingTrackCount, const juce::StringArray& busNames);
+    void show(int existingTrackCount, const juce::StringArray& busNames, juce::Array<juce::PluginDescription> instruments);
     void closeDialog();
 
     void paint(juce::Graphics& g) override;
@@ -59,11 +61,13 @@ private:
 
     juce::TextEditor nameBox;
     juce::TextEditor countBox;
+    juce::ComboBox instrumentCombo;
     juce::ComboBox outputCombo;
     juce::ToggleButton autoColourToggle { "Auto-Color" };
     juce::TextButton cancelButton { "Cancel" };
     juce::TextButton createButton { "Create" };
     juce::Colour chosenColour { juce::Colour(0xffe8401f) };
+    juce::StringArray instrumentIds;
 
     float anim { 0.0f };
 

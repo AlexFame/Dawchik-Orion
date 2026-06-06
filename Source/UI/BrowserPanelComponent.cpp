@@ -14,11 +14,12 @@ const auto rowSelected = juce::Colours::white.withAlpha(0.09f);
 const auto buttonColour = juce::Colour(0xff1b232b);
 const auto buttonOutlineColour = juce::Colours::white.withAlpha(0.18f);
 constexpr int rowHeight = 46;
-// Extra row added below the directory path label to hold the search field, hence
-// headerHeight needs more vertical room than before.
 constexpr int rowGap = 7;
 constexpr int dragThresholdPx = 5;
-constexpr int headerHeight = 152; // title + subtitle + path + search field
+constexpr int headerHeight = 120; // title + search + sections
+constexpr int previewBarHeight = 64; // bottom preview card (waveform + play + name)
+constexpr int previewSyncRowHeight = 24; // SYNC toggle row, sits below the preview card
+constexpr int contentPadX = 4; // uniform horizontal inset so left/right padding stays symmetric
 constexpr float horizontalSwipeThreshold = 0.14f;
 constexpr int horizontalSwipeLockMs = 320;
 const juce::String mountedDevicesHubName = "Mounted Devices";
@@ -134,16 +135,217 @@ void drawBadge(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::Strin
     g.drawText(text, bounds.reduced(6, 0), juce::Justification::centred, true);
 }
 
+// Draws a small glyph inside an icon box: folder for directories, an up-arrow for the
+// ".." parent link, a waveform for audio files. `colour` should already be set by the caller.
+void drawBrowserEntryIcon(juce::Graphics& g, juce::Rectangle<float> a, bool isDirectory, bool isParentLink)
+{
+    if (isParentLink)
+    {
+        // Up arrow.
+        const auto cx = a.getCentreX(), cy = a.getCentreY();
+        const auto s = juce::jmin(a.getWidth(), a.getHeight()) * 0.34f;
+        juce::Path p;
+        p.startNewSubPath(cx, cy - s);
+        p.lineTo(cx - s, cy + s * 0.2f);
+        p.lineTo(cx - s * 0.45f, cy + s * 0.2f);
+        p.lineTo(cx - s * 0.45f, cy + s);
+        p.lineTo(cx + s * 0.45f, cy + s);
+        p.lineTo(cx + s * 0.45f, cy + s * 0.2f);
+        p.lineTo(cx + s, cy + s * 0.2f);
+        p.closeSubPath();
+        g.fillPath(p);
+        return;
+    }
+
+    if (isDirectory)
+    {
+        // Folder silhouette with a tab.
+        auto f = a.reduced(a.getWidth() * 0.16f, a.getHeight() * 0.22f);
+        const auto r = 2.0f;
+        const auto tabW = f.getWidth() * 0.42f;
+        const auto tabH = f.getHeight() * 0.24f;
+        const auto bodyTop = f.getY() + tabH;
+        juce::Path p;
+        p.startNewSubPath(f.getX(), f.getY() + r);
+        p.lineTo(f.getX(), f.getBottom() - r);
+        p.quadraticTo(f.getX(), f.getBottom(), f.getX() + r, f.getBottom());
+        p.lineTo(f.getRight() - r, f.getBottom());
+        p.quadraticTo(f.getRight(), f.getBottom(), f.getRight(), f.getBottom() - r);
+        p.lineTo(f.getRight(), bodyTop + r);
+        p.quadraticTo(f.getRight(), bodyTop, f.getRight() - r, bodyTop);
+        p.lineTo(f.getX() + tabW + r, bodyTop);
+        p.lineTo(f.getX() + tabW - tabH * 0.4f, f.getY() + r);
+        p.quadraticTo(f.getX() + tabW - tabH * 0.4f - r, f.getY(), f.getX() + tabW - tabH * 0.4f - r * 2.0f, f.getY());
+        p.lineTo(f.getX() + r, f.getY());
+        p.quadraticTo(f.getX(), f.getY(), f.getX(), f.getY() + r);
+        p.closeSubPath();
+        g.fillPath(p);
+        return;
+    }
+
+    // Audio file: a little symmetric waveform of vertical bars.
+    const float hs[] = { 0.30f, 0.62f, 0.92f, 0.55f, 0.78f, 0.40f };
+    const int n = 6;
+    const auto bw = a.getWidth() / (n * 1.7f);
+    for (int i = 0; i < n; ++i)
+    {
+        const auto h = a.getHeight() * hs[i];
+        const auto x = a.getX() + bw * 1.7f * i + bw * 0.35f;
+        g.fillRoundedRectangle(x, a.getCentreY() - h * 0.5f, bw, h, bw * 0.45f);
+    }
+}
+
+juce::String normalisedBrowserPathText(const juce::File& file)
+{
+    return file.getFullPathName().toLowerCase()
+               .replaceCharacter('-', ' ')
+               .replaceCharacter('_', ' ')
+               .replaceCharacter('/', ' ');
+}
+
+bool pathLooksLikeLoop(const juce::String& text)
+{
+    return text.contains("loop")
+        || text.contains("loops")
+        || text.contains("луп")
+        || text.contains("melody")
+        || text.contains("melodies")
+        || text.contains("phrase")
+        || text.contains("phrases")
+        || text.contains("construction")
+        || text.contains("midi");
+}
+
+bool pathLooksLikeOneShot(const juce::String& text)
+{
+    return text.contains("one shot")
+        || text.contains("oneshot")
+        || text.contains("one shots")
+        || text.contains("oneshots")
+        || text.contains("1shot")
+        || text.contains("ван шот")
+        || text.contains("ваншот")
+        || text.contains("drum hits")
+        || text.contains("hits")
+        || text.contains("stab")
+        || text.contains("stabs");
+}
+
+bool pathLooksLikeDrumOneShot(const juce::String& text)
+{
+    return text.contains("drum")
+        || text.contains("kick")
+        || text.contains("kicks")
+        || text.contains("snare")
+        || text.contains("snares")
+        || text.contains("clap")
+        || text.contains("claps")
+        || text.contains("hat")
+        || text.contains("hats")
+        || text.contains("perc")
+        || text.contains("percs")
+        || text.contains("fx");
+}
+
 juce::String metadataTypeForFile(const juce::File& file)
 {
-    const auto lowerName = file.getFileNameWithoutExtension().toLowerCase();
-    if (lowerName.contains("loop") || lowerName.contains("break") || lowerName.contains("drum") || lowerName.contains("beat"))
+    const auto text = normalisedBrowserPathText(file);
+    const auto explicitOneShot = pathLooksLikeOneShot(text);
+    const auto loop = pathLooksLikeLoop(text) || parseBpmFromFileName(file) > 0.0;
+
+    if (explicitOneShot)
+        return "One-shot";
+
+    if (loop)
         return "Loop";
 
-    if (lowerName.contains("oneshot") || lowerName.contains("one shot") || lowerName.contains("stab") || lowerName.contains("hit"))
+    if (pathLooksLikeDrumOneShot(text))
         return "One-shot";
 
     return "Audio";
+}
+
+struct BrowserSearchFilter
+{
+    bool wantsLoop { false };
+    bool wantsOneShot { false };
+    juce::StringArray terms;
+};
+
+bool isLoopItem(const orion::BrowserItem& item)
+{
+    if (item.isParentLink)
+        return false;
+
+    return metadataTypeForFile(item.file) == "Loop";
+}
+
+bool isOneShotItem(const orion::BrowserItem& item)
+{
+    if (item.isParentLink)
+        return false;
+
+    return metadataTypeForFile(item.file) == "One-shot";
+}
+
+BrowserSearchFilter parseBrowserSearchFilter(const juce::String& query)
+{
+    auto normalised = query.toLowerCase();
+    normalised = normalised.replaceCharacter('-', ' ')
+                           .replaceCharacter('_', ' ')
+                           .replaceCharacter('/', ' ')
+                           .replaceCharacter('.', ' ')
+                           .replaceCharacter(',', ' ');
+
+    BrowserSearchFilter filter;
+    filter.wantsLoop = normalised.contains("loop")
+                    || normalised.contains("луп")
+                    || normalised.contains("петл");
+    filter.wantsOneShot = normalised.contains("one shot")
+                       || normalised.contains("oneshot")
+                       || normalised.contains("1shot")
+                       || normalised.contains("ван шот")
+                       || normalised.contains("ваншот");
+
+    juce::StringArray rawTerms;
+    rawTerms.addTokens(normalised, " \t\r\n", "");
+    rawTerms.removeEmptyStrings();
+    rawTerms.trim();
+
+    for (const auto& term : rawTerms)
+    {
+        if (term == "loop" || term == "loops" || term == "луп" || term == "лупы" || term == "петля" || term == "петли")
+            continue;
+
+        if (term == "one" || term == "shot" || term == "shots" || term == "oneshot" || term == "oneshots" || term == "1shot"
+            || term == "ван" || term == "шот" || term == "шоты" || term == "ваншот" || term == "ваншоты")
+        {
+            continue;
+        }
+
+        filter.terms.addIfNotAlreadyThere(term);
+    }
+
+    return filter;
+}
+
+bool matchesBrowserSearch(const orion::BrowserItem& item, const BrowserSearchFilter& filter)
+{
+    if (item.isParentLink)
+        return true;
+
+    if (filter.wantsLoop && ! isLoopItem(item))
+        return false;
+
+    if (filter.wantsOneShot && ! isOneShotItem(item))
+        return false;
+
+    const auto searchable = (item.name + " " + item.subtitle + " " + item.category + " " + item.file.getFullPathName()).toLowerCase();
+    for (const auto& term : filter.terms)
+        if (! searchable.contains(term))
+            return false;
+
+    return true;
 }
 
 }  // namespace
@@ -196,6 +398,20 @@ BrowserPanelComponent::BrowserPanelComponent()
     };
     addAndMakeVisible(searchEditor);
 
+    const auto styleSectionButton = [this](juce::TextButton& button)
+    {
+        button.setClickingTogglesState(false);
+        button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff151b21));
+        button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff26313b));
+        button.setColour(juce::TextButton::textColourOffId, mutedText);
+        button.setColour(juce::TextButton::textColourOnId, juce::Colours::white.withAlpha(0.94f));
+        button.addListener(this);
+        addAndMakeVisible(button);
+    };
+    styleSectionButton(loopsSectionButton);
+    styleSectionButton(oneShotsSectionButton);
+    updateSectionButtons();
+
     currentDirectory = getMacBrowseRoot();
     showLocationRoots(false);
     refreshEntries();
@@ -219,15 +435,26 @@ void BrowserPanelComponent::chooseRootFolder()
                                {
                                    const auto selected = chooser.getResult();
                                    if (selected.isDirectory())
-                                       navigateTo(selected);
+                                   {
+                                       if (onRootFolderChosen)
+                                           onRootFolderChosen(selected);
+                                       else
+                                           openFolder(selected);
+                                   }
 
                                    folderChooser.reset();
                                });
 }
 
+void BrowserPanelComponent::openFolder(const juce::File& directory)
+{
+    if (directory.isDirectory())
+        navigateTo(directory);
+}
+
 void BrowserPanelComponent::paint(juce::Graphics& g)
 {
-    auto bounds = getLocalBounds();
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
 
     auto titleArea = bounds.removeFromTop(32);
     g.setColour(juce::Colours::white.withAlpha(0.92f));
@@ -237,16 +464,6 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
     g.setColour(mutedText);
     g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
     g.drawText("Folders and audio files for drag to playlist", bounds.removeFromTop(18), juce::Justification::centredLeft);
-
-    auto pathArea = bounds.removeFromTop(52);
-    g.setFont(juce::FontOptions(11.5f, juce::Font::plain));
-    const auto pathLabel = showingLocationRoots ? juce::String("Locations") : currentDirectory.getFullPathName();
-    auto displayPathLabel = pathLabel;
-    if (showingMacRootOverview)
-        displayPathLabel = "Macintosh HD";
-    else if (showingUserHomeOverview)
-        displayPathLabel = currentDirectory.getFileName().isNotEmpty() ? currentDirectory.getFileName() : currentDirectory.getFullPathName();
-    g.drawFittedText(displayPathLabel, pathArea.withTrimmedTop(22), juce::Justification::centredLeft, 2);
 
     const auto listViewport = getListViewportBounds();
     g.saveState();
@@ -260,13 +477,25 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 
         const auto selected = selectedIndex.has_value() && *selectedIndex == index;
         const auto hovered = hoverIndex.has_value() && *hoverIndex == index;
-        g.setColour(selected ? rowSelected : (hovered ? rowHover : rowBackground));
-        g.fillRoundedRectangle(row.toFloat(), 10.0f);
-
         const auto& item = items[static_cast<std::size_t>(index)];
-        g.setColour(item.colour);
-        g.fillRoundedRectangle(row.removeFromLeft(5).toFloat(), 10.0f);
-        row.removeFromLeft(12);
+
+        // Row card. Selected rows get a faint tint in the entry's own colour so the
+        // selection reads as "this one" rather than a flat grey.
+        g.setColour(selected ? item.colour.withAlpha(0.18f) : (hovered ? rowHover : rowBackground));
+        g.fillRoundedRectangle(row.toFloat(), 10.0f);
+        if (selected)
+        {
+            g.setColour(item.colour.withAlpha(0.55f));
+            g.drawRoundedRectangle(row.toFloat().reduced(0.5f), 10.0f, 1.0f);
+        }
+
+        // Icon box on the left: tinted rounded square + folder/waveform/up-arrow glyph.
+        auto iconBox = row.removeFromLeft(rowHeight).toFloat().reduced(9.0f);
+        g.setColour(item.colour.withAlpha(0.20f));
+        g.fillRoundedRectangle(iconBox, 7.0f);
+        g.setColour(item.colour.brighter(0.45f).withAlpha(0.95f));
+        drawBrowserEntryIcon(g, iconBox.reduced(5.0f), item.isDirectory, item.isParentLink);
+        row.removeFromLeft(10);
 
         g.setColour(juce::Colours::white.withAlpha(0.9f));
         g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
@@ -298,42 +527,162 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         g.drawText(item.subtitle, row, juce::Justification::centredLeft, true);
     }
 
-    const auto contentHeight = getContentHeight(static_cast<int>(items.size()));
-    const auto scrollRange = contentHeight - listViewport.getHeight();
-    if (scrollRange > 0)
-    {
-        auto scrollbarArea = listViewport;
-        const auto track = scrollbarArea.removeFromRight(4).reduced(0, 4);
-        const auto thumbHeight = juce::jmax(24, static_cast<int>(std::round(track.getHeight() * (listViewport.getHeight() / static_cast<double>(contentHeight)))));
-        const auto thumbY = track.getY() + static_cast<int>(std::round((track.getHeight() - thumbHeight) * (scrollOffsetY / static_cast<double>(scrollRange))));
+    g.restoreState();
 
-        g.setColour(juce::Colours::white.withAlpha(0.08f));
-        g.fillRoundedRectangle(track.toFloat(), 2.0f);
-        g.setColour(juce::Colours::white.withAlpha(0.32f));
-        g.fillRoundedRectangle(juce::Rectangle<int>(track.getX(), thumbY, track.getWidth(), thumbHeight).toFloat(), 2.0f);
+    paintPreviewBar(g);
+}
+
+void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
+{
+    const auto bar = getPreviewBarBounds();
+    const auto accent = juce::Colour(0xff35c9d6);
+
+    // Card.
+    g.setColour(juce::Colour(0xff10141a));
+    g.fillRoundedRectangle(bar.toFloat().reduced(2.0f), 10.0f);
+    g.setColour(juce::Colours::white.withAlpha(0.10f));
+    g.drawRoundedRectangle(bar.toFloat().reduced(2.0f), 10.0f, 1.0f);
+
+    // SYNC toggle pill — sits in its own row just below the card so nothing overlaps it.
+    {
+        const auto syncBtn = getPreviewSyncButtonBounds();
+        g.setColour(previewBpmSync ? accent.withAlpha(0.85f) : juce::Colours::white.withAlpha(0.06f));
+        g.fillRoundedRectangle(syncBtn.toFloat(), 6.0f);
+        g.setColour(previewBpmSync ? accent.withAlpha(0.9f) : juce::Colours::white.withAlpha(0.16f));
+        g.drawRoundedRectangle(syncBtn.toFloat().reduced(0.5f), 6.0f, 1.0f);
+        g.setColour(previewBpmSync ? juce::Colour(0xff10141a) : juce::Colours::white.withAlpha(0.55f));
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.drawText(previewBpmSync ? "SYNC TO PROJECT BPM  -  ON" : "SYNC TO PROJECT BPM  -  OFF",
+                   syncBtn, juce::Justification::centred);
     }
 
-    g.restoreState();
+    // Play / stop button.
+    const auto btn = getPreviewPlayButtonBounds();
+    if (previewArmed)
+    {
+        // Quantized & waiting for the next beat: pulse the button so it reads as "queued".
+        const auto phase = std::sin(static_cast<float>(juce::Time::getMillisecondCounter() % 600) / 600.0f * juce::MathConstants<float>::twoPi);
+        const auto pulse = 0.45f + 0.45f * (0.5f + 0.5f * phase);
+        g.setColour(accent.withAlpha(pulse));
+    }
+    else
+    {
+        g.setColour(accent.withAlpha(previewPeaks.empty() ? 0.25f : 0.9f));
+    }
+    g.fillRoundedRectangle(btn.toFloat(), 8.0f);
+    g.setColour(juce::Colour(0xff10141a));
+    const auto gi = btn.toFloat().reduced(btn.getWidth() * 0.3f, btn.getHeight() * 0.26f);
+    if (previewPlaying)
+    {
+        // Stop square.
+        g.fillRoundedRectangle(btn.toFloat().reduced(btn.getWidth() * 0.32f), 2.0f);
+    }
+    else
+    {
+        // Play triangle.
+        juce::Path tri;
+        tri.startNewSubPath(gi.getX(), gi.getY());
+        tri.lineTo(gi.getRight(), gi.getCentreY());
+        tri.lineTo(gi.getX(), gi.getBottom());
+        tri.closeSubPath();
+        g.fillPath(tri);
+    }
+
+    // Waveform area.
+    const auto wave = getPreviewWaveformBounds();
+    if (previewPeaks.empty())
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.30f));
+        g.setFont(juce::FontOptions(12.0f));
+        g.drawText("Select a sample to preview", wave, juce::Justification::centred);
+        return;
+    }
+
+    // Name (top of the waveform area).
+    auto waveBox = wave;
+    auto nameRow = waveBox.removeFromTop(15);
+    g.setColour(juce::Colours::white.withAlpha(0.80f));
+    g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+    g.drawText(previewName, nameRow, juce::Justification::centredLeft, true);
+
+    // Waveform: vertical mirrored bars.
+    const auto n = static_cast<int>(previewPeaks.size());
+    const auto midY = waveBox.getCentreY();
+    const auto halfH = waveBox.getHeight() * 0.5f - 1.0f;
+    const auto playedX = waveBox.getX() + previewPositionRatio * waveBox.getWidth();
+    for (int x = 0; x < waveBox.getWidth(); ++x)
+    {
+        const auto idx = juce::jlimit(0, n - 1, static_cast<int>(static_cast<float>(x) / waveBox.getWidth() * n));
+        const auto h = juce::jmax(1.0f, previewPeaks[static_cast<std::size_t>(idx)] * halfH);
+        const auto px = waveBox.getX() + x;
+        g.setColour(px <= playedX ? accent.withAlpha(0.95f) : juce::Colours::white.withAlpha(0.28f));
+        g.fillRect(static_cast<float>(px), midY - h, 1.0f, h * 2.0f);
+    }
+
+    // Playhead line while playing.
+    if (previewPlaying)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.7f));
+        g.fillRect(playedX, static_cast<float>(waveBox.getY()), 1.0f, static_cast<float>(waveBox.getHeight()));
+    }
+}
+
+void BrowserPanelComponent::setBrowserSection(BrowserSection section)
+{
+    if (browserSection == section)
+        return;
+
+    browserSection = section;
+    updateSectionButtons();
+    refreshEntries();
+}
+
+void BrowserPanelComponent::updateSectionButtons()
+{
+    loopsSectionButton.setToggleState(browserSection == BrowserSection::loops, juce::dontSendNotification);
+    oneShotsSectionButton.setToggleState(browserSection == BrowserSection::oneShots, juce::dontSendNotification);
 }
 
 void BrowserPanelComponent::resized()
 {
-    auto bounds = getLocalBounds();
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
 
     // Row 1: title row — Add Folder (right).
     auto titleRow = bounds.removeFromTop(30);
     closeButton.setBounds({});
     chooseFolderButton.setBounds(titleRow.removeFromRight(104).reduced(0, 2));
 
-    // Skip the subtitle + path block painted in paint() (18 + 52 = 70px) and place
-    // the search editor in the remaining header band.
-    bounds.removeFromTop(18 + 52);
+    bounds.removeFromTop(18);
     searchEditor.setBounds(bounds.removeFromTop(28).reduced(0, 2));
+
+    bounds.removeFromTop(6);
+    auto sectionRow = bounds.removeFromTop(24);
+    loopsSectionButton.setBounds(sectionRow.removeFromLeft(76));
+    sectionRow.removeFromLeft(6);
+    oneShotsSectionButton.setBounds(sectionRow.removeFromLeft(96));
 }
 
 void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 {
     grabKeyboardFocus();
+
+    // SYNC toggle row (below the preview card).
+    if (getPreviewSyncButtonBounds().contains(event.getPosition()))
+    {
+        previewBpmSync = !previewBpmSync;
+        repaint(getPreviewSyncButtonBounds());
+        if (onPreviewBpmSyncToggled)
+            onPreviewBpmSyncToggled();
+        return;
+    }
+
+    // Preview card play/stop button.
+    if (getPreviewBarBounds().contains(event.getPosition()))
+    {
+        if (getPreviewPlayButtonBounds().contains(event.getPosition()) && onTogglePreviewPlayback)
+            onTogglePreviewPlayback();
+        return;
+    }
 
     dragIndex = hitTestRow(event.getPosition());
     selectedIndex = dragIndex;
@@ -345,47 +694,51 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
     const auto& item = items[static_cast<std::size_t>(*selectedIndex)];
     if (item.isDirectory)
     {
-        if (showingLocationRoots && item.name == "Macintosh HD")
-        {
-            pushCurrentLocationToBackHistory();
-            forwardHistory.clear();
-            showingLocationRoots = false;
-            showingMacRootOverview = true;
-            showingUserHomeOverview = false;
-            currentDirectory = getMacBrowseRoot();
-            refreshEntries();
-            return;
-        }
-
-        if (item.isParentLink)
-        {
-            const auto parentDirectory = currentDirectory.getParentDirectory();
-            if (showingUserHomeOverview)
-            {
-                navigateTo(juce::File("/Users"));
-            }
-            else if (showingMacRootOverview
-                || currentDirectory == juce::File("/Users")
-                || currentDirectory == juce::File("/Applications")
-                || currentDirectory == juce::File("/Library")
-                || currentDirectory == juce::File("/System")
-                || currentDirectory == juce::File("/Volumes")
-                || parentDirectory == currentDirectory
-                || ! parentDirectory.isDirectory())
-            {
-                showLocationRoots();
-            }
-            else
-                navigateTo(parentDirectory);
-        }
-        else
-            navigateTo(item.file);
-
+        openDirectoryItem(item);
         return;
     }
 
     if (onPreviewItem)
         onPreviewItem(item);
+}
+
+void BrowserPanelComponent::openDirectoryItem(const BrowserItem& item)
+{
+    if (showingLocationRoots && item.name == "Macintosh HD")
+    {
+        pushCurrentLocationToBackHistory();
+        forwardHistory.clear();
+        showingLocationRoots = false;
+        showingMacRootOverview = true;
+        showingUserHomeOverview = false;
+        currentDirectory = getMacBrowseRoot();
+        refreshEntries();
+        return;
+    }
+
+    if (item.isParentLink)
+    {
+        const auto parentDirectory = currentDirectory.getParentDirectory();
+        if (showingUserHomeOverview)
+        {
+            navigateTo(juce::File("/Users"));
+        }
+        else if (showingMacRootOverview
+            || currentDirectory == juce::File("/Users")
+            || currentDirectory == juce::File("/Applications")
+            || currentDirectory == juce::File("/Library")
+            || currentDirectory == juce::File("/System")
+            || currentDirectory == juce::File("/Volumes")
+            || parentDirectory == currentDirectory
+            || ! parentDirectory.isDirectory())
+        {
+            showLocationRoots();
+        }
+        else
+            navigateTo(parentDirectory);
+    }
+    else
+        navigateTo(item.file);
 }
 
 void BrowserPanelComponent::mouseDoubleClick(const juce::MouseEvent& event)
@@ -521,6 +874,57 @@ void BrowserPanelComponent::mouseWheelMove(const juce::MouseEvent& event, const 
 
 bool BrowserPanelComponent::keyPressed(const juce::KeyPress& key)
 {
+    const auto count = static_cast<int>(items.size());
+
+    // Up / Down: move the selection through files AND folders. Audio files auto-audition
+    // (Ableton-style); folders just highlight. The selected row is scrolled into view.
+    if ((key.getKeyCode() == juce::KeyPress::upKey || key.getKeyCode() == juce::KeyPress::downKey) && count > 0)
+    {
+        const int dir = key.getKeyCode() == juce::KeyPress::downKey ? 1 : -1;
+        int next = selectedIndex.has_value() ? juce::jlimit(0, count - 1, *selectedIndex + dir)
+                                             : (dir > 0 ? 0 : count - 1);
+        selectedIndex = next;
+
+        // Scroll the row fully into the viewport.
+        const auto viewport = getListViewportBounds();
+        const auto rowTop = next * (rowHeight + rowGap);
+        if (rowTop < scrollOffsetY)
+            scrollOffsetY = rowTop;
+        else if (rowTop + rowHeight > scrollOffsetY + viewport.getHeight())
+            scrollOffsetY = rowTop + rowHeight - viewport.getHeight();
+        clampScrollOffset();
+
+        const auto& item = items[static_cast<std::size_t>(next)];
+        if (! item.isDirectory && onPreviewItem)
+            onPreviewItem(item);
+        repaint();
+        return true;
+    }
+
+    // Left: go up one level (into the parent folder). Right: enter the selected folder.
+    if (key.getKeyCode() == juce::KeyPress::leftKey)
+    {
+        for (const auto& it : items)
+            if (it.isParentLink)
+            {
+                const auto parent = it;        // copy — openDirectoryItem refreshes items
+                openDirectoryItem(parent);
+                return true;
+            }
+        goBackInBrowserHistory();              // at the locations root: fall back to history
+        return true;
+    }
+    if (key.getKeyCode() == juce::KeyPress::rightKey)
+    {
+        if (selectedIndex.has_value())
+        {
+            const auto it = items[static_cast<std::size_t>(*selectedIndex)];   // copy
+            if (it.isDirectory)
+                openDirectoryItem(it);
+        }
+        return true;
+    }
+
     if (key.getKeyCode() != juce::KeyPress::returnKey)
         return false;
 
@@ -529,7 +933,11 @@ bool BrowserPanelComponent::keyPressed(const juce::KeyPress& key)
 
     const auto& item = items[static_cast<std::size_t>(*selectedIndex)];
     if (item.isDirectory)
-        return false;
+    {
+        // Enter on a folder navigates into it (same as a click).
+        openDirectoryItem(item);
+        return true;
+    }
 
     if (onActivateItem)
     {
@@ -544,6 +952,10 @@ void BrowserPanelComponent::buttonClicked(juce::Button* button)
 {
     if (button == &chooseFolderButton)
         chooseRootFolder();
+    else if (button == &loopsSectionButton)
+        setBrowserSection(browserSection == BrowserSection::loops ? BrowserSection::all : BrowserSection::loops);
+    else if (button == &oneShotsSectionButton)
+        setBrowserSection(browserSection == BrowserSection::oneShots ? BrowserSection::all : BrowserSection::oneShots);
     else if (button == &closeButton)
     {
         if (onCloseRequested)
@@ -800,6 +1212,7 @@ void BrowserPanelComponent::refreshEntries()
     // Include the search query in the signature — typing in the search box doesn't
     // change the directory listing but it MUST trigger a refresh of `items`.
     newSignature << "@q=" << searchQuery;
+    newSignature << "@section=" << static_cast<int>(browserSection);
 
     if (newSignature == entrySignature)
         return;
@@ -809,24 +1222,27 @@ void BrowserPanelComponent::refreshEntries()
 
     // Apply the case-insensitive search filter. Parent-link rows (".." / "Go up")
     // always pass through so the user can keep navigating while a query is active.
-    if (searchQuery.isEmpty())
+    items.clear();
+    items.reserve(unfilteredItems.size());
+    const auto filter = parseBrowserSearchFilter(searchQuery);
+    for (const auto& item : unfilteredItems)
     {
-        items = unfilteredItems;
-    }
-    else
-    {
-        items.clear();
-        items.reserve(unfilteredItems.size());
-        const auto lowerQuery = searchQuery.toLowerCase();
-        for (const auto& item : unfilteredItems)
+        if (item.isParentLink)
         {
-            if (item.isParentLink
-                || item.name.toLowerCase().contains(lowerQuery)
-                || item.subtitle.toLowerCase().contains(lowerQuery))
-            {
-                items.push_back(item);
-            }
+            items.push_back(item);
+            continue;
         }
+
+        if (browserSection == BrowserSection::loops && ! isLoopItem(item))
+            continue;
+
+        if (browserSection == BrowserSection::oneShots && ! isOneShotItem(item))
+            continue;
+
+        if (searchQuery.isNotEmpty() && ! matchesBrowserSearch(item, filter))
+            continue;
+
+        items.push_back(item);
     }
 
     selectedIndex.reset();
@@ -967,9 +1383,74 @@ juce::Rectangle<int> BrowserPanelComponent::getRowBounds(int index) const noexce
 
 juce::Rectangle<int> BrowserPanelComponent::getListViewportBounds() const noexcept
 {
-    auto bounds = getLocalBounds();
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
     bounds.removeFromTop(headerHeight);
+    bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 8);   // card + sync row
     return bounds;
+}
+
+juce::Rectangle<int> BrowserPanelComponent::getPreviewBarBounds() const noexcept
+{
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
+    auto region = bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight);
+    region.removeFromBottom(previewSyncRowHeight);   // sync row lives below the card
+    return region;
+}
+
+juce::Rectangle<int> BrowserPanelComponent::getPreviewPlayButtonBounds() const noexcept
+{
+    auto bar = getPreviewBarBounds().reduced(10, 10);
+    return bar.removeFromLeft(bar.getHeight());   // square button on the left
+}
+
+juce::Rectangle<int> BrowserPanelComponent::getPreviewSyncButtonBounds() const noexcept
+{
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
+    auto row = bounds.removeFromBottom(previewSyncRowHeight);
+    // Full-width pill (matches the card's left/right inset) with a little vertical breathing room.
+    return row.reduced(2, 3);
+}
+
+juce::Rectangle<int> BrowserPanelComponent::getPreviewWaveformBounds() const noexcept
+{
+    auto bar = getPreviewBarBounds().reduced(10, 10);
+    bar.removeFromLeft(bar.getHeight() + 12);      // skip play button + gap
+    return bar;
+}
+
+void BrowserPanelComponent::setPreviewWaveform(const juce::String& name, std::vector<float> peaks)
+{
+    previewName = name;
+    previewPeaks = std::move(peaks);
+    previewPositionRatio = 0.0f;
+    repaint(getPreviewBarBounds());
+}
+
+void BrowserPanelComponent::setPreviewPlayback(bool playing, float positionRatio)
+{
+    if (previewPlaying == playing && std::abs(previewPositionRatio - positionRatio) < 0.002f)
+        return;
+    previewPlaying = playing;
+    previewPositionRatio = juce::jlimit(0.0f, 1.0f, positionRatio);
+    repaint(getPreviewBarBounds());
+}
+
+void BrowserPanelComponent::setPreviewArmed(bool armed)
+{
+    // Always repaint while armed (even if the flag didn't change) so the pulse animates,
+    // driven by the host's 60 Hz timer ticking this each frame.
+    previewArmed = armed;
+    repaint(getPreviewBarBounds());
+}
+
+void BrowserPanelComponent::clearPreview()
+{
+    previewName = {};
+    previewPeaks.clear();
+    previewPlaying = false;
+    previewArmed = false;
+    previewPositionRatio = 0.0f;
+    repaint(getPreviewBarBounds());
 }
 
 void BrowserPanelComponent::clampScrollOffset() noexcept
@@ -1038,8 +1519,7 @@ juce::Colour BrowserPanelComponent::colourForEntry(const juce::File& file, bool 
 
 double BrowserPanelComponent::defaultLengthForFile(const juce::File& file) const noexcept
 {
-    const auto lowerName = file.getFileNameWithoutExtension().toLowerCase();
-    if (lowerName.contains("loop") || lowerName.contains("bpm"))
+    if (metadataTypeForFile(file) == "Loop")
         return 8.0;
 
     return 4.0;

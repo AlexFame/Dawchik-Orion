@@ -32,9 +32,26 @@ public:
     std::function<void(const BrowserItem&)> onPreviewItem;
     std::function<void(const BrowserItem&)> onActivateItem;
     std::function<void()>                   onCloseRequested;
+    // Footer transport: fired when the play/stop button in the preview bar is clicked.
+    std::function<void()>                   onTogglePreviewPlayback;
+    // Fired when the SYNC toggle is clicked — caller should reload the preview buffer.
+    std::function<void()>                   onPreviewBpmSyncToggled;
+    std::function<void(const juce::File&)>  onRootFolderChosen;
+
+    bool isPreviewBpmSyncEnabled() const noexcept { return previewBpmSync; }
 
     std::optional<BrowserItem> getSelectedItem() const;
     void chooseRootFolder();
+    void openFolder(const juce::File& directory);
+
+    // Feed the bottom preview bar. Peaks are normalised 0..1 absolute magnitudes.
+    void setPreviewWaveform(const juce::String& name, std::vector<float> peaks);
+    void setPreviewPlayback(bool playing, float positionRatio);
+    // True while the preview is quantized-armed: waiting for the next project beat
+    // before it actually starts (Ableton-style launch quantize). Drives the blinking
+    // play button so the user can see it's "queued" rather than silently doing nothing.
+    void setPreviewArmed(bool armed);
+    void clearPreview();
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -68,8 +85,16 @@ private:
         bool userHomeOverview { false };
     };
 
+    enum class BrowserSection
+    {
+        all,
+        loops,
+        oneShots
+    };
+
     void buttonClicked(juce::Button* button) override;
     void timerCallback() override;
+    void openDirectoryItem(const BrowserItem& item);   // navigate into a folder / parent / root
     void refreshEntries();
     void showLocationRoots(bool addToHistory = true);
     void navigateTo(const juce::File& directory, bool addToHistory = true);
@@ -82,6 +107,13 @@ private:
     void unlockHorizontalSwipeGesture() noexcept;
     juce::Rectangle<int> getRowBounds(int index) const noexcept;
     juce::Rectangle<int> getListViewportBounds() const noexcept;
+    juce::Rectangle<int> getPreviewBarBounds() const noexcept;
+    juce::Rectangle<int> getPreviewPlayButtonBounds() const noexcept;
+    juce::Rectangle<int> getPreviewSyncButtonBounds() const noexcept;
+    juce::Rectangle<int> getPreviewWaveformBounds() const noexcept;
+    void paintPreviewBar(juce::Graphics& g);
+    void setBrowserSection(BrowserSection section);
+    void updateSectionButtons();
     void clampScrollOffset() noexcept;
     std::optional<int> hitTestRow(juce::Point<int> position) const noexcept;
     bool isAudioFile(const juce::File& file) const noexcept;
@@ -112,9 +144,20 @@ private:
     juce::TextButton chooseFolderButton { "Add Folder" };
     juce::TextButton closeButton { juce::String::charToString(0x00D7) }; // "×"
     juce::TextEditor searchEditor;
+    juce::TextButton loopsSectionButton { "Loops" };
+    juce::TextButton oneShotsSectionButton { "One-Shots" };
+    BrowserSection browserSection { BrowserSection::all };
     juce::String     searchQuery;
     // Items returned from the filesystem before applying the search filter.
     // `items` (in the .cpp) holds the post-filter view; this holds the source.
     std::vector<BrowserItem> unfilteredItems;
+
+    // Bottom preview bar state (fed by MainComponent's preview transport).
+    juce::String        previewName;
+    std::vector<float>  previewPeaks;          // normalised 0..1 magnitudes
+    bool                previewPlaying { false };
+    bool                previewArmed { false };   // quantized, waiting for the next beat
+    float               previewPositionRatio { 0.0f };
+    bool                previewBpmSync { false };
 };
 }  // namespace orion

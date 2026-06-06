@@ -41,7 +41,7 @@ constexpr int transportSectionGap = 12;
 constexpr int transportControlHeight = 46;
 constexpr int transportSectionHeight = 54;
 constexpr int transportContentVerticalNudge = 0;
-constexpr int samplerBottomPanelHeight = 320;
+constexpr int samplerBottomPanelHeight = 286;
 constexpr int bottomStatusBarHeight = orion::BottomStatusBarComponent::preferredHeight;
 
 enum MenuItemId
@@ -1026,15 +1026,6 @@ MainComponent::MainComponent()
     addAndMakeVisible(transportBar);
 
     bottomStatusBar.onMixer = [this]() { toggleMixerFromUi(); };
-    bottomStatusBar.onMaster = [this]() { toggleMixerFromUi(); };
-    bottomStatusBar.onFxRack = [this]()
-    {
-        statusLabel.setText("FX Rack is not wired yet", juce::dontSendNotification);
-    };
-    bottomStatusBar.onRouting = [this]()
-    {
-        statusLabel.setText("Routing view is not wired yet", juce::dontSendNotification);
-    };
     bottomStatusBar.onClipEditor = [this]() { toggleClipEditorFromUi(); };
     addAndMakeVisible(bottomStatusBar);
 
@@ -1052,35 +1043,27 @@ MainComponent::MainComponent()
     clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine,
                                                           [this]() { return metronomeButton.getToggleState(); });
     audioInputRecorder = std::make_unique<AudioInputRecorder>();
-    // Open up to 2 input channels as well as 2 outputs, so the microphone/line input
-    // is available for recording. On macOS this triggers the system mic-permission
-    // prompt the first time (needs NSMicrophoneUsageDescription — set in CMake).
+    // Open output only at launch. Audio input is enabled lazily when an audio track is
+    // armed/recorded. We request mic permission separately below, without opening input,
+    // so macOS shows one first-run prompt instead of a second CoreAudio prompt.
+    audioDeviceManager.initialise(0, 2, nullptr, true);
+    for (const auto& midiInput : juce::MidiInput::getAvailableDevices())
     {
-        const auto requestInputAndInit = [this]
+        audioDeviceManager.setMidiInputDeviceEnabled(midiInput.identifier, true);
+        audioDeviceManager.addMidiInputDeviceCallback(midiInput.identifier, this);
+        activeMidiInputDeviceIds.addIfNotAlreadyThere(midiInput.identifier);
+    }
+    {
+        // Request a low-latency buffer for responsive live playing. The device default is
+        // often 512 samples (~12 ms + output ≈ 23 ms round-trip, audible when playing).
+        auto setup = audioDeviceManager.getAudioDeviceSetup();
+        if (setup.bufferSize <= 0 || setup.bufferSize > 256)
         {
-            audioDeviceManager.initialise(2, 2, nullptr, true);
-
-            // Request a low-latency buffer for responsive live playing. The device
-            // default is often 512 samples (~12 ms + output ≈ 23 ms round-trip, audible
-            // when playing). Drop to ~256 (clamped to the device's nearest allowed size).
-            auto setup = audioDeviceManager.getAudioDeviceSetup();
-            if (setup.bufferSize <= 0 || setup.bufferSize > 256)
-            {
-                setup.bufferSize = 256;
-                audioDeviceManager.setAudioDeviceSetup(setup, true);
-            }
-        };
-        if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
-            && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio))
-        {
-            juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
-                                              [requestInputAndInit](bool /*granted*/) { requestInputAndInit(); });
-        }
-        else
-        {
-            requestInputAndInit();
+            setup.bufferSize = 256;
+            audioDeviceManager.setAudioDeviceSetup(setup, true);
         }
     }
+    requestMicrophonePermissionAtLaunch();
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
     masterMixerSource.addInputSource(&previewTransportSource, false);
     masterMixerSource.addInputSource(&clipEditorPreviewTransportSource, false);
@@ -1332,6 +1315,68 @@ MainComponent::MainComponent()
         resized();
         repaint();
     };
+    browserPanel.onTogglePreviewPlayback = [this]
+    {
+        if (previewTransportSource.isPlaying() || pendingBrowserPreviewStart)
+        {
+            pendingBrowserPreviewStart = false;
+            browserPanel.setPreviewArmed(false);
+            previewTransportSource.stop();
+        }
+        else if (previewBufferSource != nullptr)
+        {
+            armOrStartBrowserPreview();
+        }
+    };
+    browserPanel.onPreviewBpmSyncToggled = [this]
+    {
+        // Reload preview with the new sync mode if a sample is already loaded.
+        auto selected = browserPanel.getSelectedItem();
+        if (selected.has_value() && previewBufferSource != nullptr)
+        {
+            currentPreviewTempoBpm = 0.0;  // invalidate cache
+            playBrowserPreview(*selected);
+        }
+    };
+    browserPanel.onRootFolderChosen = [this](const juce::File& folder)
+    {
+        if (! folder.isDirectory())
+            return;
+
+        const auto folderPath = folder.getFullPathName();
+        const auto alreadyAdded = std::any_of(sidebarBrowserFolders.begin(), sidebarBrowserFolders.end(),
+                                              [&folderPath](const juce::File& existing)
+                                              {
+                                                  return existing.getFullPathName() == folderPath;
+                                              });
+        if (! alreadyAdded)
+        {
+            sidebarBrowserFolders.push_back(folder);
+            sidebarNav.setCustomFolders(sidebarBrowserFolders);
+        }
+
+        browserPanelVisible = true;
+        browserButton.setToggleState(true, juce::dontSendNotification);
+        browserPanel.setVisible(true);
+        browserPanel.openFolder(folder);
+        sidebarNav.setActiveFolder(folder);
+        startTimerHz(60);
+        resized();
+        repaint();
+    };
+    sidebarNav.onFolderSelected = [this](const juce::File& folder)
+    {
+        if (! folder.isDirectory())
+            return;
+
+        browserPanelVisible = true;
+        browserButton.setToggleState(true, juce::dontSendNotification);
+        browserPanel.setVisible(true);
+        browserPanel.openFolder(folder);
+        startTimerHz(60);
+        resized();
+        repaint();
+    };
     sidebarNav.onItemSelected = [this](SidebarNavItem item)
     {
         if (item == SidebarNavItem::files || item == SidebarNavItem::samples)
@@ -1345,6 +1390,18 @@ MainComponent::MainComponent()
             startTimerHz(60);
             resized();
             repaint();
+            return;
+        }
+
+        if (item == SidebarNavItem::addFolder)
+        {
+            browserPanelVisible = true;
+            browserButton.setToggleState(true, juce::dontSendNotification);
+            browserPanel.setVisible(true);
+            startTimerHz(60);
+            resized();
+            repaint();
+            browserPanel.chooseRootFolder();
             return;
         }
 
@@ -1377,7 +1434,9 @@ MainComponent::MainComponent()
             for (const auto& b : projectState.getBuses())
                 busNames.add(b.name);
             addTrackDialog.setBounds(getLocalBounds());
-            addTrackDialog.show(static_cast<int>(projectState.getTracks().size()), busNames);
+            addTrackDialog.show(static_cast<int>(projectState.getTracks().size()),
+                                busNames,
+                                pluginManager.getInstrumentDescriptions());
             addTrackDialog.toFront(true);
         }
     };
@@ -1437,6 +1496,7 @@ MainComponent::MainComponent()
 
         const bool midiLike = (r.type == TT::midi || r.type == TT::sampler);
         auto baseName = r.name.isNotEmpty() ? r.name : juce::String(midiLike ? "MIDI" : "Audio");
+        std::vector<int> createdTrackIndices;
 
         // If a folder (or one of its children) is currently selected, new tracks join that
         // folder: they're inserted at the end of its child block and routed to its bus.
@@ -1454,6 +1514,7 @@ MainComponent::MainComponent()
                 auto& nt = tracks[static_cast<std::size_t>(newIdx)];
                 nt.parentGroup = tracks[static_cast<std::size_t>(targetFolder)].groupId;
                 nt.outputBus   = tracks[static_cast<std::size_t>(targetFolder)].folderBusIndex;
+                createdTrackIndices.push_back(newIdx);
             }
             else
             {
@@ -1464,7 +1525,14 @@ MainComponent::MainComponent()
                 t.name = trackName;
                 if (! r.autoColour) t.colour = r.colour;
                 t.outputBus = r.outputBus;
+                createdTrackIndices.push_back(static_cast<int>(tracks.size()) - 1);
             }
+        }
+        if (midiLike && r.instrumentPluginId.isNotEmpty())
+        {
+            if (const auto desc = pluginManager.findDescription(r.instrumentPluginId); desc.has_value())
+                for (const auto trackIndex : createdTrackIndices)
+                    loadInstrumentOnTrack(trackIndex, *desc);
         }
         syncFoldersToBuses();
         refreshClipInspector();
@@ -1754,6 +1822,18 @@ MainComponent::MainComponent()
     {
         showTrackInstrumentMenu(trackIndex);
     };
+    arrangementTimeline.onTrackInstrumentClicked = [this](int trackIndex)
+    {
+        auto& tracks = projectState.getTracks();
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+            return;
+
+        // Instrument loaded → open its editor window. Otherwise open the picker to load one.
+        if (tracks[static_cast<std::size_t>(trackIndex)].instrumentPluginId.isNotEmpty())
+            openInstrumentEditor(trackIndex);
+        else
+            showInstrumentPicker(trackIndex);
+    };
 
     resetToPlaylistView();
     setClipInspectorVisible(false);
@@ -1805,6 +1885,9 @@ MainComponent::~MainComponent()
         audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
         audioRecorderCallbackAttached = false;
     }
+    for (const auto& midiInputId : activeMidiInputDeviceIds)
+        audioDeviceManager.removeMidiInputDeviceCallback(midiInputId, this);
+    activeMidiInputDeviceIds.clear();
     audioDeviceManager.removeAudioCallback(&previewSourcePlayer);
     audioInputRecorder.reset();
 }
@@ -1957,36 +2040,46 @@ void MainComponent::paint(juce::Graphics& g)
     // Reclaim as much vertical space as possible for the playlist (Studio One-style).
     // Old layout reserved 20px above the cards, plus a 66px "Playlist" header inside,
     // plus 18px paddings — all gone now. The cards hug the work area edges tightly.
-    auto workArea = bounds.withTrimmedTop(2);
+    // Horizontal extents MUST match resized() (which works off getLocalBounds().reduced(8)),
+    // otherwise the painted panel card sits 8px off from where the component is positioned —
+    // which made the browser's internal padding asymmetric (24px left vs 8px right).
+    auto workArea = bounds.reduced(8, 0).withTrimmedTop(2);
     workArea.removeFromBottom(bottomStatusBarHeight);
-    workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 8);
+    workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 2);
     juce::Rectangle<int> browserPanelBounds;
     if (browserPanelShown())
         browserPanelBounds = workArea.removeFromLeft(currentBrowserWidth());
     auto arrangementPanel = workArea;
 
     g.setColour(panelColour);
-    auto paintPanel = [&](juce::Rectangle<int> panel)
+    // Round only the OUTER corners of each panel; the corners that face the neighbouring
+    // panel stay square so the two cards abut cleanly along the seam. Rounding both sides
+    // left little dark triangular wedges at the top/bottom of the browser↔playlist seam.
+    auto paintPanel = [&](juce::Rectangle<int> panel, bool roundLeft, bool roundRight, bool border)
     {
         if (panel.isEmpty())
             return;
+        const auto r = 14.0f;
+        const auto b = panel.toFloat();
+        juce::Path p;
+        p.addRoundedRectangle(b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                              r, r, roundLeft, roundRight, roundLeft, roundRight);
         g.setColour(panelColour);
-        g.fillRoundedRectangle(panel.toFloat(), 14.0f);
-        g.setColour(panelStroke);
-        g.drawRoundedRectangle(panel.toFloat(), 14.0f, 1.0f);
+        g.fillPath(p);
+        if (border)
+        {
+            g.setColour(panelStroke);
+            g.strokePath(p, juce::PathStrokeType(1.0f));
+        }
     };
+    // Panels abut their neighbours flush with no borders. The only rounded corner is the
+    // playlist's outer (right) edge — the far right of the window. Everything to its left
+    // (sidebar seam, browser seam) is square so the panels meet perfectly.
     if (browserPanelShown())
-        paintPanel(browserPanelBounds);
-    paintPanel(arrangementPanel);
+        paintPanel(browserPanelBounds, false, false, false);   // browser: square, flush, no border
+    paintPanel(arrangementPanel, false, true, false);          // playlist: square left, round right only
 
-    if (browserPanelVisible && browserAnim >= 0.999f)
-    {
-        const auto resizeHandleBounds = getBrowserResizeHandleBounds();
-        g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.18f : 0.08f));
-        g.fillRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f);
-        g.setColour(juce::Colours::white.withAlpha(isResizingBrowserPanel ? 0.42f : 0.18f));
-        g.drawRoundedRectangle(resizeHandleBounds.toFloat(), 4.0f, 1.0f);
-    }
+    // Keep the browser resize hit area invisible; a visible handle reads as a stray divider.
 }
 
 void MainComponent::syncFoldersToBuses()
@@ -2135,7 +2228,7 @@ void MainComponent::resized()
     auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth);
     sidebarNav.setBounds(sidebarBounds);
     sidebarNav.toFront(false);
-    workArea.removeFromLeft(8);
+    workArea.removeFromLeft(2);   // tight gap between the sidebar and the browser/playlist
 
     // Small collapse arrow at the top-left of the work area, just below the transport
     // bar. Always visible, ~14×14 px, sits next to the browser/playlist boundary so it's
@@ -2152,7 +2245,6 @@ void MainComponent::resized()
 
     auto playlistArea = arrangementPanel;
     playlistArea.removeFromLeft(2);
-    playlistArea.removeFromRight(2);
     playlistArea.removeFromTop(2);
 
     const auto samplerOpen = samplerPanel.isVisible();
@@ -2164,10 +2256,11 @@ void MainComponent::resized()
     const auto arrangementArea = bottomPanelOpen ? openArrangementArea : closedArrangementArea;
 
     arrangementTimeline.setBounds(arrangementArea);
+    arrangementTimeline.setFitTrackLanesToVisibleArea(samplerOpen);
 
     if (browserPanelShown())
     {
-        auto browserInner = browserPanelBounds.reduced(16);
+        auto browserInner = browserPanelBounds.reduced(8, 16);
         browserPanel.setBounds(browserInner);
         browserPanel.setVisible(true);
     }
@@ -2555,6 +2648,43 @@ void MainComponent::timerCallback()
     updateClipEditorPreviewPlayhead();
 
     syncFoldersToBuses();
+    if (pendingBrowserPreviewStart)
+    {
+        if (! transportEngine.isPlaying() || pendingBrowserPreviewGeneration != previewRequestGeneration.load())
+        {
+            // Transport stopped or a newer preview was requested → cancel the armed start.
+            pendingBrowserPreviewStart = false;
+            browserPanel.setPreviewArmed(false);
+        }
+        else
+        {
+            const auto beat = transportEngine.getPlayheadBeat();
+            // Fire when the playhead reaches the target beat, OR when it wraps backwards
+            // (loop restart / rewind) — a musically sensible launch point either way.
+            const auto wrappedBackwards = beat < pendingBrowserPreviewLastBeat - 1.0e-3;
+            pendingBrowserPreviewLastBeat = beat;
+            if (beat >= pendingBrowserPreviewStartBeat || wrappedBackwards)
+            {
+                pendingBrowserPreviewStart = false;
+                browserPanel.setPreviewArmed(false);
+                previewTransportSource.setPosition(0.0);
+                previewTransportSource.start();
+            }
+            else
+            {
+                // Keep the pulse animating while we wait.
+                browserPanel.setPreviewArmed(true);
+            }
+        }
+    }
+
+    // Drive the browser preview bar's playhead + play/stop state.
+    if (browserPanelShown())
+    {
+        const auto len = previewTransportSource.getLengthInSeconds();
+        const auto ratio = len > 0.0 ? static_cast<float>(previewTransportSource.getCurrentPosition() / len) : 0.0f;
+        browserPanel.setPreviewPlayback(previewTransportSource.isPlaying(), ratio);
+    }
     updateTransportLabels();
     updateTrackMeterLevels();
     maybeStartBackgroundAnalysis();
@@ -2791,6 +2921,30 @@ void MainComponent::buttonClicked(juce::Button* button)
     }
 }
 
+void MainComponent::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& message)
+{
+    if (! message.isNoteOnOrOff())
+        return;
+
+    const auto noteNumber = message.getNoteNumber();
+    const auto velocity = message.isNoteOn()
+        ? juce::jlimit(1, 127, static_cast<int>(std::round(message.getVelocity() * 127.0f)))
+        : 0;
+    const auto noteOn = message.isNoteOn();
+
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::MessageManager::callAsync([safeThis, noteNumber, velocity, noteOn]
+    {
+        if (safeThis == nullptr || ! safeThis->midiEditorOverlay.isVisible())
+            return;
+
+        if (noteOn)
+            safeThis->midiEditorOverlay.stepWriteMidiNoteOn(noteNumber, velocity);
+        else
+            safeThis->midiEditorOverlay.stepWriteMidiNoteOff(noteNumber);
+    });
+}
+
 void MainComponent::updateTransportLabels()
 {
     if (! bpmEditor.isVisible())
@@ -2837,6 +2991,7 @@ void MainComponent::updateTransportLabels()
     transportState.scanVisible = pluginScanVisible;
     transportState.scanProgress = pluginScanProgress;
     transportState.scanName = pluginScanNameLabel.getText();
+    transportState.engineLoad = static_cast<float>(juce::jlimit(0.0, 1.0, audioDeviceManager.getCpuUsage()));
     transportBar.setState(transportState);
 
     BottomStatusBarState bottomState;
@@ -2844,7 +2999,6 @@ void MainComponent::updateTransportLabels()
     // Real, decayed master output level (not the fader setting).
     bottomState.masterLevel = juce::jlimit(0.0f, 1.0f, masterMeterLevel);
     bottomState.masterLevelDb = masterMeterDb;
-    bottomState.engineLoad = 0.32f;
     bottomState.projectSaved = true;
     bottomState.mixerOpen = mixerPanel.isVisible();
     bottomState.clipEditorOpen = clipEditorPanel.isVisible();
@@ -2855,60 +3009,137 @@ void MainComponent::updateTransportLabels()
 
 void MainComponent::playBrowserPreview(const BrowserItem& item)
 {
-    statusLabel.setText("Previewing: " + item.file.getFileName(), juce::dontSendNotification);
-
     if (! item.file.existsAsFile())
     {
         statusLabel.setText("Preview failed: file missing", juce::dontSendNotification);
         return;
     }
 
+    // Same file already loaded at the current tempo and sync mode → just restart instantly.
     if (previewBufferSource != nullptr
         && item.file == currentPreviewFile
-        && std::abs(currentPreviewTempoBpm - projectState.getTempoBpm()) < 0.001)
+        && std::abs(currentPreviewTempoBpm - projectState.getTempoBpm()) < 0.001
+        && currentPreviewBpmSync == browserPanel.isPreviewBpmSyncEnabled())
     {
-        previewTransportSource.setPosition(0.0);
-        previewTransportSource.start();
+        pendingBrowserPreviewStart = false;
+        previewTransportSource.stop();
+        armOrStartBrowserPreview();
         return;
     }
 
+    statusLabel.setText("Previewing: " + item.file.getFileName(), juce::dontSendNotification);
+
+    // Read + decode on a background thread so flipping through samples on a slow / external
+    // drive never freezes the UI. A generation token discards stale loads when the user has
+    // already moved on to another sample.
+    const auto generation = ++previewRequestGeneration;
+    pendingBrowserPreviewStart = false;
+    const auto file = item.file;
+    const auto displayName = item.file.getFileNameWithoutExtension();
+    const auto tempoNow = projectState.getTempoBpm();
+    const auto numerator = projectState.getNumerator();
+    const auto fitToTempo = browserPanel.isPreviewBpmSyncEnabled();
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+
+    previewLoadPool.addJob([this, safeThis, generation, file, displayName, tempoNow, numerator, fitToTempo]
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(file));
+        if (reader == nullptr || reader->lengthInSamples <= 0)
+            return;
+
+        const auto sampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 44100.0;
+        const auto maxPreviewSamples = static_cast<juce::int64>(previewMaxLengthSeconds * sampleRate);
+        const auto samplesToRead = static_cast<int>(juce::jmin(reader->lengthInSamples, maxPreviewSamples));
+        if (samplesToRead <= 0)
+            return;
+
+        auto buffer = std::make_shared<juce::AudioBuffer<float>>(static_cast<int>(reader->numChannels), samplesToRead);
+        reader->read(buffer.get(), 0, samplesToRead, 0, true, true);
+
+        if (fitToTempo)
+        {
+            const auto analysis = analyzeAudioWarpMetadata(file, tempoNow, numerator);
+            *buffer = makeTempoFittedPreviewBuffer(*buffer, analysis.sourceBpm, tempoNow, sampleRate, file.getFullPathName());
+        }
+
+        // If a newer preview was requested while we were reading, drop this one.
+        if (generation != previewRequestGeneration.load())
+            return;
+
+        juce::MessageManager::callAsync([safeThis, generation, buffer, sampleRate, file, displayName]
+        {
+            if (safeThis == nullptr || generation != safeThis->previewRequestGeneration.load())
+                return;
+            safeThis->startPreviewPlayback(std::move(*buffer), sampleRate, file, displayName);
+        });
+    });
+}
+
+void MainComponent::armOrStartBrowserPreview()
+{
+    previewTransportSource.setPosition(0.0);
+
+    // Launch quantize (Ableton-style): only when synced to project tempo AND the transport
+    // is actually running — without a moving playhead there's no beat to lock onto.
+    if (browserPanel.isPreviewBpmSyncEnabled() && transportEngine.isPlaying())
+    {
+        const auto currentBeat = transportEngine.getPlayheadBeat();
+        pendingBrowserPreviewStart = true;
+        pendingBrowserPreviewGeneration = previewRequestGeneration.load();
+        // Next whole beat. The tiny epsilon avoids "already past it" when we're a hair early.
+        pendingBrowserPreviewStartBeat = std::floor(currentBeat + 1.0e-4) + 1.0;
+        pendingBrowserPreviewLastBeat = currentBeat;
+        browserPanel.setPreviewArmed(true);
+    }
+    else
+    {
+        pendingBrowserPreviewStart = false;
+        browserPanel.setPreviewArmed(false);
+        previewTransportSource.start();
+    }
+}
+
+void MainComponent::startPreviewPlayback(juce::AudioBuffer<float> previewBuffer, double sampleRate,
+                                         const juce::File& file, const juce::String& displayName)
+{
     previewTransportSource.stop();
     previewTransportSource.setSource(nullptr);
     previewBufferSource.reset();
-    currentPreviewFile = juce::File();
-    currentPreviewTempoBpm = 0.0;
 
-    std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(item.file));
-    if (reader == nullptr)
+    // Compact waveform (normalised abs peaks) for the browser's preview bar.
     {
-        statusLabel.setText("Preview failed: unsupported file", juce::dontSendNotification);
-        return;
-    }
-
-    const auto sampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 44100.0;
-    const auto maxPreviewSamples = static_cast<juce::int64>(previewMaxLengthSeconds * sampleRate);
-    const auto samplesToRead = static_cast<int>(juce::jmin(reader->lengthInSamples, maxPreviewSamples));
-    if (samplesToRead <= 0)
-    {
-        statusLabel.setText("Preview failed: empty file", juce::dontSendNotification);
-        return;
-    }
-
-    juce::AudioBuffer<float> previewBuffer(static_cast<int>(reader->numChannels), samplesToRead);
-    reader->read(&previewBuffer, 0, samplesToRead, 0, true, true);
-
-    if (transportEngine.isPlaying())
-    {
-        const auto analysis = analyzeAudioWarpMetadata(item.file, projectState.getTempoBpm(), projectState.getNumerator());
-        previewBuffer = makeTempoFittedPreviewBuffer(previewBuffer, analysis.sourceBpm, projectState.getTempoBpm(), sampleRate, item.file.getFullPathName());
+        constexpr int columns = 480;
+        std::vector<float> peaks(columns, 0.0f);
+        const auto total = previewBuffer.getNumSamples();
+        const auto chans = previewBuffer.getNumChannels();
+        if (total > 0 && chans > 0)
+        {
+            float globalMax = 1.0e-6f;
+            for (int c = 0; c < columns; ++c)
+            {
+                const auto s0 = static_cast<juce::int64>(c) * total / columns;
+                const auto s1 = juce::jmax(s0 + 1, static_cast<juce::int64>(c + 1) * total / columns);
+                float m = 0.0f;
+                for (int ch = 0; ch < chans; ++ch)
+                {
+                    const auto* d = previewBuffer.getReadPointer(ch);
+                    for (auto s = s0; s < s1 && s < total; ++s)
+                        m = juce::jmax(m, std::abs(d[s]));
+                }
+                peaks[static_cast<std::size_t>(c)] = m;
+                globalMax = juce::jmax(globalMax, m);
+            }
+            for (auto& p : peaks) p /= globalMax;
+        }
+        browserPanel.setPreviewWaveform(displayName, std::move(peaks));
     }
 
     previewBufferSource = std::make_unique<BufferPreviewSource>(std::move(previewBuffer), sampleRate);
     previewTransportSource.setSource(previewBufferSource.get(), 0, nullptr, sampleRate);
-    currentPreviewFile = item.file;
+    currentPreviewFile = file;
     currentPreviewTempoBpm = projectState.getTempoBpm();
-    previewTransportSource.setPosition(0.0);
-    previewTransportSource.start();
+    currentPreviewBpmSync = browserPanel.isPreviewBpmSyncEnabled();
+    armOrStartBrowserPreview();
 }
 
 void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item)
@@ -4116,6 +4347,9 @@ void MainComponent::updateInputMonitoring()
     const bool wantInput = anyAudioArmed || audioInputRecorder->isRecording();
     if (wantInput && ! audioRecorderCallbackAttached)
     {
+        if (! ensureAudioInputReady(true))
+            return;
+
         audioDeviceManager.addAudioCallback(audioInputRecorder.get());
         audioRecorderCallbackAttached = true;
     }
@@ -4124,6 +4358,80 @@ void MainComponent::updateInputMonitoring()
         audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
         audioRecorderCallbackAttached = false;
     }
+}
+
+void MainComponent::requestMicrophonePermissionAtLaunch()
+{
+    if (! juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
+        || juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio)
+        || audioInputPermissionRequestInFlight)
+    {
+        return;
+    }
+
+    audioInputPermissionRequestInFlight = true;
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
+                                      [safeThis](bool granted)
+                                      {
+                                          if (safeThis == nullptr)
+                                              return;
+
+                                          safeThis->audioInputPermissionRequestInFlight = false;
+                                          if (granted)
+                                              safeThis->updateInputMonitoring();
+                                      });
+}
+
+bool MainComponent::ensureAudioInputReady(bool requestPermission)
+{
+    if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
+        && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio))
+    {
+        if (requestPermission && ! audioInputPermissionRequestInFlight)
+        {
+            audioInputPermissionRequestInFlight = true;
+            juce::Component::SafePointer<MainComponent> safeThis(this);
+            juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
+                                              [safeThis](bool granted)
+                                              {
+                                                  if (safeThis == nullptr)
+                                                      return;
+
+                                                  safeThis->audioInputPermissionRequestInFlight = false;
+                                                  if (granted)
+                                                      safeThis->updateInputMonitoring();
+                                                  else
+                                                      safeThis->statusLabel.setText("Microphone permission denied. Enable it in macOS Privacy settings.",
+                                                                                    juce::dontSendNotification);
+                                              });
+        }
+        return false;
+    }
+
+    auto* currentDevice = audioDeviceManager.getCurrentAudioDevice();
+    if (currentDevice == nullptr)
+        return false;
+
+    if (currentDevice->getActiveInputChannels().countNumberOfSetBits() > 0)
+        return true;
+
+    auto setup = audioDeviceManager.getAudioDeviceSetup();
+    setup.inputChannels.clear();
+    const auto inputCount = currentDevice->getInputChannelNames().size();
+    setup.inputChannels.setRange(0, juce::jmin(2, inputCount), true);
+    if (setup.inputChannels.countNumberOfSetBits() <= 0)
+        return false;
+
+    const auto error = audioDeviceManager.setAudioDeviceSetup(setup, true);
+    if (error.isNotEmpty())
+    {
+        statusLabel.setText("Audio input failed: " + error, juce::dontSendNotification);
+        return false;
+    }
+
+    return audioDeviceManager.getCurrentAudioDevice() != nullptr
+        && audioDeviceManager.getCurrentAudioDevice()->getActiveInputChannels().countNumberOfSetBits() > 0;
 }
 
 void MainComponent::startAudioRecordingClip(int trackIndex)
@@ -4137,6 +4445,9 @@ void MainComponent::startAudioRecordingClip(int trackIndex)
 
     auto& track = tracks[static_cast<std::size_t>(trackIndex)];
     if (track.isMidiTrack)
+        return;
+
+    if (! ensureAudioInputReady(true))
         return;
 
     auto* currentDevice = audioDeviceManager.getCurrentAudioDevice();
@@ -4676,8 +4987,38 @@ void MainComponent::maybeStartBackgroundAnalysis()
     {
         // Heavy work off the message thread: decode + chroma key + autocorrelation tempo.
         auto results = std::make_shared<std::map<juce::String, orion::AudioWarpAnalysis>>();
+
+        // Own format manager — the component's may be gone by the time this runs.
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+
         for (const auto& p : paths)
-            (*results)[p] = orion::analyzeAudioWarpMetadata(juce::File(p), tempo, numerator, true);
+        {
+            auto analysis = orion::analyzeAudioWarpMetadata(juce::File(p), tempo, numerator, true);
+
+            // Measure the source peak (dBFS) so the clip can be auto-normalised to 0.
+            std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(juce::File(p)));
+            if (reader != nullptr && reader->lengthInSamples > 0)
+            {
+                constexpr int chunk = 16384;
+                juce::AudioBuffer<float> buffer(static_cast<int>(reader->numChannels), chunk);
+                float peak = 0.0f;
+                juce::int64 pos = 0;
+                while (pos < reader->lengthInSamples)
+                {
+                    const auto n = static_cast<int>(juce::jmin<juce::int64>(chunk, reader->lengthInSamples - pos));
+                    buffer.clear();
+                    reader->read(&buffer, 0, n, pos, true, true);
+                    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                        peak = juce::jmax(peak, buffer.getMagnitude(ch, 0, n));
+                    pos += n;
+                }
+                if (peak > 0.000001f)
+                    analysis.peakDb = static_cast<double>(juce::Decibels::gainToDecibels(peak, -60.0f));
+            }
+
+            (*results)[p] = analysis;
+        }
 
         juce::MessageManager::callAsync([safe, results]
         {
@@ -4713,6 +5054,11 @@ void MainComponent::applyBackgroundAnalysis(const std::map<juce::String, orion::
                 clip.detectedBars = a.detectedBars;
             if (clip.sourceDurationSeconds <= 0.0 && a.durationSeconds > 0.0)
                 clip.sourceDurationSeconds = a.durationSeconds;
+            // Auto-normalise a freshly dropped clip to 0 dBFS so it starts at full level
+            // (the user trims from there). Only when the gain is still untouched (≈0 dB)
+            // and we actually measured a peak (peakDb <= 0; 1.0 means "not measured").
+            if (a.peakDb <= 0.0 && std::abs(clip.gainDb) < 0.001)
+                clip.gainDb = juce::jlimit(-24.0, 12.0, 0.0 - a.peakDb);
             clip.signalAnalysisPending = false;
             changed = true;
         }

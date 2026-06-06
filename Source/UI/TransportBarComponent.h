@@ -19,6 +19,7 @@ struct TransportBarState
     bool scanVisible { false };
     double scanProgress { 0.0 };
     juce::String scanName;
+    float engineLoad { 0.0f };
 };
 
 class TransportBarComponent final : public juce::Component,

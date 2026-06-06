@@ -11,7 +11,6 @@ struct BottomStatusBarState
     double masterGainDb { 0.0 };
     float masterLevel { 0.0f };
     float masterLevelDb { -100.0f };
-    float engineLoad { 0.32f };
     bool projectSaved { true };
     bool mixerOpen { false };
     bool clipEditorOpen { false };
@@ -25,9 +24,6 @@ public:
     static constexpr int preferredHeight = 76;
 
     std::function<void()> onMixer;
-    std::function<void()> onMaster;
-    std::function<void()> onFxRack;
-    std::function<void()> onRouting;
     std::function<void()> onClipEditor;
 
     void setState(const BottomStatusBarState& newState);
@@ -42,9 +38,6 @@ private:
     {
         none,
         mixer,
-        master,
-        fxRack,
-        routing,
         clipEditor
     };
 

@@ -34,6 +34,9 @@ struct AudioWarpAnalysis
     bool bpmGuessed { false };
     int  sourceKeyRoot { -1 };       // -1 = unknown, otherwise 0..11 (C..B)
     bool sourceKeyIsMinor { false };
+    // Peak magnitude of the source in dBFS (<= 0). 1.0 = not measured. Used to
+    // auto-normalise freshly dropped clips to 0 dBFS so they start at full level.
+    double peakDb { 1.0 };
 };
 
 // Best-effort BPM extracted purely from a file's name (e.g. "Loop_120bpm").

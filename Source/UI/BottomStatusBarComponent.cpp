@@ -11,6 +11,7 @@ const auto panelDark = juce::Colour(0xff191817);
 const auto coral = theme::warm::red;
 const auto peach = juce::Colour(0xffffb3a9);
 const auto dim = juce::Colour(0xff6f6967);
+constexpr int navOpticalCenterNudgeY = 3;
 
 juce::String formatDb(double db)
 {
@@ -32,18 +33,21 @@ void BottomStatusBarComponent::setState(const BottomStatusBarState& newState)
 void BottomStatusBarComponent::paint(juce::Graphics& g)
 {
     g.fillAll(background);
+    g.setColour(background);
+    g.fillRect(0, getHeight() - 14, 18, 14);
 
     auto bounds = getLocalBounds();
     g.setColour(juce::Colours::black.withAlpha(0.32f));
     g.drawLine(0.0f, 0.0f, static_cast<float>(getWidth()), 0.0f, 1.0f);
 
-    auto master = bounds.removeFromLeft(420).reduced(28, 12);
+    auto master = bounds.removeFromLeft(420).reduced(28, 0).withSizeKeepingCentre(364, 52);
     g.setColour(coral);
     g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
     g.drawText("MASTER OUT", master.removeFromTop(18), juce::Justification::centredLeft);
 
-    auto meterRow = master.removeFromTop(34);
-    auto meter = meterRow.removeFromLeft(156).withHeight(18).withY(meterRow.getY() + 8);
+    master.removeFromTop(8);
+    auto meterRow = master.removeFromTop(22);
+    auto meter = meterRow.removeFromLeft(156).withHeight(18).withY(meterRow.getCentreY() - 9);
     g.setColour(panelDark);
     g.fillRect(meter);
     auto fill = meter.toFloat();
@@ -61,39 +65,19 @@ void BottomStatusBarComponent::paint(juce::Graphics& g)
     g.drawText(formatDb(state.masterLevelDb), meterRow.removeFromLeft(108), juce::Justification::centredRight);
 
     const auto itemWidth = 118;
-    auto center = getLocalBounds().withSizeKeepingCentre(itemWidth * 5 + 32, getHeight());
+    auto center = getLocalBounds().withSizeKeepingCentre(itemWidth * 2 + 16, getHeight());
     drawNavItem(g, Item::mixer, "MIXER", center.removeFromLeft(itemWidth));
-    drawNavItem(g, Item::master, "MASTER", center.removeFromLeft(itemWidth));
-    drawNavItem(g, Item::fxRack, "FX RACK", center.removeFromLeft(itemWidth));
-    drawNavItem(g, Item::routing, "ROUTING", center.removeFromLeft(itemWidth));
     drawNavItem(g, Item::clipEditor, "CLIP EDITOR", center.removeFromLeft(itemWidth));
 
-    auto right = getLocalBounds().removeFromRight(360).reduced(24, 12);
+    auto right = getLocalBounds().removeFromRight(220).reduced(24, 0).withSizeKeepingCentre(172, 52);
     auto save = right.removeFromRight(160);
     g.setColour(peach);
     g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-    g.drawText(state.projectSaved ? "PROJECT_SAVED" : "PROJECT_DIRTY", save.removeFromTop(22), juce::Justification::centredRight);
+    auto saveTitle = save.removeFromTop(22);
+    g.drawText(state.projectSaved ? "PROJECT_SAVED" : "PROJECT_DIRTY", saveTitle, juce::Justification::centredRight);
     g.setColour(dim.withAlpha(0.45f));
     g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
-    g.drawText("SYNCED_12:44:09", save, juce::Justification::centredRight);
-
-    auto engine = right.removeFromRight(132);
-    g.setColour(dim.withAlpha(0.35f));
-    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-    g.drawText("ENGINE_LOAD", engine.removeFromTop(20), juce::Justification::centred);
-    auto loadRow = engine.removeFromTop(22);
-    auto bars = loadRow.removeFromLeft(34).withSizeKeepingCentre(26, 14);
-    const auto activeBars = juce::roundToInt(juce::jlimit(0.0f, 1.0f, state.engineLoad) * 4.0f);
-    for (int i = 0; i < 4; ++i)
-    {
-        auto bar = bars.removeFromLeft(5);
-        bars.removeFromLeft(2);
-        g.setColour(i < activeBars ? coral : dim.withAlpha(0.25f));
-        g.fillRect(bar.withTop(bar.getBottom() - 4 - i * 3));
-    }
-    g.setColour(juce::Colours::white.withAlpha(0.88f));
-    g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText(juce::String(juce::roundToInt(state.engineLoad * 100.0f)) + "%", loadRow, juce::Justification::centredLeft);
+    g.drawText("SYNCED_12:44:09", save.removeFromTop(18), juce::Justification::centredRight);
 }
 
 void BottomStatusBarComponent::mouseMove(const juce::MouseEvent& event)
@@ -122,18 +106,6 @@ void BottomStatusBarComponent::mouseDown(const juce::MouseEvent& event)
             if (onMixer)
                 onMixer();
             break;
-        case Item::master:
-            if (onMaster)
-                onMaster();
-            break;
-        case Item::fxRack:
-            if (onFxRack)
-                onFxRack();
-            break;
-        case Item::routing:
-            if (onRouting)
-                onRouting();
-            break;
         case Item::clipEditor:
             if (onClipEditor)
                 onClipEditor();
@@ -149,14 +121,14 @@ juce::Rectangle<int> BottomStatusBarComponent::getItemBounds(Item item) const no
         return {};
 
     constexpr int itemWidth = 118;
-    auto center = getLocalBounds().withSizeKeepingCentre(itemWidth * 5 + 32, getHeight());
+    auto center = getLocalBounds().withSizeKeepingCentre(itemWidth * 2 + 16, getHeight());
     const auto index = static_cast<int>(item) - 1;
     return center.removeFromLeft((index + 1) * itemWidth).removeFromRight(itemWidth);
 }
 
 BottomStatusBarComponent::Item BottomStatusBarComponent::hitTestItem(juce::Point<int> point) const noexcept
 {
-    for (const auto item : { Item::mixer, Item::master, Item::fxRack, Item::routing, Item::clipEditor })
+    for (const auto item : { Item::mixer, Item::clipEditor })
         if (getItemBounds(item).contains(point))
             return item;
 
@@ -173,15 +145,17 @@ void BottomStatusBarComponent::drawNavItem(juce::Graphics& g, Item item, const j
     if (active || hovered)
     {
         g.setColour(juce::Colours::black.withAlpha(active ? 0.16f : 0.08f));
-        g.fillRoundedRectangle(bounds.reduced(10, 8).toFloat(), 6.0f);
+        g.fillRoundedRectangle(bounds.reduced(10, 10).toFloat(), 6.0f);
     }
 
-    auto icon = bounds.removeFromTop(32).withSizeKeepingCentre(28, 22);
+    auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), 46).translated(0, navOpticalCenterNudgeY);
+    auto icon = content.removeFromTop(24).withSizeKeepingCentre(28, 22);
     drawItemIcon(g, item, icon.toFloat(), colour);
 
+    content.removeFromTop(4);
     g.setColour(colour);
     g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
-    g.drawText(label, bounds.removeFromTop(24), juce::Justification::centred);
+    g.drawText(label, content.removeFromTop(18), juce::Justification::centred);
 }
 
 void BottomStatusBarComponent::drawItemIcon(juce::Graphics& g, Item item, juce::Rectangle<float> bounds, juce::Colour colour) const
@@ -190,15 +164,6 @@ void BottomStatusBarComponent::drawItemIcon(juce::Graphics& g, Item item, juce::
 
     if (item == Item::mixer)
     {
-        const auto w = bounds.getWidth() / 7.0f;
-        for (int i = 0; i < 3; ++i)
-        {
-            const auto index = static_cast<float>(i);
-            g.fillRect(bounds.getX() + index * w * 2.0f, bounds.getBottom() - (8.0f + index * 5.0f), w, 8.0f + index * 5.0f);
-        }
-    }
-    else if (item == Item::master)
-    {
         for (int i = 0; i < 3; ++i)
         {
             const auto index = static_cast<float>(i);
@@ -206,22 +171,6 @@ void BottomStatusBarComponent::drawItemIcon(juce::Graphics& g, Item item, juce::
             g.drawLine(x, bounds.getY(), x, bounds.getBottom(), 1.5f);
             g.fillEllipse(x - 3.0f, bounds.getY() + 4.0f + index * 5.0f, 6.0f, 6.0f);
         }
-    }
-    else if (item == Item::fxRack)
-    {
-        for (int i = 0; i < 4; ++i)
-            g.fillEllipse(bounds.getX() + static_cast<float>(i) * 6.5f, bounds.getCentreY() - 3.0f, 5.0f, 5.0f);
-    }
-    else if (item == Item::routing)
-    {
-        juce::Path path;
-        path.startNewSubPath(bounds.getX() + 4.0f, bounds.getBottom() - 4.0f);
-        path.lineTo(bounds.getCentreX(), bounds.getCentreY());
-        path.lineTo(bounds.getRight() - 4.0f, bounds.getY() + 4.0f);
-        g.strokePath(path, juce::PathStrokeType(1.7f));
-        g.fillEllipse(bounds.getX() + 1.0f, bounds.getBottom() - 7.0f, 6.0f, 6.0f);
-        g.fillEllipse(bounds.getCentreX() - 3.0f, bounds.getCentreY() - 3.0f, 6.0f, 6.0f);
-        g.fillEllipse(bounds.getRight() - 7.0f, bounds.getY() + 1.0f, 6.0f, 6.0f);
     }
     else if (item == Item::clipEditor)
     {

@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(ORION_JUCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JUCE" CACHE PATH "Path to a local JUCE checkout")
+set(ORION_BUNDLE_ID "com.alexeypavlov.Orion")
 
 if(NOT EXISTS "${ORION_JUCE_PATH}/CMakeLists.txt")
     message(FATAL_ERROR "JUCE was not found. Clone or copy JUCE into third_party/JUCE before configuring Orion.")
@@ -48,6 +49,7 @@ endif()
 
 juce_add_gui_app(Orion
     PRODUCT_NAME "Orion"
+    BUNDLE_ID "${ORION_BUNDLE_ID}"
     # Required on macOS so the OS lets the app open the microphone/audio input.
     # Without NSMicrophoneUsageDescription the app is killed when input is opened.
     MICROPHONE_PERMISSION_ENABLED TRUE
@@ -161,6 +163,16 @@ add_custom_command(
             $<TARGET_FILE:OrionPluginScanner>
             $<TARGET_FILE_DIR:Orion>/OrionPluginScanner
 )
+
+if(APPLE)
+    add_custom_command(
+        TARGET Orion
+        POST_BUILD
+        COMMAND /usr/bin/codesign --force --deep --sign - --identifier "${ORION_BUNDLE_ID}" "$<TARGET_BUNDLE_DIR:Orion>"
+        COMMENT "Ad-hoc signing Orion.app with stable bundle id for macOS privacy permissions"
+        VERBATIM
+    )
+endif()
 
 juce_add_console_app(OrionWarpCompare PRODUCT_NAME "Orion Warp Compare")
 

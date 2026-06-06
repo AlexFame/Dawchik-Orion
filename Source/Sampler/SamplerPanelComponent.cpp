@@ -1,5 +1,6 @@
 #include "SamplerPanelComponent.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -46,6 +47,7 @@ namespace orion
 {
 SamplerPanelComponent::SamplerPanelComponent()
 {
+    waveformFormatManager.registerBasicFormats();
     setWantsKeyboardFocus(true);
     setVisible(false);
 }
@@ -180,21 +182,7 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
     g.drawRoundedRectangle(waveform.toFloat(), 12.0f, 1.0f);
 
     auto waveInner = waveform.reduced(18, 18);
-    const auto centerY = waveInner.getCentreY();
-    const auto bars = 96;
-    for (int i = 0; i < bars; ++i)
-    {
-        const auto x = juce::jmap(i, 0, bars - 1, waveInner.getX(), waveInner.getRight());
-        const auto phase = static_cast<float>(i) * 0.23f;
-        const auto amp = 0.2f + 0.8f * std::abs(std::sin(phase) * std::cos(phase * 0.37f));
-        const auto height = juce::jmax(5.0f, static_cast<float>(waveInner.getHeight()) * 0.72f * amp);
-        g.setColour(accentColour.withAlpha(0.72f));
-        g.drawLine(static_cast<float>(x),
-                   static_cast<float>(centerY) - height * 0.5f,
-                   static_cast<float>(x),
-                   static_cast<float>(centerY) + height * 0.5f,
-                   2.0f);
-    }
+    drawWaveform(g, waveInner, track);
 
     if (track != nullptr && track->samplerMode == SamplerPlaybackMode::slice)
     {
@@ -317,6 +305,128 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
                    : "Warp: " + juce::String(track != nullptr && track->samplerWarpEnabled ? "On" : "Off"),
                envelopeContent.removeFromTop(20),
                juce::Justification::centredLeft);
+}
+
+void SamplerPanelComponent::ensureWaveformPeaksFor(const juce::String& sourcePath)
+{
+    if (sourcePath.isEmpty() || waveformPeaks.sourcePath == sourcePath)
+        return;
+
+    waveformPeaks = {};
+    waveformPeaks.sourcePath = sourcePath;
+
+    const juce::File sourceFile(sourcePath);
+    std::unique_ptr<juce::AudioFormatReader> reader(waveformFormatManager.createReaderFor(sourceFile));
+
+    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels == 0)
+        return;
+
+    constexpr int bucketCount = 720;
+    constexpr int maxReadBlock = 4096;
+    const auto totalSamples = reader->lengthInSamples;
+    const auto channelCount = static_cast<int>(reader->numChannels);
+
+    waveformPeaks.minValues.assign(bucketCount, 0.0f);
+    waveformPeaks.maxValues.assign(bucketCount, 0.0f);
+
+    juce::AudioBuffer<float> block(channelCount, maxReadBlock);
+    float globalPeak = 1.0e-6f;
+
+    for (int bucket = 0; bucket < bucketCount; ++bucket)
+    {
+        const auto bucketStart = (totalSamples * bucket) / bucketCount;
+        const auto bucketEnd = (totalSamples * (bucket + 1)) / bucketCount;
+        float minValue = 0.0f;
+        float maxValue = 0.0f;
+        bool hasSamples = false;
+
+        for (auto readPosition = bucketStart; readPosition < bucketEnd; readPosition += maxReadBlock)
+        {
+            const auto samplesToRead = static_cast<int>(juce::jmin<juce::int64>(maxReadBlock, bucketEnd - readPosition));
+            block.clear();
+            reader->read(&block, 0, samplesToRead, readPosition, true, true);
+
+            for (int sample = 0; sample < samplesToRead; ++sample)
+            {
+                float monoSample = 0.0f;
+
+                for (int channel = 0; channel < channelCount; ++channel)
+                    monoSample += block.getSample(channel, sample);
+
+                monoSample /= static_cast<float>(channelCount);
+
+                if (! hasSamples)
+                {
+                    minValue = monoSample;
+                    maxValue = monoSample;
+                    hasSamples = true;
+                }
+                else
+                {
+                    minValue = juce::jmin(minValue, monoSample);
+                    maxValue = juce::jmax(maxValue, monoSample);
+                }
+            }
+        }
+
+        waveformPeaks.minValues[static_cast<std::size_t>(bucket)] = minValue;
+        waveformPeaks.maxValues[static_cast<std::size_t>(bucket)] = maxValue;
+        globalPeak = juce::jmax(globalPeak, std::abs(minValue), std::abs(maxValue));
+    }
+
+    for (auto& value : waveformPeaks.minValues)
+        value /= globalPeak;
+
+    for (auto& value : waveformPeaks.maxValues)
+        value /= globalPeak;
+}
+
+void SamplerPanelComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<int> waveInner, const TrackState* track)
+{
+    if (track != nullptr && track->samplerSourcePath.isNotEmpty())
+        ensureWaveformPeaksFor(track->samplerSourcePath);
+
+    if (waveformPeaks.minValues.empty()
+        || waveformPeaks.maxValues.empty()
+        || waveformPeaks.minValues.size() != waveformPeaks.maxValues.size())
+    {
+        g.setColour(mutedText.withAlpha(0.45f));
+        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText(track != nullptr && track->samplerSourcePath.isNotEmpty() ? "Waveform unavailable" : "Load a sample",
+                   waveInner,
+                   juce::Justification::centred);
+        return;
+    }
+
+    const auto centerY = static_cast<float>(waveInner.getCentreY());
+    const auto halfHeight = static_cast<float>(waveInner.getHeight()) * 0.46f;
+    const auto bucketCount = static_cast<int>(waveformPeaks.minValues.size());
+
+    g.setColour(accentColour.withAlpha(0.72f));
+
+    for (int x = 0; x < waveInner.getWidth(); x += 2)
+    {
+        const auto startBucket = juce::jlimit(0, bucketCount - 1, (x * bucketCount) / juce::jmax(1, waveInner.getWidth()));
+        const auto endBucket = juce::jlimit(startBucket + 1,
+                                           bucketCount,
+                                           (((x + 2) * bucketCount) / juce::jmax(1, waveInner.getWidth())) + 1);
+        float minValue = 1.0f;
+        float maxValue = -1.0f;
+
+        for (int bucket = startBucket; bucket < endBucket; ++bucket)
+        {
+            minValue = juce::jmin(minValue, waveformPeaks.minValues[static_cast<std::size_t>(bucket)]);
+            maxValue = juce::jmax(maxValue, waveformPeaks.maxValues[static_cast<std::size_t>(bucket)]);
+        }
+
+        const auto drawX = static_cast<float>(waveInner.getX() + x);
+        const auto y1 = centerY - maxValue * halfHeight;
+        const auto y2 = centerY - minValue * halfHeight;
+        g.drawLine(drawX, y1, drawX, y2, 1.6f);
+    }
+
+    g.setColour(accentColour.withAlpha(0.18f));
+    g.drawHorizontalLine(waveInner.getCentreY(), static_cast<float>(waveInner.getX()), static_cast<float>(waveInner.getRight()));
 }
 
 bool SamplerPanelComponent::hitTest(int x, int y)
@@ -466,7 +576,7 @@ void SamplerPanelComponent::timerCallback()
 
 juce::Rectangle<int> SamplerPanelComponent::getPanelBounds() const
 {
-    return getLocalBounds().withTrimmedLeft(14).withTrimmedRight(14).withTrimmedBottom(14);
+    return getLocalBounds();
 }
 
 std::optional<int> SamplerPanelComponent::pitchForKeyCode(int keyCode)

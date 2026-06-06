@@ -1,5 +1,6 @@
 #pragma once
 
+#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
@@ -7,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <vector>
 
 #include "../Core/ProjectState.h"
 
@@ -57,9 +59,20 @@ private:
     bool updateTypingPianoNotes();
     void releaseTypingPianoNotes();
     void startSlicePlaybackIndicator(int sliceIndex);
+    void ensureWaveformPeaksFor(const juce::String& sourcePath);
+    void drawWaveform(juce::Graphics& g, juce::Rectangle<int> waveInner, const TrackState* track);
+
+    struct WaveformPeaks
+    {
+        juce::String sourcePath;
+        std::vector<float> minValues;
+        std::vector<float> maxValues;
+    };
 
     TrackState* activeTrack { nullptr };
     int activeTrackIndex { -1 };
+    juce::AudioFormatManager waveformFormatManager;
+    WaveformPeaks waveformPeaks;
     std::set<int> activeNotes;
     std::map<int, int> activeNotePitches;
     std::set<int> activeSliceIndices;

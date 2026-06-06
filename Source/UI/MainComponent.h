@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -44,7 +45,8 @@ class MainComponent final : public juce::Component,
                             public juce::DragAndDropContainer,
                             private juce::MenuBarModel,
                             private juce::Timer,
-                            private juce::Button::Listener
+                            private juce::Button::Listener,
+                            private juce::MidiInputCallback
 {
 public:
     MainComponent();
@@ -69,6 +71,7 @@ private:
 
     void timerCallback() override;
     void buttonClicked(juce::Button* button) override;
+    void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
     void updateTransportLabels();
     void playBrowserPreview(const BrowserItem& item);
     void loadBrowserItemIntoSampler(const BrowserItem& item);
@@ -145,6 +148,7 @@ private:
     ArrangementTimelineComponent arrangementTimeline;
     BrowserPanelComponent browserPanel;
     SidebarNavComponent sidebarNav;
+    std::vector<juce::File> sidebarBrowserFolders;
     SelectionInspectorComponent selectionInspector;
     TransportBarComponent transportBar;
     BottomStatusBarComponent bottomStatusBar;
@@ -251,6 +255,7 @@ private:
     juce::TextButton settingsButton;
     juce::AudioFormatManager audioFormatManager;
     juce::AudioDeviceManager audioDeviceManager;
+    juce::StringArray activeMidiInputDeviceIds;
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;
@@ -295,6 +300,19 @@ private:
     juce::File currentProjectFile;
     juce::File currentPreviewFile;
     double currentPreviewTempoBpm { 0.0 };
+    bool   currentPreviewBpmSync { false };
+    bool   pendingBrowserPreviewStart { false };
+    int    pendingBrowserPreviewGeneration { 0 };
+    double pendingBrowserPreviewStartBeat { 0.0 };
+    double pendingBrowserPreviewLastBeat { 0.0 };   // tracks playhead to catch loop wrap-around
+    // Launch-quantize a browser preview: if BPM-sync is on AND the project transport is
+    // playing, arm the preview to start on the next whole beat; otherwise start it now.
+    void armOrStartBrowserPreview();
+    // Async preview loading so flipping through samples on a slow drive never freezes the UI.
+    juce::ThreadPool previewLoadPool { 1 };
+    std::atomic<int> previewRequestGeneration { 0 };
+    void startPreviewPlayback(juce::AudioBuffer<float> buffer, double sampleRate,
+                              const juce::File& file, const juce::String& displayName);
     std::optional<std::pair<int, int>> selectedArrangementClip;
     std::optional<std::pair<int, int>> clipEditorPreviewClip;
     std::map<std::pair<int, int>, std::pair<double, double>> clipEditorSelectionRanges;
@@ -341,6 +359,8 @@ private:
     // Attaches/detaches the input callback so an armed audio track shows live input
     // level (monitoring) even before recording starts.
     void updateInputMonitoring();
+    void requestMicrophonePermissionAtLaunch();
+    bool ensureAudioInputReady(bool requestPermission);
     // Mirror each folder track's volume/mute onto its group bus (one-way), and propagate
     // the folder's solo state down to its children, so the timeline folder controls drive
     // the whole group via the existing bus engine.
@@ -359,5 +379,6 @@ private:
     int browserResizeStartWidth { 300 };
     double pluginScanProgress { 0.0 };
     bool pluginScanVisible { false };
+    bool audioInputPermissionRequestInFlight { false };
 };
 }  // namespace orion

@@ -419,7 +419,10 @@ public:
         {
             juce::ignoreUnused(trackIndex);
             if (slot != nullptr)
-                slot->pendingAllNotesOff = true;
+            {
+                slot->pendingLiveMidi.clear();
+                slot->pendingPanicBlocks = 3;   // a few blocks is enough to release every voice
+            }
         }
     }
 
@@ -1185,8 +1188,10 @@ private:
         }
 
         // Render any hosted VST instruments for this block (clip notes + live keyboard).
+        // Pass the loop/project wrap context so notes at the loop start fire on every repeat.
         processInstruments(targetBuffer, startSample, numSamples, blockStartBeat, beatsPerSecond,
-                           true, isRealtime, anySoloActive);
+                           true, isRealtime, anySoloActive,
+                           wrapToLoop, wrapToProject, loopStartBeat, loopEndBeat, repeatEndBeat);
 
         // Master insert chain: process the full arrangement mix (tracks + buses + instruments)
         // through the master inserts, pre-fader (the master gain/meter live downstream).
@@ -1305,7 +1310,7 @@ private:
         juce::MidiMessageCollector liveCollector;
         juce::MidiBuffer pendingLiveMidi;
         juce::AudioBuffer<float> scratch;
-        bool pendingAllNotesOff { false };
+        int pendingPanicBlocks { 0 };
     };
 
     // Snapshot the set of track indices that currently host an instrument, so
@@ -1330,7 +1335,12 @@ private:
                             double beatsPerSecond,
                             bool includeClipNotes,
                             bool includeLiveNotes,
-                            bool anySoloActive)
+                            bool anySoloActive,
+                            bool wrapToLoop = false,
+                            bool wrapToProject = false,
+                            double loopStartBeat = 0.0,
+                            double loopEndBeat = 0.0,
+                            double repeatEndBeat = 0.0)
     {
         const juce::ScopedTryLock stl(instrumentLock);
         if (! stl.isLocked() || instruments.empty())
@@ -1341,6 +1351,25 @@ private:
                                               ? beatsPerSecond / outputSampleRate
                                               : 0.0;
         const auto blockEndBeat = blockStartBeat + beatAdvancePerSample * static_cast<double>(numSamples);
+
+        // Maps a note's absolute beat to an in-block sample offset, or -1 if it doesn't fall in
+        // this block. Crucially this is wrap-aware: when the block crosses the loop / project end
+        // the playhead wraps back to the start, so a note at (or just after) the loop start must
+        // still fire. Without this, audio clips (which wrap per-sample) kept playing but the very
+        // first note of a looped MIDI part was dropped on every repeat.
+        const double wrapPoint = wrapToLoop ? loopEndBeat : (wrapToProject ? repeatEndBeat : 0.0);
+        const double wrapStart = wrapToLoop ? loopStartBeat : 0.0;
+        const bool   wrapActive = (wrapToLoop || wrapToProject) && wrapPoint > 0.0 && blockEndBeat > wrapPoint;
+        const double wrapOver   = wrapActive ? (blockEndBeat - wrapPoint) : 0.0;   // beats past the wrap
+        const auto offsetForBeat = [&](double b) -> int
+        {
+            if (b >= blockStartBeat && b < blockEndBeat)
+                return juce::jlimit(0, numSamples - 1, static_cast<int>(std::round((b - blockStartBeat) / beatAdvancePerSample)));
+            if (wrapActive && b >= wrapStart && b < wrapStart + wrapOver)
+                return juce::jlimit(0, numSamples - 1,
+                    static_cast<int>(std::round(((wrapPoint - blockStartBeat) + (b - wrapStart)) / beatAdvancePerSample)));
+            return -1;
+        };
 
         for (auto& [trackIndex, slot] : instruments)
         {
@@ -1353,14 +1382,23 @@ private:
             auto* inst = slot->instance.get();
 
             juce::MidiBuffer midi;
+            const bool panicActive = slot->pendingPanicBlocks > 0;
 
-            if (slot->pendingAllNotesOff)
+            if (panicActive)
             {
+                slot->pendingLiveMidi.clear();
+
+                // Gentle silence: note-offs + allNotesOff trigger each voice's RELEASE (no
+                // click), unlike allSoundOff which hard-cuts mid-waveform (that was the crackle).
+                // Clip/live notes are emitted on channel 1, so panic only needs channel 1.
+                midi.addEvent(juce::MidiMessage::controllerEvent(1, 64, 0), 0);   // sustain pedal off
+                for (int note = 0; note <= 127; ++note)
+                    midi.addEvent(juce::MidiMessage::noteOff(1, note), 0);
                 midi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
-                slot->pendingAllNotesOff = false;
+                --slot->pendingPanicBlocks;
             }
 
-            if (includeLiveNotes)
+            if (! panicActive && includeLiveNotes)
             {
                 for (const auto metadata : slot->pendingLiveMidi)
                     midi.addEvent(metadata.getMessage(), 0);
@@ -1369,7 +1407,7 @@ private:
 
             const bool trackAudible = ! track.muted && (! anySoloActive || track.solo);
 
-            if (includeClipNotes && trackAudible && beatAdvancePerSample > 0.0)
+            if (! panicActive && includeClipNotes && trackAudible && beatAdvancePerSample > 0.0)
             {
                 for (const auto& clip : track.clips)
                 {
@@ -1383,20 +1421,14 @@ private:
                         const auto onBeat  = clip.startBeat + note.startBeat;
                         const auto offBeat = onBeat + juce::jmax(0.01, note.lengthInBeats);
 
-                        if (onBeat >= blockStartBeat && onBeat < blockEndBeat)
+                        if (const auto offset = offsetForBeat(onBeat); offset >= 0)
                         {
-                            const auto offset = juce::jlimit(0, numSamples - 1,
-                                static_cast<int>(std::round((onBeat - blockStartBeat) / beatAdvancePerSample)));
                             midi.addEvent(juce::MidiMessage::pitchWheel(1, 8192), offset);
                             midi.addEvent(juce::MidiMessage::noteOn(1, note.pitch,
                                 static_cast<juce::uint8>(juce::jlimit(1, 127, note.velocity))), offset);
                         }
-                        if (offBeat >= blockStartBeat && offBeat < blockEndBeat)
-                        {
-                            const auto offset = juce::jlimit(0, numSamples - 1,
-                                static_cast<int>(std::round((offBeat - blockStartBeat) / beatAdvancePerSample)));
+                        if (const auto offset = offsetForBeat(offBeat); offset >= 0)
                             midi.addEvent(juce::MidiMessage::noteOff(1, note.pitch), offset);
-                        }
                     }
 
                     for (const auto& slide : clip.pitchSlides)
@@ -1491,7 +1523,7 @@ private:
 
             inst->processBlock(slot->scratch, midi);
 
-            if (! trackAudible)
+            if (panicActive || ! trackAudible)
                 continue;
 
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
