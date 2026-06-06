@@ -169,8 +169,8 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.setGradientFill(leftGlow);
     g.fillRect(area);
 
-    juce::ColourGradient rightGlow(theme::warm::red.withAlpha(0.24f), area.getRight(), area.getY(),
-                                   juce::Colours::transparentBlack, area.getX() + area.getWidth() * 0.48f, area.getBottom(), false);
+    juce::ColourGradient rightGlow(theme::warm::red.withAlpha(0.10f), area.getRight(), area.getY(),
+                                   juce::Colours::transparentBlack, area.getX() + area.getWidth() * 0.55f, area.getBottom(), false);
     g.setGradientFill(rightGlow);
     g.fillRect(area);
 
@@ -217,22 +217,27 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.drawText("KEY", keyValue, juce::Justification::centredTop);
     g.drawText("TIME", positionValue, juce::Justification::centredTop);
 
-    auto cpu = getLocalBounds().reduced(24, 0).removeFromRight(132).withSizeKeepingCentre(112, 42);
+    auto cpuArea = getLocalBounds().reduced(16, 0).removeFromRight(72).withSizeKeepingCentre(64, 40);
+    g.setColour(theme::surface::primary.withAlpha(0.45f));
+    g.fillRoundedRectangle(cpuArea.toFloat(), 6.0f);
+    g.setColour(theme::line::subtle.withAlpha(0.35f));
+    g.drawRoundedRectangle(cpuArea.toFloat().reduced(0.5f), 6.0f, 1.0f);
+    auto cpu = cpuArea.reduced(8, 6);
     g.setColour(theme::text::tertiary.withAlpha(0.60f));
-    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
-    g.drawText("CPU", cpu.removeFromTop(14), juce::Justification::centredRight);
-    auto loadRow = cpu.removeFromTop(20);
-    auto bars = loadRow.removeFromLeft(36).withSizeKeepingCentre(28, 14);
+    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+    g.drawText("CPU", cpu.removeFromTop(12), juce::Justification::centred);
+    auto loadRow = cpu.removeFromTop(18);
+    auto bars = loadRow.removeFromLeft(28).withSizeKeepingCentre(24, 12);
     const auto activeBars = juce::roundToInt(juce::jlimit(0.0f, 1.0f, state.engineLoad) * 4.0f);
     for (int i = 0; i < 4; ++i)
     {
-        auto bar = bars.removeFromLeft(5);
+        auto bar = bars.removeFromLeft(4);
         bars.removeFromLeft(2);
         g.setColour(i < activeBars ? theme::warm::red : theme::line::subtle.withAlpha(0.42f));
-        g.fillRect(bar.withTop(bar.getBottom() - 4 - i * 3));
+        g.fillRect(bar.withTop(bar.getBottom() - 3 - i * 3));
     }
     g.setColour(theme::text::primary.withAlpha(0.88f));
-    g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
     g.drawText(juce::String(juce::roundToInt(state.engineLoad * 100.0f)) + "%", loadRow, juce::Justification::centredRight);
 
     if (state.scanVisible)

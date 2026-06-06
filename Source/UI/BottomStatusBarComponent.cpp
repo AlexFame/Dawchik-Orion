@@ -6,11 +6,11 @@ namespace orion
 {
 namespace
 {
-const auto background = juce::Colour(0xff2b2b2a);
-const auto panelDark = juce::Colour(0xff191817);
-const auto coral = theme::warm::red;
-const auto peach = juce::Colour(0xffffb3a9);
-const auto dim = juce::Colour(0xff6f6967);
+const auto background = orion::theme::core::deepSpace;
+const auto panelDark  = orion::theme::core::voidBlack;
+const auto coral      = orion::theme::warm::red;
+const auto peach      = orion::theme::text::secondary;
+const auto dim        = orion::theme::text::muted;
 constexpr int navOpticalCenterNudgeY = 3;
 
 juce::String formatDb(double db)
@@ -33,8 +33,6 @@ void BottomStatusBarComponent::setState(const BottomStatusBarState& newState)
 void BottomStatusBarComponent::paint(juce::Graphics& g)
 {
     g.fillAll(background);
-    g.setColour(background);
-    g.fillRect(0, getHeight() - 14, 18, 14);
 
     auto bounds = getLocalBounds();
     g.setColour(juce::Colours::black.withAlpha(0.32f));
@@ -48,17 +46,23 @@ void BottomStatusBarComponent::paint(juce::Graphics& g)
     master.removeFromTop(8);
     auto meterRow = master.removeFromTop(22);
     auto meter = meterRow.removeFromLeft(156).withHeight(18).withY(meterRow.getCentreY() - 9);
-    g.setColour(panelDark);
-    g.fillRect(meter);
-    auto fill = meter.toFloat();
-    fill.setWidth(fill.getWidth() * juce::jlimit(0.0f, 1.0f, state.masterLevel));
-    juce::ColourGradient meterGradient(juce::Colour(0xff39d36b), fill.getX(), fill.getCentreY(),
-                                       orion::theme::warm::red, fill.getRight(), fill.getCentreY(), false);
-    meterGradient.addColour(0.72, juce::Colour(0xffe7c93a));
-    g.setGradientFill(meterGradient);
-    g.fillRect(fill);
-    g.setColour(juce::Colours::white.withAlpha(0.08f));
-    g.drawRect(meter);
+    // Track: slightly elevated so it's visible even at silence.
+    g.setColour(orion::theme::surface::elevated);
+    g.fillRoundedRectangle(meter.toFloat(), 3.0f);
+    g.setColour(orion::theme::line::subtle.withAlpha(0.5f));
+    g.drawRoundedRectangle(meter.toFloat().reduced(0.5f), 3.0f, 1.0f);
+
+    // Only draw the fill when there is actual signal (avoids 1-pixel green sliver at silence).
+    if (state.masterLevel > 0.002f)
+    {
+        auto fill = meter.toFloat();
+        fill.setWidth(fill.getWidth() * juce::jlimit(0.0f, 1.0f, state.masterLevel));
+        juce::ColourGradient meterGradient(juce::Colour(0xff39d36b), fill.getX(), fill.getCentreY(),
+                                           orion::theme::warm::red, fill.getRight(), fill.getCentreY(), false);
+        meterGradient.addColour(0.72, juce::Colour(0xffe7c93a));
+        g.setGradientFill(meterGradient);
+        g.fillRoundedRectangle(fill, 3.0f);
+    }
 
     g.setColour(juce::Colours::white.withAlpha(0.90f));
     g.setFont(juce::FontOptions(16.0f, juce::Font::bold));

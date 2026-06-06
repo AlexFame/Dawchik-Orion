@@ -85,7 +85,7 @@ void SidebarNavComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::black.withAlpha(0.22f));
     g.fillRoundedRectangle(projectBounds.withSizeKeepingCentre(42, 42).toFloat(), 6.0f);
     drawIcon(g, SidebarNavItem::project, projectBounds.withSizeKeepingCentre(34, 34).toFloat(), cyanColour);
-    g.setColour(cyanColour);
+    g.setColour(mutedText);
     g.setFont(juce::FontOptions(7.0f, juce::Font::bold));
     g.drawText("ORION", projectBounds.withY(projectBounds.getBottom() - 12).withHeight(10),
                juce::Justification::centred, true);
@@ -110,6 +110,15 @@ void SidebarNavComponent::paint(juce::Graphics& g)
             g.fillRoundedRectangle(itemBounds.toFloat().reduced(5.0f, 3.0f), 5.0f);
         }
 
+        // addFolder gets a subtle container so it visually matches the other nav items.
+        if (! active && entry.item == SidebarNavItem::addFolder)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.04f));
+            g.fillRoundedRectangle(itemBounds.toFloat().reduced(4.0f, 3.0f), 5.0f);
+            g.setColour(th::line::subtle.withAlpha(0.5f));
+            g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), 5.0f, 1.0f);
+        }
+
         const auto colour = active ? juce::Colours::black.withAlpha(0.86f)
                                    : (hovered ? textColour : mutedText);
         drawIcon(g, entry.item, itemBounds.withSizeKeepingCentre(28, 28).toFloat().translated(0.0f, -8.0f), colour);
@@ -122,6 +131,12 @@ void SidebarNavComponent::paint(juce::Graphics& g)
 
     const auto addBounds = getItemBounds(SidebarNavItem::add).withSizeKeepingCentre(44, 44);
     const auto addHovered = hoveredItem.has_value() && *hoveredItem == SidebarNavItem::add;
+
+    // Separator above the add-track button so it reads as a distinct action, not a nav item.
+    const auto separatorY = static_cast<float>(addBounds.getY() - 12);
+    g.setColour(railStroke);
+    g.drawLine(8.0f, separatorY, static_cast<float>(getWidth() - 8), separatorY, 1.0f);
+
     g.setColour(juce::Colour(0xff242424));
     g.fillRoundedRectangle(addBounds.toFloat(), 10.0f);
     g.setColour((addHovered ? activeColour : activeColour.withAlpha(0.52f)));
@@ -208,7 +223,7 @@ juce::Rectangle<int> SidebarNavComponent::getItemBounds(SidebarNavItem item) con
     if (item == SidebarNavItem::add)
         return { 0, juce::jmax(topPadding + 62, getHeight() - 68), w, 56 };
 
-    auto y = topPadding + 106;
+    auto y = topPadding + 62 + itemGap;
     for (const auto& entry : navEntries)
     {
         if (entry.item == item)
@@ -221,7 +236,7 @@ juce::Rectangle<int> SidebarNavComponent::getItemBounds(SidebarNavItem item) con
 
 juce::Rectangle<int> SidebarNavComponent::getEntryBounds(int index) const noexcept
 {
-    return { 0, topPadding + 106 + index * (itemHeight + itemGap), getWidth(), itemHeight };
+    return { 0, topPadding + 62 + itemGap + index * (itemHeight + itemGap), getWidth(), itemHeight };
 }
 
 std::optional<SidebarNavItem> SidebarNavComponent::hitTestNavItem(juce::Point<int> position) const noexcept

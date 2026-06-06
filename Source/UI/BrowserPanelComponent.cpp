@@ -19,7 +19,7 @@ const auto buttonOutlineColour = th::line::normal.withAlpha(0.6f);
 constexpr int rowHeight = 46;
 constexpr int rowGap = 7;
 constexpr int dragThresholdPx = 5;
-constexpr int headerHeight = 120; // title + search + sections
+constexpr int headerHeight = 130; // title + gap + subtitle + gap + search + gap + sections + gap
 constexpr int previewBarHeight = 64; // bottom preview card (waveform + play + name)
 constexpr int previewSyncRowHeight = 24; // SYNC toggle row, sits below the preview card
 constexpr int contentPadX = 4; // uniform horizontal inset so left/right padding stays symmetric
@@ -467,6 +467,7 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
     g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
     g.drawText("Browser", titleArea, juce::Justification::centredLeft);
 
+    bounds.removeFromTop(4);  // gap between title and subtitle
     g.setColour(mutedText);
     g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
     g.drawText("Folders and audio files for drag to playlist", bounds.removeFromTop(18), juce::Justification::centredLeft);
@@ -541,12 +542,12 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
 {
     const auto bar = getPreviewBarBounds();
-    const auto accent = juce::Colour(0xff35c9d6);
+    const auto accent = th::cool::turquoise;
 
     // Card.
-    g.setColour(juce::Colour(0xff10141a));
+    g.setColour(th::core::voidBlack);
     g.fillRoundedRectangle(bar.toFloat().reduced(2.0f), 10.0f);
-    g.setColour(juce::Colours::white.withAlpha(0.10f));
+    g.setColour(th::line::subtle.withAlpha(0.55f));
     g.drawRoundedRectangle(bar.toFloat().reduced(2.0f), 10.0f, 1.0f);
 
     // SYNC toggle pill — sits in its own row just below the card so nothing overlaps it.
@@ -575,8 +576,8 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     {
         g.setColour(accent.withAlpha(previewPeaks.empty() ? 0.25f : 0.9f));
     }
-    g.fillRoundedRectangle(btn.toFloat(), 8.0f);
-    g.setColour(juce::Colour(0xff10141a));
+    g.fillRoundedRectangle(btn.toFloat(), 10.0f);
+    g.setColour(th::core::voidBlack);
     const auto gi = btn.toFloat().reduced(btn.getWidth() * 0.3f, btn.getHeight() * 0.26f);
     if (previewPlaying)
     {
@@ -653,19 +654,23 @@ void BrowserPanelComponent::resized()
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
 
-    // Row 1: title row — Add Folder (right).
-    auto titleRow = bounds.removeFromTop(30);
+    // Row 1: title row — Add Folder (right). Match paint()'s titleArea height exactly.
+    auto titleRow = bounds.removeFromTop(32);
     closeButton.setBounds({});
-    chooseFolderButton.setBounds(titleRow.removeFromRight(104).reduced(0, 2));
+    chooseFolderButton.setBounds(titleRow.removeFromRight(104).withSizeKeepingCentre(104, 26));
 
-    bounds.removeFromTop(18);
+    bounds.removeFromTop(4);   // gap between title and subtitle
+    bounds.removeFromTop(18);  // subtitle text
+    bounds.removeFromTop(6);   // gap before search
     searchEditor.setBounds(bounds.removeFromTop(28).reduced(0, 2));
 
     bounds.removeFromTop(6);
     auto sectionRow = bounds.removeFromTop(24);
-    loopsSectionButton.setBounds(sectionRow.removeFromLeft(76));
+    // Equal-width filter pills — pick the wider label as the common size.
+    constexpr int pillW = 88;
+    loopsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
     sectionRow.removeFromLeft(6);
-    oneShotsSectionButton.setBounds(sectionRow.removeFromLeft(96));
+    oneShotsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
 }
 
 void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
