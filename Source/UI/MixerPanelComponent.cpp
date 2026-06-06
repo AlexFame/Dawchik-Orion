@@ -14,7 +14,7 @@ const auto stripStroke     = juce::Colour(0xff2a2f36);
 const auto slotBackground  = juce::Colour(0xff14171b);
 const auto accentColour    = juce::Colour(0xffe8401f);
 const auto cyan            = juce::Colour(0xff35c9d6);
-const auto mutedText       = juce::Colours::white.withAlpha(0.55f);
+const auto mutedText       = juce::Colours::white.withAlpha(0.70f);
 
 constexpr double minGainDb = -60.0;
 constexpr double maxGainDb = 6.0;
@@ -615,7 +615,7 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
     drawListSection("SENDS", L.sendsLabel, L.sendsPower, L.sendsSlot, sendNames);
 
     // Peak label ("---").
-    g.setColour(mutedText.withAlpha(0.7f));
+    g.setColour(mutedText.withAlpha(0.86f));
     g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
     auto peakR = L.peakLabel;
     g.drawText("---", peakR.removeFromRight(peakR.getWidth() / 2), juce::Justification::centred, false);
@@ -625,7 +625,7 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
     const auto faderTop = static_cast<float>(L.fader.getY());
     const auto faderH   = juce::jmax(1.0f, static_cast<float>(L.fader.getHeight()));
     g.setFont(juce::FontOptions(8.5f, juce::Font::plain));
-    g.setColour(mutedText.withAlpha(0.65f));
+    g.setColour(mutedText.withAlpha(0.82f));
     for (const auto db : ticks)
     {
         const auto t = juce::jlimit(0.0, 1.0, (maxGainDb - db) / (maxGainDb - minGainDb));

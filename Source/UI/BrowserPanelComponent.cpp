@@ -7,7 +7,7 @@
 
 namespace
 {
-const auto mutedText = juce::Colours::white.withAlpha(0.64f);
+const auto mutedText = juce::Colours::white.withAlpha(0.72f);
 const auto rowBackground = juce::Colours::white.withAlpha(0.035f);
 const auto rowHover = juce::Colours::white.withAlpha(0.06f);
 const auto rowSelected = juce::Colours::white.withAlpha(0.09f);
@@ -370,8 +370,6 @@ void BrowserPanelComponent::SwipeUnlockTimer::timerCallback()
 
 BrowserPanelComponent::BrowserPanelComponent()
 {
-    setWantsKeyboardFocus(true);
-
     chooseFolderButton.setColour(juce::TextButton::buttonColourId, buttonColour);
     chooseFolderButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff26313b));
     chooseFolderButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -383,7 +381,7 @@ BrowserPanelComponent::BrowserPanelComponent()
     // (Close button removed — toggling the browser is the toolbar's BROWSER button.)
     closeButton.setVisible(false);
 
-    searchEditor.setTextToShowWhenEmpty("Search...", juce::Colours::white.withAlpha(0.35f));
+    searchEditor.setTextToShowWhenEmpty("Search...", juce::Colours::white.withAlpha(0.58f));
     searchEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff141c24));
     searchEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
     searchEditor.setColour(juce::TextEditor::highlightColourId, juce::Colours::white.withAlpha(0.20f));
@@ -450,6 +448,11 @@ void BrowserPanelComponent::openFolder(const juce::File& directory)
 {
     if (directory.isDirectory())
         navigateTo(directory);
+}
+
+void BrowserPanelComponent::showRootLocations()
+{
+    showLocationRoots(true);
 }
 
 void BrowserPanelComponent::paint(juce::Graphics& g)
@@ -550,7 +553,7 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
         g.fillRoundedRectangle(syncBtn.toFloat(), 6.0f);
         g.setColour(previewBpmSync ? accent.withAlpha(0.9f) : juce::Colours::white.withAlpha(0.16f));
         g.drawRoundedRectangle(syncBtn.toFloat().reduced(0.5f), 6.0f, 1.0f);
-        g.setColour(previewBpmSync ? juce::Colour(0xff10141a) : juce::Colours::white.withAlpha(0.55f));
+        g.setColour(previewBpmSync ? juce::Colour(0xff10141a) : juce::Colours::white.withAlpha(0.72f));
         g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         g.drawText(previewBpmSync ? "SYNC TO PROJECT BPM  -  ON" : "SYNC TO PROJECT BPM  -  OFF",
                    syncBtn, juce::Justification::centred);
@@ -592,7 +595,7 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     const auto wave = getPreviewWaveformBounds();
     if (previewPeaks.empty())
     {
-        g.setColour(juce::Colours::white.withAlpha(0.30f));
+        g.setColour(juce::Colours::white.withAlpha(0.62f));
         g.setFont(juce::FontOptions(12.0f));
         g.drawText("Select a sample to preview", wave, juce::Justification::centred);
         return;
@@ -664,8 +667,6 @@ void BrowserPanelComponent::resized()
 
 void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 {
-    grabKeyboardFocus();
-
     // SYNC toggle row (below the preview card).
     if (getPreviewSyncButtonBounds().contains(event.getPosition()))
     {

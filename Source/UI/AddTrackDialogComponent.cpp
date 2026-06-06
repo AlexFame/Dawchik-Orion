@@ -12,7 +12,7 @@ const auto fieldFill   = juce::Colour(0xff0c0e10);
 const auto cardIdle    = juce::Colour(0xff20262f);
 const auto accent      = juce::Colour(0xffe8401f);
 const auto textColour  = juce::Colours::white.withAlpha(0.94f);
-const auto mutedText   = juce::Colours::white.withAlpha(0.5f);
+const auto mutedText   = juce::Colours::white.withAlpha(0.68f);
 
 constexpr int panelW = 540;
 constexpr int panelH = 492;

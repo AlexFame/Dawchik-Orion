@@ -43,6 +43,7 @@ constexpr int transportSectionHeight = 54;
 constexpr int transportContentVerticalNudge = 0;
 constexpr int samplerBottomPanelHeight = 286;
 constexpr int bottomStatusBarHeight = orion::BottomStatusBarComponent::preferredHeight;
+constexpr const char* sidebarFoldersSettingsKey = "sidebar.customFolders";
 
 enum MenuItemId
 {
@@ -85,6 +86,15 @@ juce::String formatTransportTime(double playheadBeat, double bpm)
     const auto mins = static_cast<int>(seconds) / 60;
     const auto secs = seconds - mins * 60.0;
     return juce::String(mins) + ":" + juce::String(secs, 1).paddedLeft('0', 4);
+}
+
+std::unique_ptr<juce::PropertiesFile> makeUserSettingsFile()
+{
+    juce::PropertiesFile::Options options;
+    options.applicationName = "Orion";
+    options.filenameSuffix = "settings";
+    options.osxLibrarySubFolder = "Application Support";
+    return std::make_unique<juce::PropertiesFile>(options);
 }
 
 // A modern, rounded popup menu look (dark panel, accent hover) — for the app's own menus
@@ -1033,6 +1043,7 @@ MainComponent::MainComponent()
 
     addAndMakeVisible(arrangementTimeline);
     addAndMakeVisible(sidebarNav);
+    loadSidebarBrowserFolders();
     addAndMakeVisible(browserPanel);
     addAndMakeVisible(midiEditorOverlay);
     addChildComponent(clipEditorPanel);
@@ -1052,16 +1063,6 @@ MainComponent::MainComponent()
         audioDeviceManager.setMidiInputDeviceEnabled(midiInput.identifier, true);
         audioDeviceManager.addMidiInputDeviceCallback(midiInput.identifier, this);
         activeMidiInputDeviceIds.addIfNotAlreadyThere(midiInput.identifier);
-    }
-    {
-        // Request a low-latency buffer for responsive live playing. The device default is
-        // often 512 samples (~12 ms + output ≈ 23 ms round-trip, audible when playing).
-        auto setup = audioDeviceManager.getAudioDeviceSetup();
-        if (setup.bufferSize <= 0 || setup.bufferSize > 256)
-        {
-            setup.bufferSize = 256;
-            audioDeviceManager.setAudioDeviceSetup(setup, true);
-        }
     }
     requestMicrophonePermissionAtLaunch();
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
@@ -1353,6 +1354,7 @@ MainComponent::MainComponent()
         {
             sidebarBrowserFolders.push_back(folder);
             sidebarNav.setCustomFolders(sidebarBrowserFolders);
+            saveSidebarBrowserFolders();
         }
 
         browserPanelVisible = true;
@@ -1381,12 +1383,14 @@ MainComponent::MainComponent()
     {
         if (item == SidebarNavItem::files || item == SidebarNavItem::samples)
         {
-            // FILES now toggles the browser (show/hide) — replaces the collapse arrow.
-            // The timer eases browserAnim toward the new target for a smooth slide.
-            browserPanelVisible = ! browserPanelVisible;
+            const auto shouldCollapse = browserPanelVisible && browserPanel.isShowingRootLocations();
+            browserPanelVisible = ! shouldCollapse;
             browserButton.setToggleState(browserPanelVisible, juce::dontSendNotification);
             if (browserPanelVisible)
-                browserPanel.setVisible(true);   // reveal immediately so it can slide in
+            {
+                browserPanel.setVisible(true);
+                browserPanel.showRootLocations();
+            }
             startTimerHz(60);
             resized();
             repaint();
@@ -4720,6 +4724,51 @@ void MainComponent::saveProjectInteractively()
                                  });
 }
 
+void MainComponent::loadSidebarBrowserFolders()
+{
+    sidebarBrowserFolders.clear();
+
+    auto settings = makeUserSettingsFile();
+    if (settings == nullptr)
+        return;
+
+    juce::StringArray paths;
+    paths.addLines(settings->getValue(sidebarFoldersSettingsKey));
+
+    for (const auto& path : paths)
+    {
+        const auto folder = juce::File(path);
+        if (! folder.isDirectory())
+            continue;
+
+        const auto folderPath = folder.getFullPathName();
+        const auto alreadyAdded = std::any_of(sidebarBrowserFolders.begin(), sidebarBrowserFolders.end(),
+                                              [&folderPath](const juce::File& existing)
+                                              {
+                                                  return existing.getFullPathName() == folderPath;
+                                              });
+        if (! alreadyAdded)
+            sidebarBrowserFolders.push_back(folder);
+    }
+
+    sidebarNav.setCustomFolders(sidebarBrowserFolders);
+}
+
+void MainComponent::saveSidebarBrowserFolders() const
+{
+    auto settings = makeUserSettingsFile();
+    if (settings == nullptr)
+        return;
+
+    juce::StringArray paths;
+    for (const auto& folder : sidebarBrowserFolders)
+        if (folder.isDirectory())
+            paths.addIfNotAlreadyThere(folder.getFullPathName());
+
+    settings->setValue(sidebarFoldersSettingsKey, paths.joinIntoString("\n"));
+    settings->saveIfNeeded();
+}
+
 void MainComponent::openProjectInteractively()
 {
     auto defaultDirectory = currentProjectFile.existsAsFile()
@@ -4968,11 +5017,12 @@ void MainComponent::maybeStartBackgroundAnalysis()
     if (analysisJobActive.load(std::memory_order_acquire))
         return;
 
-    // Distinct files of clips still awaiting the (expensive) signal analysis.
+    // Distinct files of clips awaiting signal analysis (key/tempo) OR gain normalization.
     juce::StringArray paths;
     for (const auto& track : projectState.getTracks())
         for (const auto& clip : track.clips)
-            if (clip.signalAnalysisPending && clip.type == ClipType::audio && clip.sourcePath.isNotEmpty())
+            if ((clip.signalAnalysisPending || clip.gainNormalizationPending)
+                && clip.type == ClipType::audio && clip.sourcePath.isNotEmpty())
                 paths.addIfNotAlreadyThere(clip.sourcePath);
 
     if (paths.isEmpty())
@@ -5034,32 +5084,39 @@ void MainComponent::applyBackgroundAnalysis(const std::map<juce::String, orion::
     for (auto& track : projectState.getTracks())
         for (auto& clip : track.clips)
         {
-            if (! clip.signalAnalysisPending)
+            if (! clip.signalAnalysisPending && ! clip.gainNormalizationPending)
                 continue;
             const auto it = results.find(clip.sourcePath);
             if (it == results.end())
                 continue;
             const auto& a = it->second;
-            if (clip.sourceKeyRoot < 0 && a.sourceKeyRoot >= 0)
+
+            if (clip.signalAnalysisPending)
             {
-                clip.sourceKeyRoot    = a.sourceKeyRoot;
-                clip.sourceKeyIsMinor = a.sourceKeyIsMinor;
+                if (clip.sourceKeyRoot < 0 && a.sourceKeyRoot >= 0)
+                {
+                    clip.sourceKeyRoot    = a.sourceKeyRoot;
+                    clip.sourceKeyIsMinor = a.sourceKeyIsMinor;
+                }
+                if (clip.sourceBpm <= 0.0 && a.sourceBpm > 0.0)
+                {
+                    clip.sourceBpm   = a.sourceBpm;
+                    clip.bpmGuessed  = a.bpmGuessed;
+                }
+                if (clip.detectedBars <= 0 && a.detectedBars > 0)
+                    clip.detectedBars = a.detectedBars;
+                if (clip.sourceDurationSeconds <= 0.0 && a.durationSeconds > 0.0)
+                    clip.sourceDurationSeconds = a.durationSeconds;
+                clip.signalAnalysisPending = false;
             }
-            if (clip.sourceBpm <= 0.0 && a.sourceBpm > 0.0)
+
+            if (clip.gainNormalizationPending)
             {
-                clip.sourceBpm   = a.sourceBpm;
-                clip.bpmGuessed  = a.bpmGuessed;
+                // Keep imported audio at unity. Auto gain changes made dropped loops
+                // unpredictably louder and could clip when several tracks summed.
+                clip.gainNormalizationPending = false;
             }
-            if (clip.detectedBars <= 0 && a.detectedBars > 0)
-                clip.detectedBars = a.detectedBars;
-            if (clip.sourceDurationSeconds <= 0.0 && a.durationSeconds > 0.0)
-                clip.sourceDurationSeconds = a.durationSeconds;
-            // Auto-normalise a freshly dropped clip to 0 dBFS so it starts at full level
-            // (the user trims from there). Only when the gain is still untouched (≈0 dB)
-            // and we actually measured a peak (peakDb <= 0; 1.0 means "not measured").
-            if (a.peakDb <= 0.0 && std::abs(clip.gainDb) < 0.001)
-                clip.gainDb = juce::jlimit(-24.0, 12.0, 0.0 - a.peakDb);
-            clip.signalAnalysisPending = false;
+
             changed = true;
         }
 

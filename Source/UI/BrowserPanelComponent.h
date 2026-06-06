@@ -43,6 +43,8 @@ public:
     std::optional<BrowserItem> getSelectedItem() const;
     void chooseRootFolder();
     void openFolder(const juce::File& directory);
+    void showRootLocations();
+    bool isShowingRootLocations() const noexcept { return showingLocationRoots; }
 
     // Feed the bottom preview bar. Peaks are normalised 0..1 absolute magnitudes.
     void setPreviewWaveform(const juce::String& name, std::vector<float> peaks);

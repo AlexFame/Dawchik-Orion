@@ -75,7 +75,7 @@ void BottomStatusBarComponent::paint(juce::Graphics& g)
     g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
     auto saveTitle = save.removeFromTop(22);
     g.drawText(state.projectSaved ? "PROJECT_SAVED" : "PROJECT_DIRTY", saveTitle, juce::Justification::centredRight);
-    g.setColour(dim.withAlpha(0.45f));
+    g.setColour(juce::Colours::white.withAlpha(0.66f));
     g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
     g.drawText("SYNCED_12:44:09", save.removeFromTop(18), juce::Justification::centredRight);
 }
@@ -140,7 +140,7 @@ void BottomStatusBarComponent::drawNavItem(juce::Graphics& g, Item item, const j
     const auto active = (item == Item::mixer && state.mixerOpen)
                      || (item == Item::clipEditor && state.clipEditorOpen);
     const auto hovered = item == hoveredItem;
-    const auto colour = active ? peach : (hovered ? juce::Colours::white.withAlpha(0.58f) : dim.withAlpha(0.58f));
+    const auto colour = active ? peach : (hovered ? juce::Colours::white.withAlpha(0.78f) : juce::Colours::white.withAlpha(0.66f));
 
     if (active || hovered)
     {

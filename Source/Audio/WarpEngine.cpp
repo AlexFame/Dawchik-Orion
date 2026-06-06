@@ -1153,17 +1153,22 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
 
     if (bestBars > 0)
     {
-        result.sourceBpm = bestBpm;
+        result.sourceBpm    = bestBpm;
         result.detectedBars = bestBars;
-        result.bpmSource = "duration-bars";
-        result.bpmGuessed = true;
+        result.bpmSource    = "duration-bars";
+        result.bpmGuessed   = true;
         const auto sourceBeats = result.durationSeconds * (bestBpm / 60.0);
         const auto barFraction = std::abs(sourceBeats - std::round(sourceBeats / beatsPerBar) * beatsPerBar);
         result.bpmConfidence = juce::jlimit(0.0, 1.0, 1.0 - barFraction / beatsPerBar);
         DBG("[Warp] " + file.getFileName() + " | bpmSource=duration-bars | confidence="
             + juce::String(result.bpmConfidence, 2) + " | sourceBpm=" + juce::String(bestBpm, 1)
             + " | bars=" + juce::String(bestBars));
-        return result;
+        // Shallow mode: duration guess is good enough (no audio loaded yet).
+        // Deep mode: fall through to autocorrelation — a melodic file whose duration
+        // happens to fit N bars (e.g. 60 s = 32 bars @ 128 BPM) but whose real tempo
+        // differs needs the signal to confirm. Autocorr overrides if it succeeds.
+        if (! deepAnalysis)
+            return result;
     }
 
     // Pass 2: real onset-autocorrelation tempo (works on non-bar-aligned material).
@@ -1172,9 +1177,9 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
         const auto tempo = estimateTempoAutocorr(mono, monoSr, projectTempoBpm);
         if (tempo.bpm >= 60.0 && tempo.bpm <= 200.0 && tempo.confidence >= 0.18)
         {
-            result.sourceBpm = tempo.bpm;
-            result.bpmSource = "audio-autocorr";
-            result.bpmGuessed = true;
+            result.sourceBpm     = tempo.bpm;
+            result.bpmSource     = "audio-autocorr";
+            result.bpmGuessed    = true;
             result.bpmConfidence = tempo.confidence;
             const auto sourceBeats = result.durationSeconds * (tempo.bpm / 60.0);
             const auto bars = static_cast<int>(std::round(sourceBeats / beatsPerBar));
@@ -1184,6 +1189,9 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
                 + juce::String(tempo.confidence, 2) + " | sourceBpm=" + juce::String(tempo.bpm, 1));
             return result;
         }
+        // Autocorr didn't fire — keep the Pass 1 duration guess if we had one.
+        if (result.sourceBpm > 0.0)
+            return result;
     }
 
     // Pass 3: short-sample fit. Allow sub-bar beat counts so short loops/chops still

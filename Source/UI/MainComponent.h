@@ -119,6 +119,8 @@ private:
     void loadProjectFromFile(const juce::File& file);
     void exportProjectInteractively();
     void openSettingsDialog();
+    void loadSidebarBrowserFolders();
+    void saveSidebarBrowserFolders() const;
     void refreshAudioClipWarpLengths();
     // Background key/tempo analysis for clips flagged signalAnalysisPending.
     void maybeStartBackgroundAnalysis();

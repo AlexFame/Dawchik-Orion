@@ -9,7 +9,7 @@ const auto rowSelected   = juce::Colour(0xff2f6df0);
 const auto accent        = juce::Colour(0xffe8401f);
 const auto cyan          = juce::Colour(0xff35c9d6);
 const auto textColour    = juce::Colours::white.withAlpha(0.92f);
-const auto mutedText     = juce::Colours::white.withAlpha(0.55f);
+const auto mutedText     = juce::Colours::white.withAlpha(0.70f);
 
 constexpr int panelW = 520;
 constexpr int panelH = 560;

@@ -2618,6 +2618,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     });
     auto& droppedClip = targetTrack.clips.back();
     droppedClip.signalAnalysisPending = analysis.needsSignalAnalysis;
+    droppedClip.gainNormalizationPending = false;
     if (isClipEditorDrop)
     {
         droppedClip.sampleStartRatio = sampleStartRatio;

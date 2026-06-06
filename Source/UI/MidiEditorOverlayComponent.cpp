@@ -25,6 +25,7 @@ constexpr int slideDrawThresholdPx = 3;
 constexpr float slideHandleRadiusPx = 6.0f;
 constexpr int baseLaneHeightPx = 24;
 constexpr int velocityLaneHeightPx = 112;
+constexpr int topBarHeightPx = 104;
 constexpr int totalPitchCount = 128;
 constexpr int lowestPitch = 0;
 constexpr int highestPitch = totalPitchCount - 1;
@@ -925,7 +926,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
 void MidiEditorOverlayComponent::resized()
 {
     auto bounds = getLocalBounds().reduced(8);
-    auto topBar = bounds.removeFromTop(88).reduced(20, 16);
+    auto topBar = bounds.removeFromTop(topBarHeightPx).reduced(20, 12);
 
     auto closeArea = topBar.removeFromRight(210);
     closeButton.setBounds(closeArea.reduced(0, 8));
@@ -934,30 +935,30 @@ void MidiEditorOverlayComponent::resized()
     titleLabel.setBounds(titleRow.removeFromLeft(220));
     contextLabel.setBounds(titleRow.reduced(8, 0));
     subtitleLabel.setBounds(0, 0, 0, 0);
-    auto controlsArea = topBar.removeFromTop(28);
+    auto controlsArea = topBar.removeFromTop(34);
 
-    scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 2));
+    scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 1));
     controlsArea.removeFromLeft(8);
-    snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 2));
+    snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    quantizeButton.setBounds(controlsArea.removeFromLeft(86).reduced(0, 2));
+    quantizeButton.setBounds(controlsArea.removeFromLeft(86).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    slidePenButton.setBounds(controlsArea.removeFromLeft(92).reduced(0, 2));
+    slidePenButton.setBounds(controlsArea.removeFromLeft(92).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    slideVisibilityButton.setBounds(controlsArea.removeFromLeft(104).reduced(0, 2));
+    slideVisibilityButton.setBounds(controlsArea.removeFromLeft(104).reduced(0, 1));
     controlsArea.removeFromLeft(12);
-    stepWriteButton.setBounds(controlsArea.removeFromLeft(96).reduced(0, 2));
+    stepWriteButton.setBounds(controlsArea.removeFromLeft(96).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    stepLengthButton.setBounds(controlsArea.removeFromLeft(58).reduced(0, 2));
+    stepLengthButton.setBounds(controlsArea.removeFromLeft(58).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    stepRestButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 2));
+    stepRestButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    stepBackButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 2));
+    stepBackButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 1));
     controlsArea.removeFromLeft(6);
-    stepTieButton.setBounds(controlsArea.removeFromLeft(44).reduced(0, 2));
+    stepTieButton.setBounds(controlsArea.removeFromLeft(44).reduced(0, 1));
     controlsArea.removeFromLeft(10);
-    scaleLockToggle.setBounds(controlsArea.removeFromLeft(22).reduced(0, 4));
-    scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 2));
+    scaleLockToggle.setBounds(controlsArea.removeFromLeft(28).reduced(0, 3));
+    scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 1));
     clampScrollOffsets();
 }
 
@@ -2272,13 +2273,13 @@ void MidiEditorOverlayComponent::releasePlacedNotePreview()
 juce::Rectangle<int> MidiEditorOverlayComponent::getTopBarBounds() const noexcept
 {
     auto bounds = getLocalBounds().reduced(24);
-    return bounds.removeFromTop(88);
+    return bounds.removeFromTop(topBarHeightPx);
 }
 
 juce::Rectangle<int> MidiEditorOverlayComponent::getKeyboardBounds() const noexcept
 {
     auto bounds = getLocalBounds().reduced(24);
-    bounds.removeFromTop(88);
+    bounds.removeFromTop(topBarHeightPx);
     bounds.removeFromBottom(velocityLaneHeightPx + 10);
     return bounds.removeFromLeft(92);
 }
@@ -2286,7 +2287,7 @@ juce::Rectangle<int> MidiEditorOverlayComponent::getKeyboardBounds() const noexc
 juce::Rectangle<int> MidiEditorOverlayComponent::getVisibleGridViewport() const noexcept
 {
     auto bounds = getLocalBounds().reduced(24);
-    bounds.removeFromTop(88);
+    bounds.removeFromTop(topBarHeightPx);
     bounds.removeFromBottom(velocityLaneHeightPx + 10);
     bounds.removeFromLeft(92);
     return bounds;
@@ -2295,7 +2296,7 @@ juce::Rectangle<int> MidiEditorOverlayComponent::getVisibleGridViewport() const 
 juce::Rectangle<int> MidiEditorOverlayComponent::getVelocityLaneBounds() const noexcept
 {
     auto bounds = getLocalBounds().reduced(24);
-    bounds.removeFromTop(88);
+    bounds.removeFromTop(topBarHeightPx);
     auto velocityArea = bounds.removeFromBottom(velocityLaneHeightPx);
     velocityArea.removeFromLeft(92);
     return velocityArea;

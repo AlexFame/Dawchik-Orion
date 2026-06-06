@@ -83,6 +83,9 @@ struct TimelineClip
     // analysis for key/tempo. A background worker fills it in and clears this,
     // so dropping a clip stays instant (Ableton-style). Not serialized.
     bool signalAnalysisPending { false };
+    // Transient compatibility flag for older in-memory drops that queued gain analysis.
+    // New drops keep imported audio at unity and do not auto-normalise. Not serialized.
+    bool gainNormalizationPending { false };
 };
 
 // Maps a linear fade progress t in [0,1] (0 = silent end, 1 = full level) to a
@@ -97,13 +100,19 @@ inline double fadeCurveGain(double t, double curve) noexcept
     return std::pow(t, exponent);
 }
 
-// Equal-power pan: maps pan in [-1,1] to left/right gains (centre ≈ 0.707 each).
+// Equal-power pan, compensated to 0 dB at the centre (unity pan law). The raw
+// equal-power curve gives 0.707 per channel at the centre (a 3 dB dip), which makes
+// every centred track quieter than the raw source — so a centred clip ends up ~3 dB
+// below the browser preview, which plays straight to the master with no pan stage.
+// Scaling by sqrt(2) puts the centre at unity (1.0 per channel) while keeping the
+// equal-power shape across the pan sweep; hard-panned edges reach ~+3 dB on one side.
 inline void panToGains(double pan, float& leftGain, float& rightGain) noexcept
 {
+    constexpr float centreCompensation = 1.41421356237f; // sqrt(2): unity at centre
     const auto p = juce::jlimit(-1.0, 1.0, pan);
     const auto angle = (p + 1.0) * 0.25 * juce::MathConstants<double>::pi; // 0..pi/2
-    leftGain  = static_cast<float>(std::cos(angle));
-    rightGain = static_cast<float>(std::sin(angle));
+    leftGain  = static_cast<float>(std::cos(angle)) * centreCompensation;
+    rightGain = static_cast<float>(std::sin(angle)) * centreCompensation;
 }
 
 struct TrackState
