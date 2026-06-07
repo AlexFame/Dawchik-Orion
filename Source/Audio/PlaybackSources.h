@@ -412,6 +412,18 @@ public:
             it->second->pendingLiveMidi.addEvent(juce::MidiMessage::noteOff(1, midiNote), 0);
     }
 
+    // Live monitoring: forward an arbitrary controller message (CC, pitch bend,
+    // aftertouch, channel pressure) from a hardware MIDI keyboard straight to the
+    // instrument on a track. Note on/off go through the dedicated helpers above so
+    // they pick up the engine's channel-1 convention; everything else passes through
+    // verbatim. Thread-safe.
+    void instrumentLiveMidiMessage(int trackIndex, const juce::MidiMessage& message)
+    {
+        const juce::ScopedLock sl(instrumentLock);
+        if (const auto it = instruments.find(trackIndex); it != instruments.end() && it->second != nullptr)
+            it->second->pendingLiveMidi.addEvent(message, 0);
+    }
+
     void allInstrumentNotesOff()
     {
         const juce::ScopedLock sl(instrumentLock);

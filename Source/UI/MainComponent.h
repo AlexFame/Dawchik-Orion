@@ -72,6 +72,20 @@ private:
     void timerCallback() override;
     void buttonClicked(juce::Button* button) override;
     void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
+    // Hardware MIDI keyboard support. handleIncomingMidiMessage marshals each
+    // message to the message thread and hands it to routeLiveMidiMessage, which
+    // plays it through the active track's instrument/sampler, records it when armed,
+    // forwards controllers to hosted VST instruments, and step-writes into the MIDI
+    // editor when it's open.
+    void routeLiveMidiMessage(const juce::MidiMessage& message);
+    int  resolveLiveMidiTargetTrack();
+    int  resolveArmedMidiTrack();
+    void liveMidiNoteOn(int trackIndex, int midiNote, int velocity);
+    void liveMidiNoteOff(int trackIndex, int midiNote);
+    // Enables + attaches every available MIDI input device, skipping ones already
+    // connected. Called at launch and polled so freshly plugged-in keyboards work
+    // without a restart.
+    void refreshMidiInputDevices();
     void updateTransportLabels();
     void playBrowserPreview(const BrowserItem& item);
     void loadBrowserItemIntoSampler(const BrowserItem& item);
@@ -258,6 +272,7 @@ private:
     juce::AudioFormatManager audioFormatManager;
     juce::AudioDeviceManager audioDeviceManager;
     juce::StringArray activeMidiInputDeviceIds;
+    int midiDeviceRescanCounter { 0 };   // throttles hot-plug rescans in timerCallback
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;

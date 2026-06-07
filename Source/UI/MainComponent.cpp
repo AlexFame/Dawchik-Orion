@@ -1060,12 +1060,7 @@ MainComponent::MainComponent()
     // armed/recorded. We request mic permission separately below, without opening input,
     // so macOS shows one first-run prompt instead of a second CoreAudio prompt.
     audioDeviceManager.initialise(0, 2, nullptr, true);
-    for (const auto& midiInput : juce::MidiInput::getAvailableDevices())
-    {
-        audioDeviceManager.setMidiInputDeviceEnabled(midiInput.identifier, true);
-        audioDeviceManager.addMidiInputDeviceCallback(midiInput.identifier, this);
-        activeMidiInputDeviceIds.addIfNotAlreadyThere(midiInput.identifier);
-    }
+    refreshMidiInputDevices();
     requestMicrophonePermissionAtLaunch();
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
     masterMixerSource.addInputSource(&previewTransportSource, false);
@@ -1648,50 +1643,13 @@ MainComponent::MainComponent()
     };
     midiEditorOverlay.onPreviewNoteOn = [this](int midiNote, int velocity)
     {
-        if (arrangementPlaybackSource == nullptr || ! selectedArrangementClip.has_value())
-            return;
-
-        auto& tracks = projectState.getTracks();
-        const auto trackIndex = selectedArrangementClip->first;
-        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
-            return;
-
-        const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
-        if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
-        {
-            arrangementPlaybackSource->instrumentLiveNoteOn(trackIndex, midiNote, velocity);
-            return;
-        }
-
-        if (track.samplerSourcePath.isNotEmpty())
-        {
-            arrangementPlaybackSource->samplerNoteOn(track.samplerSourcePath,
-                                                     midiNote,
-                                                     velocity,
-                                                     track.samplerRootMidiNote,
-                                                     track.volumeDb,
-                                                     track.samplerMode,
-                                                     0,
-                                                     track.samplerSliceCount,
-                                                     track.samplerWarpEnabled,
-                                                     track.samplerSourceBpm);
-        }
+        if (selectedArrangementClip.has_value())
+            liveMidiNoteOn(selectedArrangementClip->first, midiNote, velocity);
     };
     midiEditorOverlay.onPreviewNoteOff = [this](int midiNote)
     {
-        if (arrangementPlaybackSource == nullptr || ! selectedArrangementClip.has_value())
-            return;
-
-        auto& tracks = projectState.getTracks();
-        const auto trackIndex = selectedArrangementClip->first;
-        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
-            return;
-
-        const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
-        if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
-            arrangementPlaybackSource->instrumentLiveNoteOff(trackIndex, midiNote);
-        else
-            arrangementPlaybackSource->samplerNoteOff(midiNote, track.samplerMode);
+        if (selectedArrangementClip.has_value())
+            liveMidiNoteOff(selectedArrangementClip->first, midiNote);
     };
     midiEditorOverlay.onRequestPlayheadBeat = [this]() { return transportEngine.getPlayheadBeat(); };
     midiEditorOverlay.onRequestPlayingState = [this]() { return transportEngine.isPlaying(); };
@@ -2226,11 +2184,11 @@ void MainComponent::resized()
     settingsButton.setBounds(utilityButtons.removeFromLeft(62));
     scanPluginsButton.setBounds({});
 
-    // Matches paint() — minimal margins so the playlist fills the work area. `bounds` was
-    // reduced(8) all round; paint() draws the panels without that top inset, so pull the
-    // content up by 8 to sit flush with the painted panel (no dead band under the transport).
+    // Use the full window width so the timeline reaches the right edge (no dead strip).
+    // Only the left/top insets come from `bounds`; right/bottom go flush to the window.
     auto workArea = bounds.withTrimmedTop(2);
     workArea.setTop(juce::jmax(0, workArea.getY() - 8));
+    workArea.setRight(getLocalBounds().getRight());
     auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth);
     sidebarNav.setBounds(sidebarBounds);
     sidebarNav.toFront(false);
@@ -2653,6 +2611,15 @@ void MainComponent::timerCallback()
 
     updateClipEditorPreviewPlayhead();
 
+    // Poll for freshly plugged-in MIDI keyboards roughly twice a second so they
+    // start working without a restart. (Device enumeration is cheap but not free,
+    // so we don't run it on every 60 Hz tick.)
+    if (++midiDeviceRescanCounter >= 30)
+    {
+        midiDeviceRescanCounter = 0;
+        refreshMidiInputDevices();
+    }
+
     syncFoldersToBuses();
     if (pendingBrowserPreviewStart)
     {
@@ -2714,31 +2681,11 @@ void MainComponent::timerCallback()
     const auto canRecordNow = playing && ! countingIn && recordArmed;
 
     // Find a record-armed MIDI track. If none was explicitly R-armed, fall back to
-    // the currently selected MIDI track (or the sampler-armed one) — that way the
-    // user just presses REC + PLAY without having to also tap R on the track.
+    // the selected clip's track / selected MIDI track header — that way the user
+    // just presses REC + PLAY without having to also tap R on the track. The same
+    // resolution feeds live MIDI-keyboard playthrough so you hear what you record.
     auto& tracks = projectState.getTracks();
-    int armedTrack = -1;
-    for (std::size_t i = 0; i < tracks.size(); ++i)
-        if (tracks[i].isMidiTrack && tracks[i].recordArmed) { armedTrack = static_cast<int>(i); break; }
-
-    if (armedTrack < 0)
-    {
-        // Fallback 1: selected clip's track if it's MIDI.
-        if (selectedArrangementClip.has_value())
-        {
-            const auto idx = selectedArrangementClip->first;
-            if (idx >= 0 && idx < static_cast<int>(tracks.size()) && tracks[static_cast<std::size_t>(idx)].isMidiTrack)
-                armedTrack = idx;
-        }
-        // Fallback 2: any selected MIDI track header.
-        if (armedTrack < 0)
-        {
-            const auto sel = arrangementTimeline.getSelectedTrackIndex();
-            if (sel.has_value() && *sel >= 0 && *sel < static_cast<int>(tracks.size())
-                && tracks[static_cast<std::size_t>(*sel)].isMidiTrack)
-                armedTrack = *sel;
-        }
-    }
+    const int armedTrack = resolveArmedMidiTrack();
 
     int armedAudioTrack = -1;
     for (std::size_t i = 0; i < tracks.size(); ++i)
@@ -2929,26 +2876,173 @@ void MainComponent::buttonClicked(juce::Button* button)
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& message)
 {
-    if (! message.isNoteOnOrOff())
+    // Called on the MIDI thread. Copy the message and hand it to the message
+    // thread, where it's safe to touch the project state and UI.
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    const juce::MidiMessage msg(message);
+    juce::MessageManager::callAsync([safeThis, msg]
+    {
+        if (safeThis != nullptr)
+            safeThis->routeLiveMidiMessage(msg);
+    });
+}
+
+void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
+{
+    const auto targetTrack = resolveLiveMidiTargetTrack();
+
+    // Note on (a note-on with velocity 0 is a note-off by MIDI convention, which
+    // isNoteOn() correctly reports as false / isNoteOff() as true).
+    if (message.isNoteOn())
+    {
+        const auto note     = message.getNoteNumber();
+        const auto velocity = juce::jlimit(1, 127, static_cast<int>(message.getVelocity()));
+
+        if (midiEditorOverlay.isVisible())
+            midiEditorOverlay.stepWriteMidiNoteOn(note, velocity);
+
+        if (targetTrack >= 0)
+            liveMidiNoteOn(targetTrack, note, velocity);
+
+        recordNoteOn(note, velocity);
+        return;
+    }
+
+    if (message.isNoteOff())
+    {
+        const auto note = message.getNoteNumber();
+
+        if (midiEditorOverlay.isVisible())
+            midiEditorOverlay.stepWriteMidiNoteOff(note);
+
+        if (targetTrack >= 0)
+            liveMidiNoteOff(targetTrack, note);
+
+        recordNoteOff(note);
+        return;
+    }
+
+    // Controllers / pitch bend / aftertouch only mean something to a hosted VST
+    // instrument; forward them through verbatim. (The sampler has no modulation
+    // inputs, so there's nothing to route them to there.)
+    if (targetTrack >= 0
+        && (message.isController() || message.isPitchWheel()
+            || message.isAftertouch() || message.isChannelPressure()
+            || message.isProgramChange()))
+    {
+        if (arrangementPlaybackSource != nullptr
+            && arrangementPlaybackSource->hasTrackInstrument(targetTrack))
+            arrangementPlaybackSource->instrumentLiveMidiMessage(targetTrack, message);
+    }
+}
+
+// Resolves which track a hardware MIDI keyboard should play/record into. Priority
+// follows where the user's attention is: an open recording take, then an open
+// sampler/MIDI-editor panel, then the armed/selected MIDI track.
+int MainComponent::resolveLiveMidiTargetTrack()
+{
+    auto& tracks = projectState.getTracks();
+    const auto valid = [&](int idx) { return idx >= 0 && idx < static_cast<int>(tracks.size()); };
+
+    // While a take is rolling, always sound the track we're recording into so the
+    // player hears exactly what's being captured.
+    if (recordingSession.has_value() && valid(recordingSession->trackIndex))
+        return recordingSession->trackIndex;
+
+    if (samplerPanel.isVisible())
+    {
+        const auto idx = samplerPanel.getActiveTrackIndex();
+        if (valid(idx))
+            return idx;
+    }
+
+    if (midiEditorOverlay.isVisible() && selectedArrangementClip.has_value()
+        && valid(selectedArrangementClip->first))
+        return selectedArrangementClip->first;
+
+    return resolveArmedMidiTrack();
+}
+
+// The record-target MIDI track: an explicitly R-armed MIDI track, else the
+// selected clip's track, else a selected MIDI track header. -1 if none.
+int MainComponent::resolveArmedMidiTrack()
+{
+    auto& tracks = projectState.getTracks();
+
+    for (std::size_t i = 0; i < tracks.size(); ++i)
+        if (tracks[i].isMidiTrack && tracks[i].recordArmed)
+            return static_cast<int>(i);
+
+    if (selectedArrangementClip.has_value())
+    {
+        const auto idx = selectedArrangementClip->first;
+        if (idx >= 0 && idx < static_cast<int>(tracks.size()) && tracks[static_cast<std::size_t>(idx)].isMidiTrack)
+            return idx;
+    }
+
+    const auto sel = arrangementTimeline.getSelectedTrackIndex();
+    if (sel.has_value() && *sel >= 0 && *sel < static_cast<int>(tracks.size())
+        && tracks[static_cast<std::size_t>(*sel)].isMidiTrack)
+        return *sel;
+
+    return -1;
+}
+
+void MainComponent::liveMidiNoteOn(int trackIndex, int midiNote, int velocity)
+{
+    if (arrangementPlaybackSource == nullptr)
         return;
 
-    const auto noteNumber = message.getNoteNumber();
-    const auto velocity = message.isNoteOn()
-        ? juce::jlimit(1, 127, static_cast<int>(std::round(message.getVelocity() * 127.0f)))
-        : 0;
-    const auto noteOn = message.isNoteOn();
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
 
-    juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::MessageManager::callAsync([safeThis, noteNumber, velocity, noteOn]
+    const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
     {
-        if (safeThis == nullptr || ! safeThis->midiEditorOverlay.isVisible())
-            return;
+        arrangementPlaybackSource->instrumentLiveNoteOn(trackIndex, midiNote, velocity);
+        return;
+    }
 
-        if (noteOn)
-            safeThis->midiEditorOverlay.stepWriteMidiNoteOn(noteNumber, velocity);
-        else
-            safeThis->midiEditorOverlay.stepWriteMidiNoteOff(noteNumber);
-    });
+    if (track.samplerSourcePath.isNotEmpty())
+        arrangementPlaybackSource->samplerNoteOn(track.samplerSourcePath,
+                                                 midiNote,
+                                                 velocity,
+                                                 track.samplerRootMidiNote,
+                                                 track.volumeDb,
+                                                 track.samplerMode,
+                                                 0,
+                                                 track.samplerSliceCount,
+                                                 track.samplerWarpEnabled,
+                                                 track.samplerSourceBpm);
+}
+
+void MainComponent::liveMidiNoteOff(int trackIndex, int midiNote)
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+
+    auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+
+    const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
+        arrangementPlaybackSource->instrumentLiveNoteOff(trackIndex, midiNote);
+    else
+        arrangementPlaybackSource->samplerNoteOff(midiNote, track.samplerMode);
+}
+
+void MainComponent::refreshMidiInputDevices()
+{
+    for (const auto& midiInput : juce::MidiInput::getAvailableDevices())
+    {
+        if (activeMidiInputDeviceIds.contains(midiInput.identifier))
+            continue;
+        audioDeviceManager.setMidiInputDeviceEnabled(midiInput.identifier, true);
+        audioDeviceManager.addMidiInputDeviceCallback(midiInput.identifier, this);
+        activeMidiInputDeviceIds.add(midiInput.identifier);
+    }
 }
 
 void MainComponent::updateTransportLabels()
