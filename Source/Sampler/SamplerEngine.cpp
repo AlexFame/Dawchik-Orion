@@ -335,7 +335,7 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                                        / static_cast<float>(kSamplerMidiTriggerReleaseSamples));
             }
 
-            const auto linearGain = trackGain * clipGain * velocityGain * edgeGain * 0.75f;
+            const auto linearGain = trackGain * clipGain * velocityGain * edgeGain;
 
             for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
             {
@@ -439,7 +439,7 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
         sourceStartPosition,
         sourceEndPosition,
         playbackRatio,
-        juce::Decibels::decibelsToGain(static_cast<float>(gainDb)) * (static_cast<float>(juce::jlimit(1, 127, velocity)) / 127.0f) * 0.75f,
+        juce::Decibels::decibelsToGain(static_cast<float>(gainDb)) * (static_cast<float>(juce::jlimit(1, 127, velocity)) / 127.0f),
         0,
         0,
         0,

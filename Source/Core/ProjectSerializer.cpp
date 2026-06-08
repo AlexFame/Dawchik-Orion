@@ -343,6 +343,7 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
     rootObject->setProperty("timeSigDenominator", projectState.getDenominator());
     rootObject->setProperty("keyRoot", projectState.getKeyRoot());
     rootObject->setProperty("keyIsMinor", projectState.isKeyMinor());
+    rootObject->setProperty("keyEnabled", projectState.isKeyEnabled());
     rootObject->setProperty("scaleLockEnabled", projectState.isScaleLockEnabled());
     rootObject->setProperty("recordWithMetronome", projectState.isRecordWithMetronome());
     rootObject->setProperty("loopLengthInBeats", projectState.getLoopLengthInBeats());
@@ -438,6 +439,7 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
                                   getInt(*root, "timeSigDenominator", projectState.getDenominator()));
     projectState.setKey(getInt(*root, "keyRoot", projectState.getKeyRoot()),
                         getBool(*root, "keyIsMinor", projectState.isKeyMinor()));
+    projectState.setKeyEnabled(getBool(*root, "keyEnabled", projectState.isKeyEnabled()));
     projectState.setScaleLockEnabled(getBool(*root, "scaleLockEnabled", projectState.isScaleLockEnabled()));
     projectState.setRecordWithMetronome(getBool(*root, "recordWithMetronome", projectState.isRecordWithMetronome()));
     projectState.setLoopLengthInBeats(getDouble(*root, "loopLengthInBeats", projectState.getLoopLengthInBeats()));

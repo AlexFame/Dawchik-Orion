@@ -343,6 +343,9 @@ private:
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
     juce::Colour browserDropPreviewColour { orion::theme::warm::red };
     bool browserDropCreatesNewTrack { false };
+    // When the playlist is full and a browser audio item is dragged in, a fixed-height
+    // empty lane is freed below the LAST track; the new track materialises there on drop.
+    bool browserAppendActive { false };
     ToolMode currentTool { ToolMode::pointer };
 
     int liveWaveformTrack { -1 };

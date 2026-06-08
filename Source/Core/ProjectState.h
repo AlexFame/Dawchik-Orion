@@ -208,6 +208,11 @@ public:
     bool isKeyMinor() const noexcept;
     void setKey(int rootSemitones, bool minor) noexcept;
 
+    // Whether the project has a key at all. When off, the transport shows "Off"
+    // for users who don't care about tonality.
+    bool isKeyEnabled() const noexcept;
+    void setKeyEnabled(bool enabled) noexcept;
+
     // Global scale lock: when enabled, any pitched note input (sampler keyboard,
     // piano-roll click, drag) snaps to the nearest in-scale pitch.
     bool isScaleLockEnabled() const noexcept;
@@ -253,6 +258,7 @@ private:
     double loopEndBeat { 8.0 };
     int  projectKeyRoot { 0 };       // C by default
     bool projectKeyIsMinor { true }; // A minor / C minor are common in production
+    bool projectKeyEnabled { true }; // tonality on/off
     bool scaleLockEnabled { true };
     bool recordWithMetronome { true };
     std::vector<TrackState> tracks;

@@ -17,6 +17,11 @@
 
 #include <signalsmith-stretch/signalsmith-stretch.h>
 
+#if JUCE_MAC || JUCE_IOS
+ #include <pthread.h>
+ #include <sys/qos.h>
+#endif
+
 #include "../Audio/TransportEngine.h"
 #include "../Audio/WarpEngine.h"
 #include "../Core/ProjectState.h"
@@ -585,6 +590,12 @@ public:
         bool primed { false };                   // producer-only
         std::atomic<int> producedSamples { 0 };  // producer (release) → audio (acquire)
         std::atomic<int> requestedSamples { 0 }; // audio → producer (how far to fill)
+
+        // High-quality offline (RubberBand) render, built lazily on the producer
+        // thread. Once ready, playback swaps up from the streaming stand-in to this.
+        juce::String sourcePath;
+        int semis { 0 };
+        std::atomic<bool> offlineBuilt { false };
     };
 
     static juce::String warpStreamKey(const juce::String& path, int targetSamples, int semis)
@@ -627,6 +638,8 @@ public:
                 s->channels = juce::jlimit(1, 2, original->buffer.getNumChannels());
                 s->originalSamples = original->buffer.getNumSamples();
                 s->targetSamples = targetSamples;
+                s->sourcePath = clip.sourcePath;
+                s->semis = semis;
                 s->stretch.presetDefault(s->channels, static_cast<float>(original->sampleRate));
                 s->stretch.setTransposeSemitones(static_cast<float>(semis));
                 s->out.sampleRate = original->sampleRate;
@@ -651,6 +664,7 @@ public:
 
         startWarpProducer();
         warpProducerWake.signal();
+        warpOfflineWake.signal();
     }
 
     // Audio thread: request the producer fill up to `neededOut`, return the (partly-filled)
@@ -689,14 +703,66 @@ public:
             return;
         warpProducerRunning.store(true, std::memory_order_release);
         warpProducerThread = std::thread([this] { warpProducerLoop(); });
+        warpOfflineThread  = std::thread([this] { warpOfflineLoop(); });
     }
 
     void stopWarpProducer()
     {
         warpProducerRunning.store(false, std::memory_order_release);
         warpProducerWake.signal();
+        warpOfflineWake.signal();
         if (warpProducerThread.joinable())
             warpProducerThread.join();
+        if (warpOfflineThread.joinable())
+            warpOfflineThread.join();
+    }
+
+    // Dedicated low-traffic thread that renders the high-quality OFFLINE (RubberBand)
+    // buffer for each warp clip and publishes it to the cache. Kept SEPARATE from the
+    // streaming producer so a heavy multi-second render never blocks the real-time
+    // stream fill (that blocking was what made Play stutter right after a drop).
+    // Playback swaps up from the streaming stand-in the moment the buffer appears.
+    void warpOfflineLoop()
+    {
+       #if JUCE_MAC || JUCE_IOS
+        // Background QoS: the OS deprioritises this thread under load, so even a
+        // long render already in progress yields CPU to the audio + streaming
+        // threads instead of starving them (no dropouts during playback).
+        pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+       #endif
+        while (warpProducerRunning.load(std::memory_order_acquire))
+        {
+            // The RubberBand render is CPU-heavy. Only run it while the transport is
+            // STOPPED — during playback every cycle must go to the real-time stream
+            // fill, otherwise a long loop's offline render starves the producer and
+            // the audio drops out repeatedly. When stopped, we pre-render ahead so the
+            // next Play uses the exact high-quality buffer.
+            if (transport.isPlaying() || transport.isCountInActive())
+            {
+                warpOfflineWake.wait(100);
+                continue;
+            }
+
+            WarpStream* pending = nullptr;
+            {
+                const juce::ScopedLock sl(warpStreamLock);
+                for (auto& kv : warpStreams)
+                    if (! kv.second->offlineBuilt.load(std::memory_order_acquire) && kv.second->original != nullptr)
+                    {
+                        pending = kv.second.get();
+                        break;
+                    }
+            }
+
+            if (pending == nullptr)
+            {
+                warpOfflineWake.wait(50);
+                continue;
+            }
+
+            buildOfflineWarpBuffer(*pending);
+            pending->offlineBuilt.store(true, std::memory_order_release);
+        }
     }
 
     // Background thread: keep every stream's output filled ahead of the playhead.
@@ -782,6 +848,33 @@ public:
             produced += outChunk;
             s.producedSamples.store(produced, std::memory_order_release);
         }
+    }
+
+    // Producer thread: render the full high-quality offline buffer for a stream and
+    // publish it under the same key getWarpedAudioFileData() reads. The expensive
+    // stretch runs OUTSIDE the cache lock; only the insert is locked.
+    void buildOfflineWarpBuffer(WarpStream& s)
+    {
+        if (s.original == nullptr || s.targetSamples <= 0)
+            return;
+
+        const auto key = s.sourcePath.toStdString() + "|" + std::to_string(s.targetSamples)
+                       + "|p" + std::to_string(s.semis)
+                       + "|" + currentWarpBackendTag().toStdString();
+        {
+            const juce::ScopedLock sl(warpCacheLock);
+            if (warpedAudioCache.find(key) != warpedAudioCache.end())
+                return;   // already built (e.g. by the clip editor)
+        }
+
+        const double pitchScale = std::pow(2.0, static_cast<double>(s.semis) / 12.0);
+        auto data = std::make_unique<AudioFileData>();
+        data->sampleRate = s.original->sampleRate;
+        data->buffer = stretchBufferToLengthWithExperimentalBackend(
+            s.original->buffer, s.targetSamples, s.original->sampleRate, s.sourcePath, pitchScale);
+
+        const juce::ScopedLock sl(warpCacheLock);
+        warpedAudioCache.emplace(key, std::move(data));
     }
 
 private:
@@ -975,10 +1068,19 @@ private:
                                               && clip.lengthInBeats > 0.0;
                 if (needsPitchRender)
                 {
-                    bool streamed = false;
-                    // Real-time streaming warp (filled by the background producer) for normal
-                    // playback; clip-editor preview and offline export keep the pre-render path.
-                    if (isRealtime && ! useClipEditorPreview && realtimeWarpEnabled.load(std::memory_order_relaxed))
+                    bool resolved = false;
+
+                    // Prefer the high-quality OFFLINE (RubberBand) buffer the moment the
+                    // background producer publishes it — clean low end, same as the clip
+                    // editor. Until it's ready we stream as an instant stand-in, so Play
+                    // never waits and the audio swaps up seamlessly when the render lands.
+                    if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
+                    {
+                        audioData = warpedAudioData;
+                        resolved = true;
+                    }
+
+                    if (! resolved && isRealtime && ! useClipEditorPreview && realtimeWarpEnabled.load(std::memory_order_relaxed))
                     {
                         const auto warpLen = clip.warpTargetLengthInBeats > 0.0 ? clip.warpTargetLengthInBeats : clip.lengthInBeats;
                         const int targetSamples = juce::jmax(1, static_cast<int>(std::round((warpLen / beatsPerSecond) * originalAudioData->sampleRate)));
@@ -990,16 +1092,12 @@ private:
                         if (const auto* sd = streamWarpData(clip.sourcePath, targetSamples, semis, neededOut))
                         {
                             audioData = sd;
-                            streamed = true;
+                            resolved = true;
                         }
                     }
-                    if (! streamed)
-                    {
-                        if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
-                            audioData = warpedAudioData;
-                        else
-                            continue;
-                    }
+
+                    if (! resolved)
+                        continue;
                 }
 
                 for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
@@ -1079,7 +1177,7 @@ private:
                         const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
                         const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
                         const auto sampleValue = cubicHermite(sourceFraction, y0, y1, y2, y3) * linearGain;
-                        const auto outputValue = sampleValue * 0.75f * fadeGain * panForChannel(channel);
+                        const auto outputValue = sampleValue * fadeGain * panForChannel(channel);
                         targetBuffer.addSample(channel, startSample + sampleIndex, outputValue);
                     }
                 }
@@ -1261,7 +1359,9 @@ private:
     int computeKeyShiftSemitones(const TimelineClip& clip) const noexcept
     {
         int diff = clip.transposeSemitones;
-        if (! clip.keyShiftEnabled || clip.sourceKeyRoot < 0)
+        // When the project has no key, samples keep their original pitch (time-stretch
+        // still applies elsewhere). Manual transpose is honoured regardless.
+        if (! clip.keyShiftEnabled || clip.sourceKeyRoot < 0 || ! project.isKeyEnabled())
             return diff;
 
         int keyDiff = project.getKeyRoot() - clip.sourceKeyRoot;
@@ -1600,6 +1700,8 @@ private:
     std::thread warpProducerThread;
     std::atomic<bool> warpProducerRunning { false };
     juce::WaitableEvent warpProducerWake;
+    std::thread warpOfflineThread;            // separate thread: heavy RubberBand renders
+    juce::WaitableEvent warpOfflineWake;
     juce::AudioBuffer<float> warpProducerScratch;   // producer-thread input scratch
     std::atomic<bool> realtimeWarpEnabled { true };
 

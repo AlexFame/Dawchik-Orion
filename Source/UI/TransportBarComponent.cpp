@@ -6,6 +6,11 @@ namespace orion
 {
 namespace
 {
+// Shared so paint() (background) and resized() (layout) stay in lock-step.
+constexpr int kPanelWidth = 500;
+constexpr int kPanelHeight = 80;
+constexpr int kReadoutRowHeight = 36;   // remainder of the panel is the button row
+
 void styleButton(juce::TextButton& button)
 {
     button.setColour(juce::TextButton::buttonColourId, theme::core::voidBlack);
@@ -31,12 +36,15 @@ public:
         else if (shouldDrawButtonAsHighlighted)
             fill = fill.brighter(0.06f);
 
-        g.setColour(juce::Colours::black.withAlpha(0.38f));
-        g.fillRect(bounds.translated(0.0f, 2.0f));
+        g.setColour(juce::Colours::black.withAlpha(0.30f));
+        g.fillRoundedRectangle(bounds.translated(0.0f, 2.0f), 6.0f);
         g.setColour(fill);
-        g.fillRect(bounds);
-        g.setColour((active ? theme::warm::red : theme::line::strong).withAlpha(active ? 0.72f : 0.54f));
-        g.drawRect(bounds.reduced(0.5f), 1.0f);
+        g.fillRoundedRectangle(bounds, 6.0f);
+
+        // Uniform subtle frame for every button — on/off state is shown by the fill,
+        // not by coloured outlines (no cyan on play, no red on active).
+        g.setColour(theme::line::subtle.withAlpha(active ? 0.6f : 0.45f));
+        g.drawRoundedRectangle(bounds.reduced(0.6f), 6.0f, 1.0f);
     }
 
     void drawButtonText(juce::Graphics& g,
@@ -54,55 +62,77 @@ public:
         else if (role == "loop" && active)
             colour = theme::text::inverse;
 
-        auto area = button.getLocalBounds().toFloat().reduced(role == "play" ? 14.0f : 9.0f);
+        // Icons are drawn inside a CENTERED SQUARE, independent of the button's
+        // (wide) rectangle, so shapes stay proportional and never stretch.
+        const auto full = button.getLocalBounds().toFloat();
+        const float side = juce::jmin(full.getWidth(), full.getHeight()) - (role == "play" ? 16.0f : 15.0f);
+        const auto area = juce::Rectangle<float>(side, side).withCentre(full.getCentre());
+        const auto w = area.getWidth();
+        const auto h = area.getHeight();
         g.setColour(colour);
 
         if (role == "play")
         {
             juce::Path path;
-            path.addTriangle(area.getX() + area.getWidth() * 0.28f, area.getY() + area.getHeight() * 0.12f,
-                             area.getRight() - area.getWidth() * 0.14f, area.getCentreY(),
-                             area.getX() + area.getWidth() * 0.28f, area.getBottom() - area.getHeight() * 0.12f);
+            path.addTriangle(area.getX() + w * 0.16f, area.getY() + h * 0.06f,
+                             area.getRight() - w * 0.02f, area.getCentreY(),
+                             area.getX() + w * 0.16f, area.getBottom() - h * 0.06f);
             g.fillPath(path);
         }
         else if (role == "stop")
         {
-            g.fillRect(area.withSizeKeepingCentre(area.getWidth() * 0.34f, area.getHeight() * 0.34f));
+            g.fillRect(area.withSizeKeepingCentre(w * 0.62f, h * 0.62f));
         }
         else if (role == "record")
         {
             g.setColour(theme::warm::red);
-            g.fillEllipse(area.withSizeKeepingCentre(area.getWidth() * 0.46f, area.getHeight() * 0.46f));
+            g.fillEllipse(area.withSizeKeepingCentre(w * 0.58f, h * 0.58f));
         }
         else if (role == "loop")
         {
-            juce::Path loop;
-            const auto w = area.getWidth();
-            const auto h = area.getHeight();
-            loop.startNewSubPath(area.getX() + w * 0.28f, area.getY() + h * 0.32f);
-            loop.lineTo(area.getX() + w * 0.70f, area.getY() + h * 0.32f);
-            loop.quadraticTo(area.getRight() - w * 0.08f, area.getY() + h * 0.32f,
-                             area.getRight() - w * 0.08f, area.getCentreY());
-            loop.quadraticTo(area.getRight() - w * 0.08f, area.getBottom() - h * 0.18f,
-                             area.getX() + w * 0.50f, area.getBottom() - h * 0.18f);
-            loop.lineTo(area.getX() + w * 0.30f, area.getBottom() - h * 0.18f);
-            g.strokePath(loop, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            // Return / loop hook: an arc across the top curving down the right, with
+            // an arrowhead pointing left at the bottom-left.
+            const auto cx = area.getCentreX();
+            const auto cy = area.getCentreY();
+            juce::Path hook;
+            hook.startNewSubPath(area.getX() + w * 0.18f, cy + h * 0.20f);
+            hook.lineTo(area.getX() + w * 0.62f, cy + h * 0.20f);
+            hook.quadraticTo(area.getRight(), cy + h * 0.20f, area.getRight(), cy - h * 0.04f);
+            hook.quadraticTo(area.getRight(), area.getY() + h * 0.04f, cx, area.getY() + h * 0.04f);
+            hook.lineTo(area.getX() + w * 0.18f, area.getY() + h * 0.04f);
+            g.strokePath(hook, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
             juce::Path arrow;
-            arrow.addTriangle(area.getX() + w * 0.32f, area.getY() + h * 0.20f,
-                              area.getX() + w * 0.12f, area.getY() + h * 0.32f,
-                              area.getX() + w * 0.32f, area.getY() + h * 0.44f);
+            arrow.addTriangle(area.getX() + w * 0.18f, cy + h * 0.04f,
+                              area.getX() + w * 0.18f, cy + h * 0.36f,
+                              area.getX() - w * 0.02f, cy + h * 0.20f);
             g.fillPath(arrow);
         }
         else if (role == "metronome")
         {
-            juce::Path metro;
-            metro.startNewSubPath(area.getCentreX(), area.getY() + area.getHeight() * 0.12f);
-            metro.lineTo(area.getX() + area.getWidth() * 0.28f, area.getBottom() - area.getHeight() * 0.12f);
-            metro.lineTo(area.getRight() - area.getWidth() * 0.28f, area.getBottom() - area.getHeight() * 0.12f);
-            metro.closeSubPath();
-            g.strokePath(metro, juce::PathStrokeType(2.8f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
-            g.drawLine(area.getCentreX(), area.getY() + area.getHeight() * 0.26f,
-                       area.getCentreX() + area.getWidth() * 0.13f, area.getCentreY(), 2.6f);
+            // Classic metronome: trapezoid body (narrow top, wide base), a base bar,
+            // and a diagonal pendulum rod with a small weight.
+            const auto cx = area.getCentreX();
+            const auto top = area.getY() + h * 0.13f;
+            const auto bottom = area.getBottom() - h * 0.15f;
+
+            juce::Path body;
+            body.startNewSubPath(cx - w * 0.11f, top);
+            body.lineTo(cx + w * 0.11f, top);
+            body.lineTo(cx + w * 0.31f, bottom);
+            body.lineTo(cx - w * 0.31f, bottom);
+            body.closeSubPath();
+            g.strokePath(body, juce::PathStrokeType(2.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+
+            // Base bar.
+            g.fillRect(juce::Rectangle<float>(cx - w * 0.31f, bottom - 1.0f, w * 0.62f, 2.0f));
+
+            // Pendulum rod, leaning right, with a weight midway.
+            const juce::Point<float> rodTop(cx - w * 0.04f, top + h * 0.07f);
+            const juce::Point<float> rodBottom(cx + w * 0.08f, bottom - h * 0.10f);
+            g.drawLine(rodTop.x, rodTop.y, rodBottom.x, rodBottom.y, 1.8f);
+            const juce::Point<float> weightCentre(rodTop.x + (rodBottom.x - rodTop.x) * 0.55f,
+                                                  rodTop.y + (rodBottom.y - rodTop.y) * 0.55f);
+            g.fillRect(juce::Rectangle<float>(w * 0.13f, h * 0.07f).withCentre(weightCentre));
         }
     }
 };
@@ -151,7 +181,10 @@ void TransportBarComponent::setState(const TransportBarState& newState)
 
 juce::Rectangle<int> TransportBarComponent::getTempoEditorBounds() const noexcept
 {
-    return tempoCardBounds.reduced(8, 7).removeFromTop(24);
+    // A compact field over the value row (top of the column), sized to the number —
+    // not the full column — so clicking to edit doesn't blow the field up wide.
+    auto column = tempoCardBounds;
+    return column.removeFromTop(22).withSizeKeepingCentre(86, 22);
 }
 
 juce::Rectangle<int> TransportBarComponent::getKeyBounds() const noexcept
@@ -177,45 +210,81 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.setColour(theme::line::subtle.withAlpha(0.62f));
     g.drawLine(0.0f, static_cast<float>(getHeight() - 1), static_cast<float>(getWidth()), static_cast<float>(getHeight() - 1), 1.0f);
 
-    auto bounds = getLocalBounds().reduced(18, 10);
-    const auto bpmBackdrop = tempoCardBounds.expanded(12, 10).toFloat();
-    g.setColour(theme::surface::primary.withAlpha(0.62f));
-    g.fillRoundedRectangle(bpmBackdrop, 8.0f);
+    const auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight).toFloat();
+    g.setColour(theme::core::voidBlack.withAlpha(0.58f));
+    g.fillRoundedRectangle(panel, 9.0f);
+    g.setColour(theme::line::normal.withAlpha(0.46f));
+    g.drawRoundedRectangle(panel.reduced(0.5f), 9.0f, 1.0f);
 
-    auto infoArea = bounds.withTrimmedLeft(tempoCardBounds.getRight() + 44 - bounds.getX())
-                         .withTrimmedRight(getWidth() - positionCardBounds.getRight() - 18);
-    g.setColour(theme::line::subtle.withAlpha(0.58f));
-    g.drawLine(static_cast<float>(keyCardBounds.getX() - 32), static_cast<float>(bounds.getY() + 10),
-               static_cast<float>(keyCardBounds.getX() - 32), static_cast<float>(bounds.getBottom() - 10), 1.0f);
-    g.drawLine(static_cast<float>(positionCardBounds.getX() - 32), static_cast<float>(bounds.getY() + 10),
-               static_cast<float>(positionCardBounds.getX() - 32), static_cast<float>(bounds.getBottom() - 10), 1.0f);
-    juce::ignoreUnused(infoArea);
+    // A single hairline splits the readouts from the transport controls. No
+    // vertical dividers between the readouts — they just added clutter.
+    auto topDivider = panel.withTrimmedTop(static_cast<float>(kReadoutRowHeight))
+                           .withHeight(1.0f).reduced(18.0f, 0.0f);
+    g.setColour(theme::line::subtle.withAlpha(0.45f));
+    g.fillRect(topDivider);
 
-    drawButtonFrame(g, tempoCardBounds.toFloat(), theme::core::voidBlack, true);
-    for (const auto card : { keyCardBounds, positionCardBounds })
+    // One readout column: big value, an optional small muted unit inline (e.g. "BPM"),
+    // an optional dropdown chevron, and a caption underneath — the whole group centred.
+    auto drawReadout = [&g](juce::Rectangle<int> bounds,
+                            const juce::String& value,
+                            const juce::String& suffix,
+                            const juce::String& caption,
+                            juce::Colour valueColour,
+                            bool showChevron)
     {
-        g.setColour(theme::core::voidBlack.withAlpha(0.0f));
-        g.fillRoundedRectangle(card.toFloat(), 6.0f);
-    }
+        const auto valueRow = bounds.removeFromTop(22).toFloat();
 
-    auto tempoText = tempoCardBounds.reduced(7, 7);
-    g.setColour(theme::warm::coral);
-    g.setFont(juce::FontOptions(18.5f, juce::Font::bold));
-    g.drawText(juce::String(state.tempoBpm, 0), tempoText.removeFromTop(22), juce::Justification::centred);
-    g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
-    g.drawText("BPM", tempoText, juce::Justification::centredTop);
+        const juce::Font valueFont(juce::FontOptions(18.0f, juce::Font::bold));
+        const juce::Font suffixFont(juce::FontOptions(11.5f, juce::Font::plain));
 
-    auto keyValue = keyCardBounds;
-    auto positionValue = positionCardBounds;
-    g.setColour(theme::text::primary.withAlpha(0.96f));
-    g.setFont(juce::FontOptions(19.0f, juce::Font::bold));
-    g.drawText(state.keyText, keyValue.removeFromTop(24), juce::Justification::centred);
-    g.drawText(state.positionText, positionValue.removeFromTop(24), juce::Justification::centred);
+        const float valueW  = juce::GlyphArrangement::getStringWidth(valueFont, value);
+        const float suffGap = suffix.isNotEmpty() ? 5.0f : 0.0f;
+        const float suffW   = suffix.isNotEmpty() ? juce::GlyphArrangement::getStringWidth(suffixFont, suffix) : 0.0f;
+        const float chevGap = showChevron ? 7.0f : 0.0f;
+        const float chevW   = showChevron ? 9.0f : 0.0f;
+        const float groupW  = valueW + suffGap + suffW + chevGap + chevW;
 
-    g.setColour(theme::text::tertiary.withAlpha(0.62f));
-    g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
-    g.drawText("KEY", keyValue, juce::Justification::centredTop);
-    g.drawText("TIME", positionValue, juce::Justification::centredTop);
+        float x = valueRow.getCentreX() - groupW * 0.5f;
+        const float cy = valueRow.getCentreY();
+
+        g.setColour(valueColour);
+        g.setFont(valueFont);
+        g.drawText(value, juce::Rectangle<float>(x, valueRow.getY(), valueW, valueRow.getHeight()),
+                   juce::Justification::centredLeft);
+        x += valueW;
+
+        if (suffix.isNotEmpty())
+        {
+            x += suffGap;
+            g.setColour(theme::text::tertiary.withAlpha(0.85f));
+            g.setFont(suffixFont);
+            g.drawText(suffix, juce::Rectangle<float>(x, valueRow.getY(), suffW, valueRow.getHeight()),
+                       juce::Justification::centredLeft);
+            x += suffW;
+        }
+
+        if (showChevron)
+        {
+            x += chevGap;
+            const float chx = x + chevW * 0.5f;
+            juce::Path chev;
+            chev.startNewSubPath(chx - chevW * 0.5f, cy - 2.0f);
+            chev.lineTo(chx, cy + 3.0f);
+            chev.lineTo(chx + chevW * 0.5f, cy - 2.0f);
+            g.setColour(theme::text::tertiary.withAlpha(0.8f));
+            g.strokePath(chev, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+
+        g.setColour(theme::text::tertiary.withAlpha(0.78f));
+        g.setFont(juce::FontOptions(9.5f, juce::Font::plain));
+        g.drawText(caption, bounds, juce::Justification::centredTop);
+    };
+
+    // Order: BPM | TIME (centre) | KEY. BPM has no chevron (typed/dragged); KEY does
+    // (it opens a picker).
+    drawReadout(tempoCardBounds, juce::String(state.tempoBpm, 0), "BPM", "BPM", theme::warm::coral, false);
+    drawReadout(positionCardBounds, state.positionText, {}, "TIME", theme::text::primary.withAlpha(0.96f), false);
+    drawReadout(keyCardBounds, state.keyText, {}, "KEY", theme::text::primary.withAlpha(0.96f), true);
 
     auto cpuArea = getLocalBounds().reduced(16, 0).removeFromRight(72).withSizeKeepingCentre(64, 40);
     g.setColour(theme::surface::primary.withAlpha(0.45f));
@@ -252,26 +321,32 @@ void TransportBarComponent::paint(juce::Graphics& g)
 
 void TransportBarComponent::resized()
 {
-    auto area = getLocalBounds().reduced(24, 12);
-    tempoCardBounds = area.removeFromLeft(70).withSizeKeepingCentre(56, 56);
-    area.removeFromLeft(48);
-    keyCardBounds = area.removeFromLeft(150).withSizeKeepingCentre(118, 44);
-    area.removeFromLeft(24);
-    positionCardBounds = area.removeFromLeft(214).withSizeKeepingCentre(176, 44);
+    auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight);
 
-    // Transport controls are centred in the bar (info on the left, transport in the middle).
-    auto bar = getLocalBounds().reduced(26, 12);
-    constexpr int controlsWidth = 50 + 12 + 50 + 12 + 66 + 12 + 50 + 12 + 50;   // buttons + gaps
-    auto controls = bar.withSizeKeepingCentre(controlsWidth, bar.getHeight());
-    metronomeButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
-    controls.removeFromLeft(12);
-    stopButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
-    controls.removeFromLeft(12);
-    playButton.setBounds(controls.removeFromLeft(66).withSizeKeepingCentre(60, 60));
-    controls.removeFromLeft(12);
-    recordButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
-    controls.removeFromLeft(12);
-    loopButton.setBounds(controls.removeFromLeft(50).withSizeKeepingCentre(44, 44));
+    // Readouts: three equal columns spread across the full width (BPM | TIME | KEY).
+    auto readouts = panel.removeFromTop(kReadoutRowHeight).reduced(16, 0);
+    const int colWidth = readouts.getWidth() / 3;
+    tempoCardBounds    = readouts.removeFromLeft(colWidth);
+    keyCardBounds      = readouts.removeFromRight(colWidth);
+    positionCardBounds = readouts;   // centre column = whatever remains
+
+    // Transport controls: five wide rounded buttons filling the width evenly.
+    auto band = panel.reduced(16, 3);   // bottom row, with side + vertical padding
+    constexpr int buttonGap = 10;
+    const int cellWidth = (band.getWidth() - buttonGap * 4) / 5;
+
+    const auto place = [&band, buttonGap, cellWidth](juce::Button& button, bool last)
+    {
+        button.setBounds(last ? band : band.removeFromLeft(cellWidth));
+        if (! last)
+            band.removeFromLeft(buttonGap);
+    };
+
+    place(loopButton, false);
+    place(metronomeButton, false);
+    place(stopButton, false);
+    place(playButton, false);
+    place(recordButton, true);   // takes the remainder so rounding never leaves a gap
 }
 
 void TransportBarComponent::mouseDown(const juce::MouseEvent& event)

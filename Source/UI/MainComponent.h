@@ -271,8 +271,9 @@ private:
     juce::TextButton settingsButton;
     juce::AudioFormatManager audioFormatManager;
     juce::AudioDeviceManager audioDeviceManager;
-    juce::StringArray activeMidiInputDeviceIds;
-    int midiDeviceRescanCounter { 0 };   // throttles hot-plug rescans in timerCallback
+    juce::StringArray activeMidiInputDeviceIds;   // devices we've attached note callbacks to
+    juce::StringArray seenMidiInputDeviceIds;     // devices auto-enabled once (plug-and-play)
+    int midiDeviceRescanCounter { 0 };            // throttles hot-plug rescans in timerCallback
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;

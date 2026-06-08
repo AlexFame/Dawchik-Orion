@@ -35,6 +35,16 @@ void ProjectState::setKey(int rootSemitones, bool minor) noexcept
     projectKeyIsMinor = minor;
 }
 
+bool ProjectState::isKeyEnabled() const noexcept
+{
+    return projectKeyEnabled;
+}
+
+void ProjectState::setKeyEnabled(bool enabled) noexcept
+{
+    projectKeyEnabled = enabled;
+}
+
 bool ProjectState::isScaleLockEnabled() const noexcept
 {
     return scaleLockEnabled;

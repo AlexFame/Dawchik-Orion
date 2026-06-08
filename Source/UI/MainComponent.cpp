@@ -34,6 +34,9 @@ constexpr int minBrowserPanelWidth = 220;
 constexpr int maxBrowserPanelWidth = 520;
 constexpr int browserResizeHandleWidth = 10;
 constexpr int transportShelfHeight = orion::TransportBarComponent::preferredHeight;
+// Browser preview plays this much below unity so dropping a sample into the playlist
+// (which plays at true level) gives the Ableton-style "louder when dropped" jump.
+constexpr double browserPreviewHeadroomDb = -6.0;
 constexpr int transportBrandWidth = 210;
 constexpr int transportClusterWidth = 264;
 constexpr int transportTempoWidth = 178; // BPM + KEY combined card
@@ -383,11 +386,14 @@ public:
                     std::function<void(int)> onBrowserWidthChanged,
                     std::function<void(int)> onExportSampleRateChanged,
                     std::function<void(bool)> onOrionWarpChanged,
+                    std::function<void()> onMidiDevicesChanged,
                     std::function<void()> onSave)
-        : audioSelector(manager, 0, 2, 0, 2, true, false, false, false),
+        : deviceManager(manager),
+          audioSelector(manager, 0, 2, 0, 2, false, false, false, false),
           browserWidthChanged(std::move(onBrowserWidthChanged)),
           exportSampleRateChanged(std::move(onExportSampleRateChanged)),
           orionWarpChanged(std::move(onOrionWarpChanged)),
+          midiDevicesChanged(std::move(onMidiDevicesChanged)),
           saveCallback(std::move(onSave))
     {
         titleLabel.setText("Settings", juce::dontSendNotification);
@@ -437,6 +443,23 @@ public:
         };
         addAndMakeVisible(orionWarpToggle);
 
+        midiLabel.setText("MIDI Input", juce::dontSendNotification);
+        midiLabel.setColour(juce::Label::textColourId, mutedText);
+        addAndMakeVisible(midiLabel);
+
+        midiRescanButton.setButtonText("Rescan");
+        midiRescanButton.setColour(juce::TextButton::buttonColourId, transportDarkPanel);
+        midiRescanButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        midiRescanButton.onClick = [this] { rebuildMidiDeviceList(); };
+        addAndMakeVisible(midiRescanButton);
+
+        midiEmptyLabel.setText("No MIDI devices found", juce::dontSendNotification);
+        midiEmptyLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
+        midiEmptyLabel.setFont(juce::FontOptions(13.0f, juce::Font::italic));
+        addChildComponent(midiEmptyLabel);
+
+        rebuildMidiDeviceList();
+
         audioLabel.setText("Audio Device", juce::dontSendNotification);
         audioLabel.setColour(juce::Label::textColourId, mutedText);
         addAndMakeVisible(audioLabel);
@@ -455,6 +478,35 @@ public:
                 dialog->setVisible(false);
         };
         addAndMakeVisible(saveButton);
+    }
+
+    // Rebuilds the per-device enable toggles from the current list of MIDI inputs.
+    // Called on construction and from the Rescan button so newly plugged-in
+    // keyboards show up without reopening Settings.
+    void rebuildMidiDeviceList()
+    {
+        midiDeviceToggles.clear();
+
+        const auto devices = juce::MidiInput::getAvailableDevices();
+        for (const auto& device : devices)
+        {
+            auto* toggle = new juce::ToggleButton(device.name);
+            toggle->setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.9f));
+            toggle->setToggleState(deviceManager.isMidiInputDeviceEnabled(device.identifier),
+                                   juce::dontSendNotification);
+            const auto identifier = device.identifier;
+            toggle->onClick = [this, identifier, toggle]
+            {
+                deviceManager.setMidiInputDeviceEnabled(identifier, toggle->getToggleState());
+                if (midiDevicesChanged)
+                    midiDevicesChanged();   // (re)attach/detach the note callback immediately
+            };
+            addAndMakeVisible(toggle);
+            midiDeviceToggles.add(toggle);
+        }
+
+        midiEmptyLabel.setVisible(devices.isEmpty());
+        resized();
     }
 
     void paint(juce::Graphics& g) override
@@ -479,6 +531,25 @@ public:
         orionWarpToggle.setBounds(area.removeFromTop(26));
         area.removeFromTop(14);
 
+        // MIDI Input section: header row (label + Rescan), then one toggle per device.
+        {
+            auto headerRow = area.removeFromTop(24);
+            midiRescanButton.setBounds(headerRow.removeFromRight(80));
+            midiLabel.setBounds(headerRow.withTrimmedTop(2));
+            area.removeFromTop(6);
+
+            if (midiDeviceToggles.isEmpty())
+            {
+                midiEmptyLabel.setBounds(area.removeFromTop(22));
+            }
+            else
+            {
+                for (auto* toggle : midiDeviceToggles)
+                    toggle->setBounds(area.removeFromTop(24));
+            }
+            area.removeFromTop(14);
+        }
+
         audioLabel.setBounds(area.removeFromTop(20));
         area.removeFromTop(6);
         auto footerArea = area.removeFromBottom(48);
@@ -493,12 +564,18 @@ private:
     juce::Label exportSampleRateLabel;
     juce::ComboBox exportSampleRateBox;
     juce::ToggleButton orionWarpToggle;
+    juce::Label midiLabel;
+    juce::TextButton midiRescanButton;
+    juce::Label midiEmptyLabel;
+    juce::OwnedArray<juce::ToggleButton> midiDeviceToggles;
     juce::Label audioLabel;
+    juce::AudioDeviceManager& deviceManager;
     juce::AudioDeviceSelectorComponent audioSelector;
     juce::TextButton saveButton;
     std::function<void(int)> browserWidthChanged;
     std::function<void(int)> exportSampleRateChanged;
     std::function<void(bool)> orionWarpChanged;
+    std::function<void()> midiDevicesChanged;
     std::function<void()> saveCallback;
 };
 
@@ -593,8 +670,11 @@ MainComponent::MainComponent()
     bpmEditor.setColour(juce::TextEditor::highlightedTextColourId, juce::Colours::white);
     bpmEditor.setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
     bpmEditor.setJustification(juce::Justification::centred);
-    bpmEditor.setFont(bpmValueLabel.getFont());
-    bpmEditor.applyFontToAllText(bpmValueLabel.getFont());
+    // Match the transport readout's value font so the number doesn't change size
+    // when you click to edit it.
+    const juce::Font bpmEditorFont(juce::FontOptions(18.0f, juce::Font::bold));
+    bpmEditor.setFont(bpmEditorFont);
+    bpmEditor.applyFontToAllText(bpmEditorFont);
     bpmEditor.setBorder(juce::BorderSize<int>(0));
     bpmEditor.setIndents(0, 0);
     bpmEditor.setInputRestrictions(6, "0123456789.");
@@ -1551,7 +1631,7 @@ MainComponent::MainComponent()
     samplerPanel.onRequestProjectTempoBpm = [this]() { return projectState.getTempoBpm(); };
     samplerPanel.onRequestProjectKeyRoot    = [this]() { return projectState.getKeyRoot(); };
     samplerPanel.onRequestProjectKeyIsMinor = [this]() { return projectState.isKeyMinor(); };
-    samplerPanel.onRequestScaleLockEnabled  = [this]() { return projectState.isScaleLockEnabled(); };
+    samplerPanel.onRequestScaleLockEnabled  = [this]() { return projectState.isKeyEnabled() && projectState.isScaleLockEnabled(); };
     samplerPanel.onResolveTrack = [this](int trackIndex) -> TrackState*
     {
         auto& tracks = projectState.getTracks();
@@ -1660,7 +1740,7 @@ MainComponent::MainComponent()
         midiEditorOverlay.openClip(track, clip,
                                    projectState.getKeyRoot(),
                                    projectState.isKeyMinor(),
-                                   projectState.isScaleLockEnabled());
+                                   projectState.isKeyEnabled() && projectState.isScaleLockEnabled());
     };
     arrangementTimeline.onAudioClipDoubleClick = [this](int trackIndex, int clipIndex)
     {
@@ -2143,7 +2223,7 @@ void MainComponent::resized()
                          .translated(0, transportContentVerticalNudge);
     auto bpmTop = bpmBounds.removeFromTop(30);
     bpmValueLabel.setBounds(bpmTop);
-    const auto editorBoxHeight = static_cast<int>(std::ceil(bpmValueLabel.getFont().getHeight()));
+    const auto editorBoxHeight = static_cast<int>(std::ceil(bpmEditor.getFont().getHeight())) + 4;
     auto transportTempoEditorBounds = transportBar.getTempoEditorBounds().translated(transportBar.getX(), transportBar.getY());
     bpmEditor.setBounds(transportTempoEditorBounds.withSizeKeepingCentre(transportTempoEditorBounds.getWidth(), editorBoxHeight));
     if (bpmEditor.isVisible())
@@ -2611,13 +2691,16 @@ void MainComponent::timerCallback()
 
     updateClipEditorPreviewPlayhead();
 
-    // Poll for freshly plugged-in MIDI keyboards roughly twice a second so they
-    // start working without a restart. (Device enumeration is cheap but not free,
-    // so we don't run it on every 60 Hz tick.)
-    if (++midiDeviceRescanCounter >= 30)
+    // Poll for freshly plugged-in MIDI keyboards. Enumerating CoreMIDI touches
+    // AudioDeviceManager locks, so we NEVER do it during playback/recording (that
+    // caused periodic audio dips) and only every couple of seconds when idle.
+    if (! transportEngine.isPlaying() && ! transportEngine.isCountInActive() && ! transportEngine.isRecordArmed())
     {
-        midiDeviceRescanCounter = 0;
-        refreshMidiInputDevices();
+        if (++midiDeviceRescanCounter >= 120)
+        {
+            midiDeviceRescanCounter = 0;
+            refreshMidiInputDevices();
+        }
     }
 
     syncFoldersToBuses();
@@ -2898,10 +2981,13 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
         const auto note     = message.getNoteNumber();
         const auto velocity = juce::jlimit(1, 127, static_cast<int>(message.getVelocity()));
 
-        if (midiEditorOverlay.isVisible())
-            midiEditorOverlay.stepWriteMidiNoteOn(note, velocity);
+        // Step-write into the MIDI editor when it's armed for it. It returns true
+        // only when it consumed the note, in which case it has already previewed
+        // the (possibly scale-snapped) pitch — so don't also play it directly.
+        const bool consumedByEditor = midiEditorOverlay.isVisible()
+                                      && midiEditorOverlay.stepWriteMidiNoteOn(note, velocity);
 
-        if (targetTrack >= 0)
+        if (! consumedByEditor && targetTrack >= 0)
             liveMidiNoteOn(targetTrack, note, velocity);
 
         recordNoteOn(note, velocity);
@@ -2912,10 +2998,10 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
     {
         const auto note = message.getNoteNumber();
 
-        if (midiEditorOverlay.isVisible())
-            midiEditorOverlay.stepWriteMidiNoteOff(note);
+        const bool consumedByEditor = midiEditorOverlay.isVisible()
+                                      && midiEditorOverlay.stepWriteMidiNoteOff(note);
 
-        if (targetTrack >= 0)
+        if (! consumedByEditor && targetTrack >= 0)
             liveMidiNoteOff(targetTrack, note);
 
         recordNoteOff(note);
@@ -3035,13 +3121,50 @@ void MainComponent::liveMidiNoteOff(int trackIndex, int midiNote)
 
 void MainComponent::refreshMidiInputDevices()
 {
-    for (const auto& midiInput : juce::MidiInput::getAvailableDevices())
+    const auto devices = juce::MidiInput::getAvailableDevices();
+
+    // Plug-and-play: enable a device the first time we ever see it, but only once.
+    // After that its on/off state belongs to the user (the Settings toggles), so we
+    // never re-enable something they switched off, and never re-disable on a poll.
+    for (const auto& d : devices)
     {
-        if (activeMidiInputDeviceIds.contains(midiInput.identifier))
-            continue;
-        audioDeviceManager.setMidiInputDeviceEnabled(midiInput.identifier, true);
-        audioDeviceManager.addMidiInputDeviceCallback(midiInput.identifier, this);
-        activeMidiInputDeviceIds.add(midiInput.identifier);
+        if (! seenMidiInputDeviceIds.contains(d.identifier))
+        {
+            seenMidiInputDeviceIds.add(d.identifier);
+            audioDeviceManager.setMidiInputDeviceEnabled(d.identifier, true);
+        }
+    }
+
+    // Attach our note callback to every enabled device, and drop it from any that
+    // became disabled or were unplugged.
+    for (const auto& d : devices)
+    {
+        const bool enabled  = audioDeviceManager.isMidiInputDeviceEnabled(d.identifier);
+        const bool attached = activeMidiInputDeviceIds.contains(d.identifier);
+
+        if (enabled && ! attached)
+        {
+            audioDeviceManager.addMidiInputDeviceCallback(d.identifier, this);
+            activeMidiInputDeviceIds.add(d.identifier);
+        }
+        else if (! enabled && attached)
+        {
+            audioDeviceManager.removeMidiInputDeviceCallback(d.identifier, this);
+            activeMidiInputDeviceIds.removeString(d.identifier);
+        }
+    }
+
+    // Detach from devices that have disappeared entirely (unplugged).
+    for (int i = activeMidiInputDeviceIds.size(); --i >= 0;)
+    {
+        const auto& id = activeMidiInputDeviceIds[i];
+        const bool stillPresent = std::any_of(devices.begin(), devices.end(),
+                                              [&](const auto& d) { return d.identifier == id; });
+        if (! stillPresent)
+        {
+            audioDeviceManager.removeMidiInputDeviceCallback(id, this);
+            activeMidiInputDeviceIds.remove(i);
+        }
     }
 }
 
@@ -3081,7 +3204,9 @@ void MainComponent::updateTransportLabels()
 
     TransportBarState transportState;
     transportState.tempoBpm = projectState.getTempoBpm();
-    transportState.keyText = formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor());
+    transportState.keyText = projectState.isKeyEnabled()
+        ? formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor())
+        : juce::String("Off");
     transportState.positionText = formatTransportTime(transportEngine.getPlayheadBeat(), projectState.getTempoBpm());
     transportState.playing = transportEngine.isPlaying() || transportEngine.isCountInActive();
     transportState.recording = transportEngine.isRecordArmed();
@@ -3236,6 +3361,10 @@ void MainComponent::startPreviewPlayback(juce::AudioBuffer<float> previewBuffer,
 
     previewBufferSource = std::make_unique<BufferPreviewSource>(std::move(previewBuffer), sampleRate);
     previewTransportSource.setSource(previewBufferSource.get(), 0, nullptr, sampleRate);
+    // Browser preview plays with headroom (quieter than unity), like Ableton — so a
+    // sample audibly "opens up" / gets louder the moment you drop it into the playlist,
+    // where it plays at its true level.
+    previewTransportSource.setGain(juce::Decibels::decibelsToGain(browserPreviewHeadroomDb));
     currentPreviewFile = file;
     currentPreviewTempoBpm = projectState.getTempoBpm();
     currentPreviewBpmSync = browserPanel.isPreviewBpmSyncEnabled();
@@ -4120,8 +4249,9 @@ bool MainComponent::startClipEditorPreview()
     }
 
     // Total pitch shift to match the arrangement (manual transpose + auto key-match).
+    // Auto key-match is skipped entirely when the project has no key.
     int semitones = clip->transposeSemitones;
-    if (clip->keyShiftEnabled && clip->sourceKeyRoot >= 0)
+    if (clip->keyShiftEnabled && clip->sourceKeyRoot >= 0 && projectState.isKeyEnabled())
     {
         int keyDiff = projectState.getKeyRoot() - clip->sourceKeyRoot;
         while (keyDiff > 6)  keyDiff -= 12;
@@ -5029,6 +5159,11 @@ void MainComponent::openSettingsDialog()
         },
         [this]()
         {
+            // A MIDI device was toggled in Settings — attach/detach its callback now.
+            refreshMidiInputDevices();
+        },
+        [this]()
+        {
             statusLabel.setText("Settings saved", juce::dontSendNotification);
         });
 
@@ -5040,7 +5175,7 @@ void MainComponent::openSettingsDialog()
     options.useNativeTitleBar = false;
     options.resizable = true;
     options.componentToCentreAround = this;
-    options.content->setSize(560, 520);
+    options.content->setSize(560, 640);
     options.launchAsync();
 }
 
@@ -5706,6 +5841,9 @@ void MainComponent::showKeySelectionMenu()
         minorSub.addItem(minorId, juce::String(noteNames[root]) + " minor",
                           true, root == currentRoot && currentMinor);
     }
+    // Toggle the whole tonality feature on/off (checkmark shows current state).
+    menu.addItem(1, "Project key", true, projectState.isKeyEnabled());
+    menu.addSeparator();
     menu.addSubMenu("Major", majorSub);
     menu.addSubMenu("Minor", minorSub);
 
@@ -5715,8 +5853,25 @@ void MainComponent::showKeySelectionMenu()
         [this](int result)
         {
             if (result <= 0) return;
+
+            if (result == 1)
+            {
+                // Flip tonality on/off. Rebuild warped buffers so already-placed
+                // samples drop their key-match pitch shift (or pick it back up).
+                projectState.setKeyEnabled(! projectState.isKeyEnabled());
+                if (arrangementPlaybackSource != nullptr)
+                    arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+                midiEditorOverlay.setScaleLockExternally(projectState.isKeyEnabled() && projectState.isScaleLockEnabled());
+                updateTransportLabels();
+                refreshClipInspector();
+                arrangementTimeline.repaint();
+                repaint();
+                return;
+            }
+
             const auto isMinor = result >= 200;
             const auto root    = (isMinor ? result - 200 : result - 100) % 12;
+            projectState.setKeyEnabled(true);   // choosing a key re-enables tonality
             projectState.setKey(root, isMinor);
             // Force-rebuild every clip's warped buffer with the new pitch shift —
             // the cache key includes the semitone shift, so this populates the new entries.

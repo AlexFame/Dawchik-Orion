@@ -547,8 +547,10 @@ juce::AudioBuffer<float> rubberBandStretchBufferToLength(const juce::AudioBuffer
             : (RB::OptionProcessOffline
                | RB::OptionEngineFiner
                | RB::OptionTransientsCrisp
-               | RB::OptionDetectorCompound
-               | RB::OptionChannelsTogether);
+               | RB::OptionDetectorCompound);
+               // NB: NO OptionChannelsTogether here. It shares phase across stereo
+               // channels (like --centre-focus) and audibly wobbles the low end —
+               // the standalone `rubberband-r3` (channels apart) is clean. Match it.
 
         RubberBand::RubberBandStretcher stretcher(
             static_cast<std::size_t>(std::round(sampleRate)),
