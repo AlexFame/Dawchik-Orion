@@ -26,8 +26,8 @@ constexpr int contentPadX = 4; // uniform horizontal inset so left/right padding
 constexpr float horizontalSwipeThreshold = 0.14f;
 constexpr int horizontalSwipeLockMs = 320;
 const juce::String mountedDevicesHubName = "Mounted Devices";
-const auto bpmBadgeColour = juce::Colour(0xff3f5f75);
-const auto keyBadgeColour = juce::Colour(0xff5a4d68);
+const auto bpmBadgeColour = th::surface::panel;
+const auto keyBadgeColour = th::surface::hover;
 
 juce::File getMacBrowseRoot()
 {
@@ -131,10 +131,10 @@ void drawBadge(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::Strin
     if (bounds.getWidth() <= 0 || text.isEmpty())
         return;
 
-    g.setColour(colour.withAlpha(0.88f));
+    g.setColour(colour.withAlpha(0.70f));
     g.fillRoundedRectangle(bounds.toFloat(), 5.0f);
-    g.setColour(juce::Colours::white.withAlpha(0.86f));
-    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.setColour(th::text::secondary.withAlpha(0.80f));
+    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
     g.drawText(text, bounds.reduced(6, 0), juce::Justification::centred, true);
 }
 

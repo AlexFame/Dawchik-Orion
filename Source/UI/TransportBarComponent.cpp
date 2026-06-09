@@ -10,6 +10,17 @@ namespace
 constexpr int kPanelWidth = 500;
 constexpr int kPanelHeight = 80;
 constexpr int kReadoutRowHeight = 36;   // remainder of the panel is the button row
+constexpr int kUtilityHeight = 56;
+constexpr int kBrandWidth = 272;
+constexpr int kSideGroupWidth = 260;
+constexpr int kCpuWidth = 58;
+constexpr int kOuterPadding = 24;
+constexpr int kGroupGap = 24;
+
+juce::String formatDb(double db)
+{
+    return db <= -59.0 ? "-inf" : juce::String(db, 1) + " dB";
+}
 
 void styleButton(juce::TextButton& button)
 {
@@ -41,10 +52,6 @@ public:
         g.setColour(fill);
         g.fillRoundedRectangle(bounds, 6.0f);
 
-        // Uniform subtle frame for every button — on/off state is shown by the fill,
-        // not by coloured outlines (no cyan on play, no red on active).
-        g.setColour(theme::line::subtle.withAlpha(active ? 0.6f : 0.45f));
-        g.drawRoundedRectangle(bounds.reduced(0.6f), 6.0f, 1.0f);
     }
 
     void drawButtonText(juce::Graphics& g,
@@ -213,15 +220,6 @@ void TransportBarComponent::paint(juce::Graphics& g)
     const auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight).toFloat();
     g.setColour(theme::core::voidBlack.withAlpha(0.58f));
     g.fillRoundedRectangle(panel, 9.0f);
-    g.setColour(theme::line::normal.withAlpha(0.46f));
-    g.drawRoundedRectangle(panel.reduced(0.5f), 9.0f, 1.0f);
-
-    // A single hairline splits the readouts from the transport controls. No
-    // vertical dividers between the readouts — they just added clutter.
-    auto topDivider = panel.withTrimmedTop(static_cast<float>(kReadoutRowHeight))
-                           .withHeight(1.0f).reduced(18.0f, 0.0f);
-    g.setColour(theme::line::subtle.withAlpha(0.45f));
-    g.fillRect(topDivider);
 
     // One readout column: big value, an optional small muted unit inline (e.g. "BPM"),
     // an optional dropdown chevron, and a caption underneath — the whole group centred.
@@ -286,28 +284,16 @@ void TransportBarComponent::paint(juce::Graphics& g)
     drawReadout(positionCardBounds, state.positionText, {}, "TIME", theme::text::primary.withAlpha(0.96f), false);
     drawReadout(keyCardBounds, state.keyText, {}, "KEY", theme::text::primary.withAlpha(0.96f), true);
 
-    auto cpuArea = getLocalBounds().reduced(16, 0).removeFromRight(72).withSizeKeepingCentre(64, 40);
-    g.setColour(theme::surface::primary.withAlpha(0.45f));
-    g.fillRoundedRectangle(cpuArea.toFloat(), 6.0f);
-    g.setColour(theme::line::subtle.withAlpha(0.35f));
-    g.drawRoundedRectangle(cpuArea.toFloat().reduced(0.5f), 6.0f, 1.0f);
-    auto cpu = cpuArea.reduced(8, 6);
-    g.setColour(theme::text::tertiary.withAlpha(0.60f));
-    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
-    g.drawText("CPU", cpu.removeFromTop(12), juce::Justification::centred);
-    auto loadRow = cpu.removeFromTop(18);
-    auto bars = loadRow.removeFromLeft(28).withSizeKeepingCentre(24, 12);
-    const auto activeBars = juce::roundToInt(juce::jlimit(0.0f, 1.0f, state.engineLoad) * 4.0f);
-    for (int i = 0; i < 4; ++i)
-    {
-        auto bar = bars.removeFromLeft(4);
-        bars.removeFromLeft(2);
-        g.setColour(i < activeBars ? theme::warm::red : theme::line::subtle.withAlpha(0.42f));
-        g.fillRect(bar.withTop(bar.getBottom() - 3 - i * 3));
-    }
-    g.setColour(theme::text::primary.withAlpha(0.88f));
-    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-    g.drawText(juce::String(juce::roundToInt(state.engineLoad * 100.0f)) + "%", loadRow, juce::Justification::centredRight);
+    drawBrandCluster(g, brandClusterBounds);
+    g.setColour(theme::surface::primary.withAlpha(0.18f));
+    g.fillRoundedRectangle(utilityClusterBounds.toFloat(), 8.0f);
+    drawUtilityItem(g, UtilityItem::mixer, "MIXER", getUtilityItemBounds(UtilityItem::mixer));
+    drawUtilityItem(g, UtilityItem::clipEditor, "CLIP EDITOR", getUtilityItemBounds(UtilityItem::clipEditor));
+
+    g.setColour(theme::surface::primary.withAlpha(0.18f));
+    g.fillRoundedRectangle(monitorClusterBounds.toFloat(), 8.0f);
+    drawMasterMeter(g, masterMeterBounds);
+    drawCpuMeter(g, cpuMeterBounds);
 
     if (state.scanVisible)
     {
@@ -322,6 +308,26 @@ void TransportBarComponent::paint(juce::Graphics& g)
 void TransportBarComponent::resized()
 {
     auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight);
+    const auto rowCentreY = panel.getCentreY();
+    utilityClusterBounds = juce::Rectangle<int>(panel.getX() - kGroupGap - kSideGroupWidth,
+                                                rowCentreY - kUtilityHeight / 2,
+                                                kSideGroupWidth,
+                                                kUtilityHeight);
+    brandClusterBounds = juce::Rectangle<int>(kOuterPadding,
+                                              rowCentreY - kUtilityHeight / 2,
+                                              juce::jmax(190, juce::jmin(kBrandWidth, utilityClusterBounds.getX() - kOuterPadding - kGroupGap)),
+                                              kUtilityHeight);
+
+    const auto monitorX = panel.getRight() + kGroupGap;
+    const auto monitorRight = getWidth() - kOuterPadding;
+    monitorClusterBounds = juce::Rectangle<int>(monitorX,
+                                                rowCentreY - kUtilityHeight / 2,
+                                                juce::jmax(kSideGroupWidth, monitorRight - monitorX),
+                                                kUtilityHeight);
+    auto monitorContent = monitorClusterBounds.reduced(12, 7);
+    cpuMeterBounds = monitorContent.removeFromRight(kCpuWidth);
+    monitorContent.removeFromRight(12);
+    masterMeterBounds = monitorContent;
 
     // Readouts: three equal columns spread across the full width (BPM | TIME | KEY).
     auto readouts = panel.removeFromTop(kReadoutRowHeight).reduced(16, 0);
@@ -335,7 +341,7 @@ void TransportBarComponent::resized()
     constexpr int buttonGap = 10;
     const int cellWidth = (band.getWidth() - buttonGap * 4) / 5;
 
-    const auto place = [&band, buttonGap, cellWidth](juce::Button& button, bool last)
+    const auto place = [&band, cellWidth](juce::Button& button, bool last)
     {
         button.setBounds(last ? band : band.removeFromLeft(cellWidth));
         if (! last)
@@ -349,8 +355,35 @@ void TransportBarComponent::resized()
     place(recordButton, true);   // takes the remainder so rounding never leaves a gap
 }
 
+void TransportBarComponent::mouseMove(const juce::MouseEvent& event)
+{
+    const auto item = hitTestUtilityItem(event.getPosition());
+    if (hoveredUtilityItem == item)
+        return;
+
+    hoveredUtilityItem = item;
+    setMouseCursor(item == UtilityItem::none ? juce::MouseCursor::NormalCursor : juce::MouseCursor::PointingHandCursor);
+    repaint();
+}
+
+void TransportBarComponent::mouseExit(const juce::MouseEvent&)
+{
+    hoveredUtilityItem = UtilityItem::none;
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
 void TransportBarComponent::mouseDown(const juce::MouseEvent& event)
 {
+    if (const auto item = hitTestUtilityItem(event.getPosition()); item != UtilityItem::none)
+    {
+        if (item == UtilityItem::mixer && onMixer)
+            onMixer();
+        else if (item == UtilityItem::clipEditor && onClipEditor)
+            onClipEditor();
+        return;
+    }
+
     if (event.eventComponent == &recordButton && event.mods.isPopupMenu())
     {
         if (onRecordOptions)
@@ -402,6 +435,190 @@ void TransportBarComponent::syncButtons()
     recordButton.setToggleState(state.recording, juce::dontSendNotification);
     metronomeButton.setToggleState(state.metronome, juce::dontSendNotification);
     loopButton.setToggleState(state.loop, juce::dontSendNotification);
+}
+
+juce::Rectangle<int> TransportBarComponent::getUtilityItemBounds(UtilityItem item) const noexcept
+{
+    if (item == UtilityItem::none || utilityClusterBounds.isEmpty())
+        return {};
+
+    auto bounds = utilityClusterBounds;
+    const auto itemWidth = (bounds.getWidth() - 10) / 2;
+    if (item == UtilityItem::mixer)
+        return bounds.removeFromLeft(itemWidth);
+
+    bounds.removeFromLeft(itemWidth + 10);
+    return bounds;
+}
+
+TransportBarComponent::UtilityItem TransportBarComponent::hitTestUtilityItem(juce::Point<int> point) const noexcept
+{
+    for (const auto item : { UtilityItem::mixer, UtilityItem::clipEditor })
+        if (getUtilityItemBounds(item).contains(point))
+            return item;
+
+    return UtilityItem::none;
+}
+
+void TransportBarComponent::drawUtilityItem(juce::Graphics& g, UtilityItem item, const juce::String& label, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    const auto active = (item == UtilityItem::mixer && state.mixerOpen)
+                     || (item == UtilityItem::clipEditor && state.clipEditorOpen);
+    const auto hovered = hoveredUtilityItem == item;
+    const auto fill = active ? theme::cool::cyan.withAlpha(0.10f)
+                    : hovered ? theme::text::primary.withAlpha(0.055f)
+                              : juce::Colours::transparentBlack;
+    const auto colour = active ? theme::text::primary.withAlpha(0.92f)
+                      : hovered ? theme::text::secondary.withAlpha(0.92f)
+                                : theme::text::muted.withAlpha(0.78f);
+
+    if (active || hovered)
+    {
+        g.setColour(fill);
+        g.fillRoundedRectangle(bounds.toFloat().reduced(2.0f, 1.0f), 7.0f);
+    }
+
+    auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), 44).reduced(8, 0);
+    auto icon = content.removeFromTop(24).withSizeKeepingCentre(28, 22);
+    drawUtilityIcon(g, item, icon.toFloat(), colour);
+
+    g.setColour(colour);
+    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
+    g.drawText(label, content.removeFromTop(14), juce::Justification::centred);
+}
+
+void TransportBarComponent::drawUtilityIcon(juce::Graphics& g, UtilityItem item, juce::Rectangle<float> bounds, juce::Colour colour) const
+{
+    g.setColour(colour);
+    if (item == UtilityItem::mixer)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto index = static_cast<float>(i);
+            const auto x = bounds.getX() + 5.0f + index * 8.0f;
+            g.drawLine(x, bounds.getY(), x, bounds.getBottom(), 1.5f);
+            g.fillEllipse(x - 3.0f, bounds.getY() + 4.0f + index * 5.0f, 6.0f, 6.0f);
+        }
+    }
+    else if (item == UtilityItem::clipEditor)
+    {
+        auto body = bounds.reduced(3.0f, 5.0f);
+        g.drawRoundedRectangle(body, 2.0f, 1.6f);
+        g.drawLine(body.getX() + 4.0f, body.getCentreY(), body.getRight() - 4.0f, body.getCentreY(), 1.4f);
+        juce::Path wave;
+        wave.startNewSubPath(body.getX() + 5.0f, body.getCentreY() + 5.0f);
+        wave.lineTo(body.getX() + 9.0f, body.getCentreY() + 1.0f);
+        wave.lineTo(body.getX() + 13.0f, body.getCentreY() + 7.0f);
+        wave.lineTo(body.getX() + 17.0f, body.getCentreY() + 2.0f);
+        wave.lineTo(body.getRight() - 5.0f, body.getCentreY() + 5.0f);
+        g.strokePath(wave, juce::PathStrokeType(1.5f));
+    }
+}
+
+void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    auto content = bounds;
+    auto title = content.removeFromTop(17);
+    g.setColour(theme::warm::red);
+    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.drawText("MASTER OUT", title, juce::Justification::centredLeft);
+
+    auto row = content.removeFromTop(22);
+    auto meter = row.removeFromLeft(juce::jmax(96, row.getWidth() - 56)).withHeight(12).withY(row.getCentreY() - 6);
+    g.setColour(theme::surface::primary.withAlpha(0.72f));
+    g.fillRoundedRectangle(meter.toFloat(), 3.0f);
+
+    if (state.masterLevel > 0.002f)
+    {
+        auto fill = meter.toFloat();
+        fill.setWidth(fill.getWidth() * juce::jlimit(0.0f, 1.0f, state.masterLevel));
+        juce::ColourGradient meterGradient(juce::Colour(0xff39d36b), fill.getX(), fill.getCentreY(),
+                                           theme::warm::red, fill.getRight(), fill.getCentreY(), false);
+        meterGradient.addColour(0.72, juce::Colour(0xffe7c93a));
+        g.setGradientFill(meterGradient);
+        g.fillRoundedRectangle(fill, 3.0f);
+    }
+
+    g.setColour(theme::text::primary.withAlpha(0.88f));
+    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.drawText(formatDb(state.masterLevelDb), row.removeFromLeft(56), juce::Justification::centredRight);
+}
+
+void TransportBarComponent::drawCpuMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    auto cpu = bounds.reduced(0, 1);
+    g.setColour(theme::text::tertiary.withAlpha(0.60f));
+    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+    g.drawText("CPU", cpu.removeFromTop(12), juce::Justification::centred);
+
+    auto loadRow = cpu.removeFromTop(18);
+    auto bars = loadRow.removeFromLeft(28).withSizeKeepingCentre(24, 12);
+    const auto activeBars = juce::roundToInt(juce::jlimit(0.0f, 1.0f, state.engineLoad) * 4.0f);
+    for (int i = 0; i < 4; ++i)
+    {
+        auto bar = bars.removeFromLeft(4);
+        bars.removeFromLeft(2);
+        g.setColour(i < activeBars ? theme::warm::red : theme::line::subtle.withAlpha(0.42f));
+        g.fillRect(bar.withTop(bar.getBottom() - 3 - i * 3));
+    }
+
+    g.setColour(theme::text::primary.withAlpha(0.88f));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.drawText(juce::String(juce::roundToInt(state.engineLoad * 100.0f)) + "%", loadRow, juce::Justification::centredRight);
+}
+
+void TransportBarComponent::drawBrandCluster(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    const auto logoArea = bounds.removeFromLeft(62).withSizeKeepingCentre(48, 48).toFloat();
+    const auto centre = logoArea.getCentre();
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto radius = 18.0f + static_cast<float>(i) * 3.0f;
+        g.setColour(theme::cool::cyan.withAlpha(0.16f - static_cast<float>(i) * 0.032f));
+        g.drawEllipse(juce::Rectangle<float>(radius * 2.0f, radius * 2.0f).withCentre(centre), 2.0f);
+    }
+
+    juce::ColourGradient ring(theme::cool::cyan, logoArea.getX(), logoArea.getY(),
+                              theme::cool::turquoise.withAlpha(0.58f), logoArea.getRight(), logoArea.getBottom(), false);
+    g.setGradientFill(ring);
+    g.drawEllipse(logoArea.reduced(6.0f), 2.8f);
+
+    g.setColour(theme::core::voidBlack.withAlpha(0.86f));
+    g.fillEllipse(logoArea.reduced(11.0f));
+
+    g.setColour(theme::cool::cyan.withAlpha(0.95f));
+    g.fillEllipse(juce::Rectangle<float>(6.0f, 6.0f).withCentre(centre));
+
+    auto text = bounds.reduced(6, 7);
+    auto titleRow = text.removeFromTop(19);
+    g.setColour(theme::text::primary.withAlpha(0.94f));
+    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+    g.drawText("ORION", titleRow.removeFromLeft(56), juce::Justification::centredLeft);
+    g.setColour(theme::text::tertiary.withAlpha(0.70f));
+    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+    g.drawText("PROJECT", titleRow, juce::Justification::centredLeft);
+
+    text.removeFromTop(2);
+    g.setColour(theme::text::secondary.withAlpha(0.92f));
+    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.drawFittedText(state.projectName.isNotEmpty() ? state.projectName : juce::String("Untitled"),
+                     text.removeFromTop(18),
+                     juce::Justification::centredLeft,
+                     1);
+
 }
 
 void TransportBarComponent::drawButtonFrame(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour, bool active) const

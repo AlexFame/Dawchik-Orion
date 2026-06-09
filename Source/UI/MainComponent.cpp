@@ -47,7 +47,6 @@ constexpr int transportControlHeight = 46;
 constexpr int transportSectionHeight = 54;
 constexpr int transportContentVerticalNudge = 0;
 constexpr int samplerBottomPanelHeight = 286;
-constexpr int bottomStatusBarHeight = orion::BottomStatusBarComponent::preferredHeight;
 constexpr const char* sidebarFoldersSettingsKey = "sidebar.customFolders";
 
 enum MenuItemId
@@ -1115,11 +1114,9 @@ MainComponent::MainComponent()
     };
     transportBar.onTempoEdit = [this]() { beginTempoEditing(); };
     transportBar.onKeySelect = [this]() { showKeySelectionMenu(); };
+    transportBar.onMixer = [this]() { toggleMixerFromUi(); };
+    transportBar.onClipEditor = [this]() { toggleClipEditorFromUi(); };
     addAndMakeVisible(transportBar);
-
-    bottomStatusBar.onMixer = [this]() { toggleMixerFromUi(); };
-    bottomStatusBar.onClipEditor = [this]() { toggleClipEditorFromUi(); };
-    addAndMakeVisible(bottomStatusBar);
 
     juce::MenuBarModel::setMacMainMenu(this);
 
@@ -1623,6 +1620,19 @@ MainComponent::MainComponent()
     addTrackDialog.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
     addChildComponent(addTrackDialog);
 
+    // The timeline "+" button opens the full Add Track dialog (same as the old sidebar +).
+    arrangementTimeline.onAddTrackRequested = [this]()
+    {
+        juce::StringArray busNames;
+        for (const auto& b : projectState.getBuses())
+            busNames.add(b.name);
+        addTrackDialog.setBounds(getLocalBounds());
+        addTrackDialog.show(static_cast<int>(projectState.getTracks().size()),
+                            busNames,
+                            pluginManager.getInstrumentDescriptions());
+        addTrackDialog.toFront(true);
+    };
+
     samplerPanel.onClose = [this]()
     {
         resized();
@@ -2088,7 +2098,6 @@ void MainComponent::paint(juce::Graphics& g)
     // otherwise the painted panel card sits 8px off from where the component is positioned —
     // which made the browser's internal padding asymmetric (24px left vs 8px right).
     auto workArea = bounds.reduced(8, 0).withTrimmedTop(2);
-    workArea.removeFromBottom(bottomStatusBarHeight);
     workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 2);
     juce::Rectangle<int> browserPanelBounds;
     if (browserPanelShown())
@@ -2169,15 +2178,10 @@ void MainComponent::resized()
     transportBar.setBounds(getLocalBounds().removeFromTop(transportShelfHeight));
     transportBar.toFront(false);
     cachedKeyCardBounds = transportBar.getKeyBounds().translated(transportBar.getX(), transportBar.getY());
-    bottomStatusBar.setBounds(getLocalBounds().removeFromBottom(bottomStatusBarHeight));
-    bottomStatusBar.toFront(false);
-
     // Reduced padding for a sleeker edge-to-edge floating layout
     auto bounds = getLocalBounds().reduced(8);
     auto topStrip = bounds.removeFromTop(transportShelfHeight).reduced(18, 10);
-    // Extend the content all the way down to the bottom status bar's top edge — the
-    // reduced(8) above otherwise leaves a dead gap between the playlist and the bar.
-    bounds.setBottom(getLocalBounds().getBottom() - bottomStatusBarHeight);
+    bounds.setBottom(getLocalBounds().getBottom());
     const auto contentWidth = transportBrandWidth + transportClusterWidth + transportTempoWidth + transportModeWidth
         + transportUtilityWidth + transportSectionGap * 4;
     auto contentRow = topStrip.withSizeKeepingCentre(juce::jmin(contentWidth, topStrip.getWidth()), topStrip.getHeight());
@@ -3204,6 +3208,9 @@ void MainComponent::updateTransportLabels()
 
     TransportBarState transportState;
     transportState.tempoBpm = projectState.getTempoBpm();
+    transportState.projectName = currentProjectFile.existsAsFile()
+        ? currentProjectFile.getFileNameWithoutExtension()
+        : juce::String("Untitled");
     transportState.keyText = projectState.isKeyEnabled()
         ? formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor())
         : juce::String("Off");
@@ -3217,17 +3224,12 @@ void MainComponent::updateTransportLabels()
     transportState.scanProgress = pluginScanProgress;
     transportState.scanName = pluginScanNameLabel.getText();
     transportState.engineLoad = static_cast<float>(juce::jlimit(0.0, 1.0, audioDeviceManager.getCpuUsage()));
+    transportState.masterGainDb = masterGainDb;
+    transportState.masterLevel = juce::jlimit(0.0f, 1.0f, masterMeterLevel);
+    transportState.masterLevelDb = masterMeterDb;
+    transportState.mixerOpen = mixerPanel.isVisible();
+    transportState.clipEditorOpen = clipEditorPanel.isVisible();
     transportBar.setState(transportState);
-
-    BottomStatusBarState bottomState;
-    bottomState.masterGainDb = masterGainDb;
-    // Real, decayed master output level (not the fader setting).
-    bottomState.masterLevel = juce::jlimit(0.0f, 1.0f, masterMeterLevel);
-    bottomState.masterLevelDb = masterMeterDb;
-    bottomState.projectSaved = true;
-    bottomState.mixerOpen = mixerPanel.isVisible();
-    bottomState.clipEditorOpen = clipEditorPanel.isVisible();
-    bottomStatusBar.setState(bottomState);
 
     menuItemsChanged();
 }

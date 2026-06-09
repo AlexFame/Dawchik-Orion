@@ -43,8 +43,6 @@ private:
 
     juce::Rectangle<int> getItemBounds(Item item) const noexcept;
     Item hitTestItem(juce::Point<int> point) const noexcept;
-    void drawNavItem(juce::Graphics& g, Item item, const juce::String& label, juce::Rectangle<int> bounds) const;
-    void drawItemIcon(juce::Graphics& g, Item item, juce::Rectangle<float> bounds, juce::Colour colour) const;
 
     BottomStatusBarState state;
     Item hoveredItem { Item::none };

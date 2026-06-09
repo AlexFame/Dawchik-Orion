@@ -8,7 +8,6 @@ namespace th = orion::theme;
 const auto railBackground = th::core::deepSpace;
 const auto railStroke     = th::line::subtle.withAlpha(0.45f);
 const auto activeColour   = th::warm::red;
-const auto cyanColour     = th::cool::cyan;
 const auto textColour     = th::text::secondary;
 const auto mutedText      = th::text::muted;
 constexpr int topPadding = 22;
@@ -81,15 +80,6 @@ void SidebarNavComponent::paint(juce::Graphics& g)
     g.drawLine(static_cast<float>(bounds.getRight() - 1), 0.0f,
                static_cast<float>(bounds.getRight() - 1), static_cast<float>(bounds.getBottom()), 1.0f);
 
-    auto projectBounds = getItemBounds(SidebarNavItem::project);
-    g.setColour(juce::Colours::black.withAlpha(0.22f));
-    g.fillRoundedRectangle(projectBounds.withSizeKeepingCentre(42, 42).toFloat(), 6.0f);
-    drawIcon(g, SidebarNavItem::project, projectBounds.withSizeKeepingCentre(34, 34).toFloat(), cyanColour);
-    g.setColour(mutedText);
-    g.setFont(juce::FontOptions(7.0f, juce::Font::bold));
-    g.drawText("ORION", projectBounds.withY(projectBounds.getBottom() - 12).withHeight(10),
-               juce::Justification::centred, true);
-
     for (int i = 0; i < static_cast<int>(navEntries.size()); ++i)
     {
         const auto& entry = navEntries[static_cast<std::size_t>(i)];
@@ -101,8 +91,10 @@ void SidebarNavComponent::paint(juce::Graphics& g)
 
         if (active)
         {
-            g.setColour(activeColour);
+            g.setColour(activeColour.withAlpha(0.18f));
             g.fillRoundedRectangle(itemBounds.toFloat().reduced(4.0f, 3.0f), 5.0f);
+            g.setColour(activeColour.withAlpha(0.78f));
+            g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), 5.0f, 1.0f);
         }
         else if (hovered)
         {
@@ -119,7 +111,7 @@ void SidebarNavComponent::paint(juce::Graphics& g)
             g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), 5.0f, 1.0f);
         }
 
-        const auto colour = active ? juce::Colours::black.withAlpha(0.86f)
+        const auto colour = active ? th::warm::coral.withAlpha(0.94f)
                                    : (hovered ? textColour : mutedText);
         drawIcon(g, entry.item, itemBounds.withSizeKeepingCentre(28, 28).toFloat().translated(0.0f, -8.0f), colour);
 
@@ -129,19 +121,6 @@ void SidebarNavComponent::paint(juce::Graphics& g)
                    juce::Justification::centred, true);
     }
 
-    const auto addBounds = getItemBounds(SidebarNavItem::add).withSizeKeepingCentre(44, 44);
-    const auto addHovered = hoveredItem.has_value() && *hoveredItem == SidebarNavItem::add;
-
-    // Separator above the add-track button so it reads as a distinct action, not a nav item.
-    const auto separatorY = static_cast<float>(addBounds.getY() - 12);
-    g.setColour(railStroke);
-    g.drawLine(8.0f, separatorY, static_cast<float>(getWidth() - 8), separatorY, 1.0f);
-
-    g.setColour(juce::Colour(0xff242424));
-    g.fillRoundedRectangle(addBounds.toFloat(), 10.0f);
-    g.setColour((addHovered ? activeColour : activeColour.withAlpha(0.52f)));
-    g.drawRoundedRectangle(addBounds.toFloat().reduced(0.5f), 10.0f, 1.4f);
-    drawIcon(g, SidebarNavItem::add, addBounds.reduced(12).toFloat(), juce::Colours::white.withAlpha(addHovered ? 0.96f : 0.78f));
 }
 
 void SidebarNavComponent::mouseMove(const juce::MouseEvent& event)
@@ -152,19 +131,12 @@ void SidebarNavComponent::mouseMove(const juce::MouseEvent& event)
     hoveredItem = std::nullopt;
     hoveredEntryIndex = -1;
 
-    if (getItemBounds(SidebarNavItem::project).contains(event.getPosition()))
-        hoveredItem = SidebarNavItem::project;
-    else if (getItemBounds(SidebarNavItem::add).contains(event.getPosition()))
-        hoveredItem = SidebarNavItem::add;
-    else
+    for (int i = 0; i < static_cast<int>(navEntries.size()); ++i)
     {
-        for (int i = 0; i < static_cast<int>(navEntries.size()); ++i)
+        if (getEntryBounds(i).contains(event.getPosition()))
         {
-            if (getEntryBounds(i).contains(event.getPosition()))
-            {
-                hoveredEntryIndex = i;
-                break;
-            }
+            hoveredEntryIndex = i;
+            break;
         }
     }
 
@@ -218,12 +190,10 @@ void SidebarNavComponent::mouseDown(const juce::MouseEvent& event)
 juce::Rectangle<int> SidebarNavComponent::getItemBounds(SidebarNavItem item) const noexcept
 {
     const auto w = getWidth();
-    if (item == SidebarNavItem::project)
-        return { 0, topPadding, w, 62 };
     if (item == SidebarNavItem::add)
-        return { 0, juce::jmax(topPadding + 62, getHeight() - 68), w, 56 };
+        return {};
 
-    auto y = topPadding + 62 + itemGap;
+    auto y = topPadding;
     for (const auto& entry : navEntries)
     {
         if (entry.item == item)
@@ -236,16 +206,11 @@ juce::Rectangle<int> SidebarNavComponent::getItemBounds(SidebarNavItem item) con
 
 juce::Rectangle<int> SidebarNavComponent::getEntryBounds(int index) const noexcept
 {
-    return { 0, topPadding + 62 + itemGap + index * (itemHeight + itemGap), getWidth(), itemHeight };
+    return { 0, topPadding + index * (itemHeight + itemGap), getWidth(), itemHeight };
 }
 
-std::optional<SidebarNavItem> SidebarNavComponent::hitTestNavItem(juce::Point<int> position) const noexcept
+std::optional<SidebarNavItem> SidebarNavComponent::hitTestNavItem(juce::Point<int>) const noexcept
 {
-    if (getItemBounds(SidebarNavItem::project).contains(position))
-        return SidebarNavItem::project;
-    if (getItemBounds(SidebarNavItem::add).contains(position))
-        return SidebarNavItem::add;
-
     return std::nullopt;
 }
 

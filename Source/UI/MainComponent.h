@@ -20,7 +20,6 @@
 #include "../Plugins/PluginManager.h"
 #include "../Sampler/SamplerPanelComponent.h"
 #include "ArrangementTimelineComponent.h"
-#include "BottomStatusBarComponent.h"
 #include "BrowserPanelComponent.h"
 #include "ClipEditorComponent.h"
 #include "MidiEditorOverlayComponent.h"
@@ -167,7 +166,6 @@ private:
     std::vector<juce::File> sidebarBrowserFolders;
     SelectionInspectorComponent selectionInspector;
     TransportBarComponent transportBar;
-    BottomStatusBarComponent bottomStatusBar;
     MidiEditorOverlayComponent midiEditorOverlay;
     ClipEditorComponent clipEditorPanel;
     SamplerPanelComponent samplerPanel;

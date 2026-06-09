@@ -71,17 +71,17 @@ static const juce::Colour off     { 0xff3a4048 };
 namespace tracks
 {
 static const juce::Colour palette[] {
-    warm::red.withSaturation(0.94f),
-    warm::amber.withSaturation(0.92f),
-    cool::turquoise.withSaturation(0.86f).darker(0.03f),
-    cool::blue.withSaturation(0.90f).brighter(0.03f),
-    warm::pink.withSaturation(0.88f).brighter(0.02f),
-    cool::violet.withSaturation(0.88f).brighter(0.03f),
-    warm::coral.withSaturation(0.90f),
-    cool::aqua.withSaturation(0.84f).darker(0.03f),
-    warm::peach.withSaturation(0.86f).darker(0.06f),
-    cool::indigo.withSaturation(0.86f).brighter(0.02f),
-    warm::salmon.withSaturation(0.88f)
+    warm::red.withSaturation(0.78f).darker(0.04f),
+    warm::amber.withSaturation(0.76f).darker(0.06f),
+    cool::turquoise.withSaturation(0.72f).darker(0.07f),
+    cool::blue.withSaturation(0.76f).darker(0.03f),
+    warm::pink.withSaturation(0.72f).darker(0.03f),
+    cool::violet.withSaturation(0.76f).darker(0.02f),
+    warm::coral.withSaturation(0.76f).darker(0.04f),
+    cool::aqua.withSaturation(0.70f).darker(0.07f),
+    warm::peach.withSaturation(0.70f).darker(0.12f),
+    cool::indigo.withSaturation(0.74f).darker(0.03f),
+    warm::salmon.withSaturation(0.72f).darker(0.04f)
 };
 
 inline juce::Colour colourForIndex(int index) noexcept

@@ -442,6 +442,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.06f));
     g.fillRoundedRectangle(loopLane.toFloat(), 4.0f);
 
+    const auto addTrackButton = getAddTrackButtonBounds().toFloat();
+    g.setColour(theme::surface::primary.withAlpha(0.34f));
+    g.fillRoundedRectangle(addTrackButton, 7.0f);
+    g.setColour(theme::warm::red.withAlpha(0.62f));
+    g.drawRoundedRectangle(addTrackButton.reduced(0.5f), 7.0f, 1.2f);
+    auto plus = addTrackButton.reduced(8.0f);
+    g.setColour(theme::text::primary.withAlpha(0.90f));
+    g.drawLine(plus.getCentreX(), plus.getY(), plus.getCentreX(), plus.getBottom(), 2.0f);
+    g.drawLine(plus.getX(), plus.getCentreY(), plus.getRight(), plus.getCentreY(), 2.0f);
+
     if (project.hasLoopRange())
     {
         g.saveState();
@@ -554,7 +564,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
         juce::ignoreUnused(trackNameArea);
         const auto layout = computeHeaderLayout(trackIndex);
-        const auto trackColour = tracks[trackArrayIndex].colour;
+        const auto trackColour = tracks[trackArrayIndex].colour.withSaturation(0.70f).darker(0.03f);
         const auto cardBounds = layout.card.toFloat();
         g.setColour(juce::Colours::black.withAlpha(0.32f));
         g.fillRoundedRectangle(cardBounds.translated(0.0f, 2.0f), 14.0f);
@@ -564,13 +574,13 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         g.fillRoundedRectangle(cardBounds, 14.0f);
         if (isSelectedTrack)
         {
-            juce::ColourGradient selectedGlow(trackColour.withAlpha(0.22f), cardBounds.getX(), cardBounds.getY(),
-                                              trackColour.withAlpha(0.04f), cardBounds.getRight(), cardBounds.getBottom(), false);
+            juce::ColourGradient selectedGlow(trackColour.withAlpha(0.16f), cardBounds.getX(), cardBounds.getY(),
+                                              trackColour.withAlpha(0.035f), cardBounds.getRight(), cardBounds.getBottom(), false);
             g.setGradientFill(selectedGlow);
             g.fillRoundedRectangle(cardBounds.reduced(1.0f), 13.0f);
         }
         // Border brightens with the signal so it's obvious which track is sounding.
-        const auto borderAlpha = isSelectedTrack ? 0.98f : (isAudible ? juce::jlimit(0.72f, 1.0f, 0.72f + trackLevel * 0.6f) : 0.72f);
+        const auto borderAlpha = isSelectedTrack ? 0.88f : (isAudible ? juce::jlimit(0.58f, 0.86f, 0.58f + trackLevel * 0.36f) : 0.58f);
         g.setColour(trackColour.withAlpha(borderAlpha));
         g.drawRoundedRectangle(cardBounds.reduced(1.0f), 14.0f, isSelectedTrack ? 2.8f : (isAudible ? 1.6f + trackLevel * 1.4f : 1.6f));
 
@@ -622,7 +632,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto active = (buttonText == "M" && tracks[trackArrayIndex].muted)
                 || (buttonText == "S" && tracks[trackArrayIndex].solo)
                 || (buttonText == "R" && tracks[trackArrayIndex].recordArmed);
-            g.setColour(active ? trackColour.withAlpha(0.82f) : juce::Colours::black.withAlpha(0.42f));
+            g.setColour(active ? trackColour.withAlpha(0.74f) : juce::Colours::black.withAlpha(0.42f));
             g.fillRoundedRectangle(buttonBounds.toFloat(), 6.0f);
             g.setColour(juce::Colours::white.withAlpha(active ? 0.98f : 0.84f));
             g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
@@ -635,7 +645,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         {
             const auto hasInstrument = tracks[trackArrayIndex].instrumentPluginId.isNotEmpty();
             auto box = layout.instrumentButton.toFloat();
-            g.setColour(hasInstrument ? trackColour.withAlpha(0.82f) : juce::Colours::black.withAlpha(0.42f));
+            g.setColour(hasInstrument ? trackColour.withAlpha(0.74f) : juce::Colours::black.withAlpha(0.42f));
             g.fillRoundedRectangle(box, 6.0f);
 
             // Mini keyboard: a white-key base with three black-key ticks.
@@ -658,7 +668,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         g.fillRoundedRectangle(sliderF, sliderRadius);
         const auto volumeRatio = juce::jmap(static_cast<float>(tracks[trackArrayIndex].volumeDb), -24.0f, 12.0f, 0.0f, 1.0f);
         auto volumeFill = sliderF.removeFromLeft(juce::jmax(sliderF.getHeight(), sliderF.getWidth() * juce::jlimit(0.0f, 1.0f, volumeRatio)));
-        g.setColour(trackColour.withAlpha(0.92f));
+        g.setColour(trackColour.withAlpha(0.84f));
         g.fillRoundedRectangle(volumeFill, sliderRadius);
 
         if (! (volumeEditorTrackIndex.has_value() && *volumeEditorTrackIndex == trackIndex))
@@ -748,13 +758,13 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
             // Body fill. Selected clips get a separate, lighter state like Studio One:
             // same hue, clearer focus, without relying on the outline alone.
-            const auto clipBase = clip.colour.withSaturation(0.84f);
+            const auto clipBase = clip.colour.withSaturation(0.68f).darker(0.02f);
             const auto clipFill = isSelected
-                ? clipBase.brighter(0.32f).withSaturation(0.62f)
-                : clipBase.withAlpha(0.96f);
+                ? clipBase.brighter(0.18f).withSaturation(0.58f)
+                : clipBase.withAlpha(0.90f);
             const auto waveformColour = isSelected
-                ? clipBase.darker(0.72f).withAlpha(0.76f)
-                : clipBase.darker(0.48f).withAlpha(clip.colour.getPerceivedBrightness() > 0.62f ? 0.54f : 0.64f);
+                ? clipBase.darker(0.66f).withAlpha(0.72f)
+                : clipBase.darker(0.44f).withAlpha(clip.colour.getPerceivedBrightness() > 0.62f ? 0.48f : 0.58f);
 
             g.setColour(clipFill);
             g.fillRoundedRectangle(clipBounds, 10.0f);
@@ -1172,6 +1182,15 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
 {
     if (volumeEditorTrackIndex.has_value() && ! trackVolumeInlineEditor.getBounds().contains(event.getPosition()))
         commitTrackVolumeEditor(true);
+
+    if (getAddTrackButtonBounds().contains(event.getPosition()))
+    {
+        if (onAddTrackRequested)
+            onAddTrackRequested();        // open the full Add Track dialog
+        else
+            showAddTrackMenu();           // fallback: inline popup
+        return;
+    }
 
     // Tool palette hidden for now — click handling disabled.
     if ((false) && getToolButtonBounds(0).contains(event.getPosition()))
@@ -1669,6 +1688,12 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 {
+    if (getAddTrackButtonBounds().contains(event.getPosition()))
+    {
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        return;
+    }
+
     auto bounds = getTimelineContentBounds(*this);
     bounds.removeFromTop(timelineRulerHeight);
     const auto tracksArea = bounds;
@@ -2183,7 +2208,7 @@ juce::Rectangle<int> ArrangementTimelineComponent::getAddTrackButtonBounds() con
     auto bounds = getTimelineContentBounds(*this);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto headerArea = rulerArea.removeFromLeft(trackHeaderWidth);
-    return headerArea.withSizeKeepingCentre(28, 28);
+    return headerArea.removeFromRight(44).withSizeKeepingCentre(30, 30);
 }
 
 void ArrangementTimelineComponent::showAddTrackMenu()

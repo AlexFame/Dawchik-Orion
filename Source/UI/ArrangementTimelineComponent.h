@@ -33,6 +33,9 @@ public:
     // the plugin editor if an instrument is loaded, or the instrument picker if not.
     std::function<void(int)> onTrackInstrumentClicked;
     std::function<void()> onTogglePlayback;
+    // Fired when the "+" add-track button is clicked. The host opens the full Add Track
+    // dialog. If unset, falls back to the inline popup menu.
+    std::function<void()> onAddTrackRequested;
     // Fired when the playhead is moved by clicking/scrubbing the ruler, so the host can
     // re-sync the audio engine to the new position (jump even while playing).
     std::function<void()> onTransportSeek;
