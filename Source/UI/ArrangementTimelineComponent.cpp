@@ -1041,22 +1041,26 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     // Empty "new track" lane that frees space below the last track when the playlist
     // is full and you drag a sample in. Same rounded shape as the clips.
-    if (browserAppendActive)
+    if (browserAppendAnim > 0.01f)
     {
         const auto trackCount = static_cast<int>(project.getTracks().size());
         const auto area = getVisibleTrackAreaBounds(*this);
         const int laneTop = trackCount > 0 ? getTrackLaneBounds(trackCount - 1).getBottom() : area.getY();
-        auto lane = juce::Rectangle<int>(area.getX() + trackHeaderWidth, laneTop, area.getWidth() - trackHeaderWidth, defaultLaneHeight)
+        const int laneH = juce::roundToInt(defaultLaneHeight * browserAppendAnim);
+        auto lane = juce::Rectangle<int>(area.getX() + trackHeaderWidth, laneTop, area.getWidth() - trackHeaderWidth, laneH)
                         .reduced(2, 2)
                         .toFloat();
 
-        g.saveState();
-        g.reduceClipRegion(area);
-        g.setColour(theme::cool::cyan.withAlpha(0.16f));
-        g.fillRoundedRectangle(lane, 10.0f);
-        g.setColour(theme::cool::cyan.withAlpha(0.6f));
-        g.drawRoundedRectangle(lane, 10.0f, 1.5f);
-        g.restoreState();
+        if (lane.getHeight() > 1.0f)
+        {
+            g.saveState();
+            g.reduceClipRegion(area);
+            g.setColour(theme::cool::cyan.withAlpha(0.16f * browserAppendAnim));
+            g.fillRoundedRectangle(lane, 10.0f);
+            g.setColour(theme::cool::cyan.withAlpha(0.6f * browserAppendAnim));
+            g.drawRoundedRectangle(lane, 10.0f, 1.5f);
+            g.restoreState();
+        }
     }
 
     if (browserDropPreviewBounds.has_value())
@@ -2496,20 +2500,54 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         return;
     }
 
+    auto targetTrackIndex = trackIndexFromY(dragSourceDetails.localPosition.y);
+    bool createNewTrack = false;
     const auto trackCountBeforeDrop = static_cast<int>(project.getTracks().size());
 
-    // Drop anywhere over the timeline content → append a new track at the bottom.
-    auto content = getTimelineContentBounds(*this);
-    content.removeFromTop(timelineRulerHeight);
-    if (! content.contains(content.getX() + 1, dragSourceDetails.localPosition.y))
+    if (trackCountBeforeDrop > 0)
+    {
+        const auto visibleTracksArea = getVisibleTrackAreaBounds(*this);
+        const auto needsBottomDropZone = getTotalTrackHeight() + defaultLaneHeight > visibleTracksArea.getHeight();
+        if (needsBottomDropZone)
+        {
+            const auto bottomDropZoneTop = visibleTracksArea.getBottom() - juce::jmin(newTrackDropZoneHeight, visibleTracksArea.getHeight());
+            const auto lastLane = getTrackLaneBounds(trackCountBeforeDrop - 1);
+            if (dragSourceDetails.localPosition.y >= juce::jmax(lastLane.getCentreY(), bottomDropZoneTop)
+                && visibleTracksArea.contains(visibleTracksArea.getX() + 1, dragSourceDetails.localPosition.y))
+            {
+                targetTrackIndex = trackCountBeforeDrop;
+                createNewTrack = true;
+            }
+        }
+    }
+
+    if (targetTrackIndex < 0)
+    {
+        auto tracksBounds = getTimelineContentBounds(*this);
+        tracksBounds.removeFromTop(timelineRulerHeight);
+        if (tracksBounds.contains(tracksBounds.getX() + 1, dragSourceDetails.localPosition.y))
+        {
+            targetTrackIndex = static_cast<int>(project.getTracks().size());
+            createNewTrack = true;
+        }
+    }
+
+    if (targetTrackIndex < 0)
     {
         clearBrowserDropPreview();
         return;
     }
 
-    auto targetTrackIndex = trackCountBeforeDrop;   // append
-    const bool createNewTrack = true;
     auto& tracks = project.getTracks();
+    if (! createNewTrack)
+    {
+        auto& track = tracks[static_cast<std::size_t>(targetTrackIndex)];
+        if (track.isMidiTrack)
+        {
+            clearBrowserDropPreview();
+            return;
+        }
+    }
 
     const auto sourceFile = juce::File(payload->getProperty("path").toString());
     const auto dragType = payload->getProperty("type").toString();
@@ -2620,6 +2658,117 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     repaint();
 }
 
+// ---- External files dragged in from Finder / the OS -------------------------
+namespace
+{
+const char* const kAudioFileExtensions = "wav;aif;aiff;mp3;flac;ogg;m4a;wave";
+}
+
+bool ArrangementTimelineComponent::isInterestedInFileDrag(const juce::StringArray& files)
+{
+    for (const auto& f : files)
+        if (juce::File(f).hasFileExtension(kAudioFileExtensions))
+            return true;
+    return false;
+}
+
+void ArrangementTimelineComponent::fileDragEnter(const juce::StringArray&, int, int) { repaint(); }
+void ArrangementTimelineComponent::fileDragMove(const juce::StringArray&, int, int) {}
+void ArrangementTimelineComponent::fileDragExit(const juce::StringArray&) { repaint(); }
+
+void ArrangementTimelineComponent::filesDropped(const juce::StringArray& files, int x, int y)
+{
+    juce::Point<int> pos(x, y);
+    const bool multiple = files.size() > 1;
+    bool any = false;
+    for (const auto& f : files)
+    {
+        juce::File file(f);
+        // For a multi-file drop each sample becomes its own new track at the bottom.
+        if (importAudioFileAt(file, multiple ? juce::Point<int>(x, std::numeric_limits<int>::max()) : pos))
+            any = true;
+    }
+    if (any)
+        notifyClipSelectionChanged();
+    repaint();
+}
+
+bool ArrangementTimelineComponent::importAudioFileAt(const juce::File& file, juce::Point<int> position)
+{
+    if (! file.existsAsFile() || ! file.hasFileExtension(kAudioFileExtensions))
+        return false;
+
+    auto& tracks = project.getTracks();
+    int targetTrackIndex = trackIndexFromY(position.y);
+    bool createNewTrack = false;
+    if (targetTrackIndex < 0 || targetTrackIndex >= static_cast<int>(tracks.size())
+        || tracks[static_cast<std::size_t>(targetTrackIndex)].isMidiTrack)
+    {
+        targetTrackIndex = static_cast<int>(tracks.size());
+        createNewTrack = true;
+    }
+
+    const auto analysis = analyzeImportedAudioClip(file, project.getTempoBpm(), project.getNumerator(), 4.0);
+    const auto sourceLengthBeats = analysis.clipLengthInBeats;
+    const auto lengthBeats = juce::jmax(minimumClipLengthInBeats, sourceLengthBeats);
+    const auto startBeat = juce::jlimit(
+        0.0,
+        juce::jmax(0.0, getTimelineEndBeats() - lengthBeats),
+        snapBeatValue(xToBeatPosition(position.x)));
+
+    pushUndoSnapshot();
+
+    const auto clipName = file.getFileNameWithoutExtension();
+    if (createNewTrack)
+    {
+        juce::String trackName = clipName;
+        if (const auto dash = trackName.indexOf(" - "); dash > 0)
+            trackName = trackName.substring(dash + 3);
+        if (trackName.isEmpty())
+            trackName = "Audio Track";
+        TrackState t;
+        t.name = trackName;
+        t.isMidiTrack = false;
+        t.colour = theme::tracks::colourForIndex(static_cast<int>(tracks.size()));
+        tracks.push_back(std::move(t));
+        targetTrackIndex = static_cast<int>(tracks.size()) - 1;
+    }
+
+    auto& targetTrack = tracks[static_cast<std::size_t>(targetTrackIndex)];
+    const bool autoWarp = analysis.durationSeconds > 0.0 && analysis.durationSeconds <= 90.0
+                          && (analysis.detectedBars > 0 || analysis.sourceBpm > 0.0);
+    targetTrack.clips.push_back(TimelineClip {
+        clipName,
+        ClipType::audio,
+        startBeat,
+        lengthBeats,
+        targetTrack.colour,
+        {},
+        {},
+        file.getFullPathName(),
+        0.0,
+        false,
+        false,
+        analysis.durationSeconds,
+        analysis.sourceBpm,
+        analysis.detectedBars,
+        autoWarp,
+        analysis.bpmGuessed,
+        sourceLengthBeats,
+        analysis.sourceKeyRoot,
+        analysis.sourceKeyIsMinor,
+        autoWarp
+    });
+    auto& droppedClip = targetTrack.clips.back();
+    droppedClip.signalAnalysisPending = analysis.needsSignalAnalysis;
+    droppedClip.gainNormalizationPending = false;
+
+    setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(targetTrack.clips.size()) - 1 });
+    clampScrollOffsets();
+    repaint();
+    return true;
+}
+
 void ArrangementTimelineComponent::ensureBeatVisible(double endBeat)
 {
     juce::ignoreUnused(endBeat);
@@ -2670,16 +2819,24 @@ void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double ver
 
 void ArrangementTimelineComponent::timerCallback()
 {
-    // When the freed lane is open, ease the view down so it's visible (no lane-grow
-    // animation — just the normal drag plus a gentle scroll to reveal the new space).
-    if (browserAppendActive)
+    // Smoothly open / close the freed append lane below the last track.
+    const float appendTarget = browserAppendActive ? 1.0f : 0.0f;
+    if (std::abs(browserAppendAnim - appendTarget) > 0.001f)
     {
-        const auto visibleH = static_cast<double>(getVisibleTrackAreaBounds(*this).getHeight());
-        const auto maxScroll = juce::jmax(0.0, static_cast<double>(getTotalTrackHeight()) - visibleH);
-        if (std::abs(maxScroll - scrollY) > 0.5)
+        browserAppendAnim += (appendTarget - browserAppendAnim) * 0.25f;
+        if (std::abs(browserAppendAnim - appendTarget) < 0.01f)
+            browserAppendAnim = appendTarget;
+
+        // Ease the view down while opening so the freed space stays visible.
+        if (browserAppendActive)
         {
-            scrollY += (maxScroll - scrollY) * 0.3;
-            clampScrollOffsets();
+            const auto visibleH = static_cast<double>(getVisibleTrackAreaBounds(*this).getHeight());
+            const auto maxScroll = juce::jmax(0.0, static_cast<double>(getTotalTrackHeight()) - visibleH);
+            if (std::abs(maxScroll - scrollY) > 0.5)
+            {
+                scrollY += (maxScroll - scrollY) * 0.3;
+                clampScrollOffsets();
+            }
         }
     }
     repaint();
@@ -2762,8 +2919,8 @@ int ArrangementTimelineComponent::getTotalTrackHeight() const noexcept
     for (int trackIndex = 0; trackIndex < trackCount; ++trackIndex)
         totalHeight += getLaneHeightForTrack(trackIndex);
 
-    if (browserAppendActive)
-        totalHeight += defaultLaneHeight;   // freed space for the incoming track
+    if (browserAppendAnim > 0.0f)
+        totalHeight += juce::roundToInt(defaultLaneHeight * browserAppendAnim);   // freed space (animated)
     return totalHeight;
 }
 
@@ -3049,30 +3206,122 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
         return;
     }
 
-    // Browser audio drag → "append a new track at the bottom". Whenever the cursor is
-    // over the timeline content, smoothly open an empty full-height lane below the last
-    // track; the real track materialises there on drop. (Every dropped sample becomes
-    // its own track — matches the workflow; no insert-between, no add-to-existing-track.)
     browserAppendActive = false;   // recompute below (base height excludes the freed lane)
 
-    auto content = getTimelineContentBounds(*this);
-    content.removeFromTop(timelineRulerHeight);
-    const bool overContent = content.contains(content.getX() + 1, position.y);
+    auto targetTrackIndex = trackIndexFromY(position.y);
+    bool createNewTrack = false;
+    const auto trackCount = static_cast<int>(project.getTracks().size());
+    bool useBottomDropLane = false;
 
-    if (overContent)
+    if (trackCount > 0)
     {
-        // Only free a lane at the bottom when the playlist is already full — otherwise
-        // there's still empty room below the tracks and no ghost is needed.
-        const auto visibleH = getVisibleTrackAreaBounds(*this).getHeight();
-        const bool noRoom = getTotalTrackHeight() + defaultLaneHeight > visibleH;
-        browserAppendActive = noRoom;
-        browserDropCreatesNewTrack = true;
-        browserDropPreviewBounds.reset();
-        repaint();
+        const auto visibleTracksArea = getVisibleTrackAreaBounds(*this);
+        const auto needsBottomDropZone = getTotalTrackHeight() + defaultLaneHeight > visibleTracksArea.getHeight();
+        if (needsBottomDropZone)
+        {
+            const auto bottomDropZoneTop = visibleTracksArea.getBottom() - juce::jmin(newTrackDropZoneHeight, visibleTracksArea.getHeight());
+            const auto lastLane = getTrackLaneBounds(trackCount - 1);
+            if (position.y >= juce::jmax(lastLane.getCentreY(), bottomDropZoneTop)
+                && visibleTracksArea.contains(visibleTracksArea.getX() + 1, position.y))
+            {
+                targetTrackIndex = trackCount;
+                createNewTrack = true;
+                useBottomDropLane = true;
+            }
+        }
+    }
+
+    if (targetTrackIndex < 0)
+    {
+        auto tracksBounds = getTimelineContentBounds(*this);
+        tracksBounds.removeFromTop(timelineRulerHeight);
+        if (tracksBounds.contains(tracksBounds.getX() + 1, position.y))
+        {
+            targetTrackIndex = static_cast<int>(project.getTracks().size());
+            createNewTrack = true;
+        }
+    }
+
+    if (targetTrackIndex < 0)
+    {
+        clearBrowserDropPreview();
         return;
     }
 
-    clearBrowserDropPreview();
+    if (! createNewTrack)
+    {
+        const auto& track = project.getTracks()[static_cast<std::size_t>(targetTrackIndex)];
+        if (track.isMidiTrack)
+        {
+            clearBrowserDropPreview();
+            return;
+        }
+    }
+
+    // The freed empty-lane animation only runs in the bottom/append case (playlist full).
+    browserAppendActive = useBottomDropLane;
+
+    const auto sourceFile = juce::File(payload->getProperty("path").toString());
+    const auto fallbackLengthBeats = fallbackClipLengthInBeats(*payload);
+    const auto analysis = analyzeImportedAudioClip(sourceFile, project.getTempoBpm(), project.getNumerator(), fallbackLengthBeats);
+
+    const auto previewDouble = [&](const char* prop, double fb)
+    {
+        return payload->hasProperty(prop) ? static_cast<double>(payload->getProperty(prop)) : fb;
+    };
+    const auto sStart = juce::jlimit(0.0, 0.999, previewDouble("sampleStartRatio", 0.0));
+    const auto sEnd = juce::jlimit(sStart + 0.001, 1.0, previewDouble("sampleEndRatio", 1.0));
+    const auto trimSpan = juce::jmax(0.001, sEnd - sStart);
+    const auto sourceLen = payload->hasProperty("sourceLengthBeats")
+        ? juce::jmax(minimumClipLengthInBeats, previewDouble("sourceLengthBeats", analysis.clipLengthInBeats))
+        : analysis.clipLengthInBeats;
+    const auto lengthBeats = juce::jmax(minimumClipLengthInBeats, sourceLen * trimSpan);
+    const auto startBeat = juce::jlimit(
+        0.0,
+        juce::jmax(0.0, getTimelineEndBeats() - lengthBeats),
+        snapBeatValue(xToBeatPosition(position.x)));
+
+    const auto previewColour = createNewTrack
+        ? theme::tracks::colourForIndex(static_cast<int>(project.getTracks().size()))
+        : project.getTracks()[static_cast<std::size_t>(targetTrackIndex)].colour;
+
+    const TimelineClip previewClip {
+        payload->getProperty("name").toString(),
+        ClipType::audio,
+        startBeat,
+        lengthBeats,
+        previewColour,
+        {},
+        {},
+        sourceFile.getFullPathName(),
+        0.0,
+        false,
+        false,
+        analysis.durationSeconds,
+        analysis.sourceBpm,
+        analysis.detectedBars,
+        analysis.detectedBars > 0,
+        analysis.bpmGuessed,
+        lengthBeats,
+        analysis.sourceKeyRoot,
+        analysis.sourceKeyIsMinor,
+        true
+    };
+
+    browserDropPreviewColour = previewClip.colour;
+    browserDropCreatesNewTrack = createNewTrack;
+    if (useBottomDropLane)
+    {
+        // Append case: the animated freed lane is the indicator — no clip phantom.
+        browserDropPreviewBounds.reset();
+    }
+    else
+    {
+        // Phantom clip showing exactly where the sample will land (on the hovered
+        // track, or the new lane in the empty area below).
+        browserDropPreviewBounds = getClipBounds(previewClip, targetTrackIndex);
+    }
+    repaint();
 }
 
 void ArrangementTimelineComponent::notifyClipSelectionChanged()

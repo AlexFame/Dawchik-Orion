@@ -17,6 +17,7 @@ namespace orion
 {
 class ArrangementTimelineComponent final : public juce::Component,
                                            public juce::DragAndDropTarget,
+                                           public juce::FileDragAndDropTarget,
                                            private juce::Timer
 {
 public:
@@ -58,6 +59,12 @@ public:
     void itemDragMove(const SourceDetails& dragSourceDetails) override;
     void itemDragExit(const SourceDetails& dragSourceDetails) override;
     void itemDropped(const SourceDetails& dragSourceDetails) override;
+    // External files dragged in from Finder / the OS (audio files → new clip/track).
+    bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void fileDragEnter(const juce::StringArray& files, int x, int y) override;
+    void fileDragMove(const juce::StringArray& files, int x, int y) override;
+    void fileDragExit(const juce::StringArray& files) override;
+    void filesDropped(const juce::StringArray& files, int x, int y) override;
     std::optional<juce::Rectangle<int>> getSelectedTrackInspectorBounds() const noexcept;
     std::optional<int> getSelectedTrackIndex() const noexcept;
     // Selects a track (used by the mixer when its name is clicked); clears clip selection.
@@ -282,6 +289,9 @@ private:
     double xToBeatPosition(int x) const noexcept;
     void clearBrowserDropPreview();
     void updateBrowserDropPreview(const juce::Point<int>& position, const juce::var& description);
+    // Imports an audio file (from an external drag) as a clip on the track under the
+    // cursor, or appends a new audio track. Returns false if the file isn't audio.
+    bool importAudioFileAt(const juce::File& file, juce::Point<int> position);
     void notifyClipSelectionChanged();
     bool isClipSelected(const SelectedClip& clip) const noexcept;
     void setSingleSelection(std::optional<SelectedClip> clip);
@@ -343,9 +353,11 @@ private:
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
     juce::Colour browserDropPreviewColour { orion::theme::warm::red };
     bool browserDropCreatesNewTrack { false };
-    // When the playlist is full and a browser audio item is dragged in, a fixed-height
-    // empty lane is freed below the LAST track; the new track materialises there on drop.
-    bool browserAppendActive { false };
+    // When the playlist is full and a browser audio item is dragged in, an empty lane is
+    // freed below the LAST track; the new track materialises there on drop. The lane
+    // opens/closes smoothly via browserAppendAnim (0..1), driven by the timer.
+    bool  browserAppendActive { false };
+    float browserAppendAnim { 0.0f };
     ToolMode currentTool { ToolMode::pointer };
 
     int liveWaveformTrack { -1 };
