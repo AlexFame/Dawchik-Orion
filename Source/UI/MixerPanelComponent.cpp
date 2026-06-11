@@ -38,8 +38,19 @@ juce::String gainTextFromValue(double value)
 
 // Studio-One-style mixer controls: a red "pill" fader handle on a thin red track,
 // and a thin cyan pan ring with a short red pointer.
+// Half the fader handle height — also the track inset top/bottom so the handle stays inside
+// the fader and the dB scale (which uses the same inset) lines up with the handle.
+constexpr float kFaderThumbRadius = 11.0f;
+
 struct MixerLookAndFeel : juce::LookAndFeel_V4
 {
+    int getSliderThumbRadius(juce::Slider& slider) override
+    {
+        // Fixed, predictable inset for vertical faders (JUCE's default derives it from the
+        // slider WIDTH, which made the handle sit well below its value on wide strips).
+        return slider.isVertical() ? static_cast<int>(kFaderThumbRadius) : juce::LookAndFeel_V4::getSliderThumbRadius(slider);
+    }
+
     void drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height,
                           float sliderPos, float, float,
                           juce::Slider::SliderStyle, juce::Slider&) override
@@ -625,8 +636,10 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
 
     // dB scale next to the fader.
     const std::array<int, 8> ticks { 6, 0, -6, -12, -18, -24, -30, -36 };
-    const auto faderTop = static_cast<float>(L.fader.getY());
-    const auto faderH   = juce::jmax(1.0f, static_cast<float>(L.fader.getHeight()));
+    // Match the slider's travel: the handle centre moves between (top+radius) and
+    // (bottom-radius), so inset the scale by the same amount or the labels won't line up.
+    const auto faderTop = static_cast<float>(L.fader.getY()) + kFaderThumbRadius;
+    const auto faderH   = juce::jmax(1.0f, static_cast<float>(L.fader.getHeight()) - 2.0f * kFaderThumbRadius);
     g.setFont(juce::FontOptions(8.5f, juce::Font::plain));
     g.setColour(mutedText.withAlpha(0.82f));
     for (const auto db : ticks)
@@ -638,7 +651,7 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
     }
     {
         const auto y = faderTop + faderH;
-        g.drawText("-\xe2\x88\x9e", L.scaleArea.getX(), juce::roundToInt(y) - 10, L.scaleArea.getWidth(), 12,
+        g.drawText(juce::String::fromUTF8("-\xe2\x88\x9e"), L.scaleArea.getX(), juce::roundToInt(y) - 10, L.scaleArea.getWidth(), 12,
                    juce::Justification::centredRight, false);
     }
 
@@ -673,13 +686,12 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
     g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
     auto outR = L.outDropdown.reduced(8, 0);
     g.drawText(outName, outR.removeFromLeft(outR.getWidth() - 14), juce::Justification::centredLeft, true);
-    g.drawText("\xe2\x96\xbe", outR, juce::Justification::centredRight, false);
+    g.drawText(juce::String::fromUTF8("\xe2\x96\xbe"), outR, juce::Justification::centredRight, false);
 }
 
 void MixerPanelComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colours::black.withAlpha(0.45f));
-
+    // No backdrop scrim — the mixer panel sits over the app without dimming it.
     const auto panel = getPanelBounds();
     g.setColour(panelBackground);
     g.fillRoundedRectangle(panel.toFloat(), 10.0f);
@@ -701,7 +713,7 @@ void MixerPanelComponent::paint(juce::Graphics& g)
     {
         g.setColour(mutedText);
         g.setFont(juce::FontOptions(14.0f, juce::Font::plain));
-        g.drawText("No tracks yet — add a track to mix.", inner, juce::Justification::centred);
+        g.drawText(juce::String::fromUTF8("No tracks yet \xe2\x80\x94 add a track to mix."), inner, juce::Justification::centred);
     }
 
     for (auto& strip : strips)
@@ -719,7 +731,7 @@ void MixerPanelComponent::paint(juce::Graphics& g)
     // LINK (left).
     g.setColour(linkEnabled ? cyan : mutedText);
     g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-    g.drawText("\xf0\x9f\x94\x97 LINK", linkButtonBounds, juce::Justification::centredLeft, false);
+    g.drawText(juce::String::fromUTF8("\xf0\x9f\x94\x97 LINK"), linkButtonBounds, juce::Justification::centredLeft, false);
 
     // "+ BUS" button.
     g.setColour(juce::Colour(0xff262a30));
@@ -806,9 +818,10 @@ void MixerPanelComponent::resized()
     linkButtonBounds = bar.removeFromLeft(70).withSizeKeepingCentre(70, 20);
     bar.removeFromLeft(6);
     addBusButtonBounds = bar.removeFromLeft(60).withSizeKeepingCentre(56, 22);
+    bar.removeFromRight(150);   // reserve the right side for the WIDTH control (drawn in paint)
     const int segW = 64, segH = 22, segGap = 4;
     const auto totalSeg = segW * 3 + segGap * 2;
-    auto centre = bar.withSizeKeepingCentre(totalSeg, segH);
+    auto centre = bar.withSizeKeepingCentre(juce::jmin(totalSeg, juce::jmax(0, bar.getWidth())), segH);
     viewFadersBounds  = centre.removeFromLeft(segW); centre.removeFromLeft(segGap);
     viewMetersBounds  = centre.removeFromLeft(segW); centre.removeFromLeft(segGap);
     viewCompactBounds = centre.removeFromLeft(segW);

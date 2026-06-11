@@ -46,6 +46,9 @@ public:
     std::function<void(int)> onTransposeChanged;
     std::function<void(double)> onGainChanged;
     std::function<void(double, double)> onSampleRangeChanged;
+    // Fired when a START/END marker drag finishes (mouse released). bool = the START marker
+    // was the one moved (so the host can jump playback to the new loop start).
+    std::function<void(double, double, bool)> onSampleRangeFinalized;
     std::function<void(double)> onPreviewSeek;
     std::function<void()> onNormalize;
 

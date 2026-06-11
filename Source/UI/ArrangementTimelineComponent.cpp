@@ -536,6 +536,14 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.saveState();
     g.reduceClipRegion(visibleTracksArea);
 
+    // Vertical divider between the track-header column and the playlist, spanning the full
+    // track area (continues below the last track).
+    {
+        const auto sepX = visibleTracksArea.getX() + trackHeaderWidth;
+        g.setColour(theme::line::normal);
+        g.drawVerticalLine(sepX, static_cast<float>(visibleTracksArea.getY()), static_cast<float>(visibleTracksArea.getBottom()));
+    }
+
     for (int trackIndex = 0; trackIndex < trackCount; ++trackIndex)
     {
         const auto trackArrayIndex = static_cast<std::size_t>(trackIndex);
@@ -564,6 +572,19 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         juce::ignoreUnused(trackNameArea);
         const auto layout = computeHeaderLayout(trackIndex);
         const auto trackColour = tracks[trackArrayIndex].colour.withSaturation(0.70f).darker(0.03f);
+
+        // Active-track lane wash (Studio One style): a soft tint over the WHOLE lane length,
+        // so the selected track reads clearly — most visible in the empty area after its
+        // clips. Drawn behind the grid lines and clips.
+        if (isSelectedTrack)
+        {
+            auto laneGrid = rowBounds.withTrimmedLeft(trackHeaderWidth);
+            if (! laneGrid.isEmpty())
+            {
+                g.setColour(juce::Colours::white.withAlpha(0.08f));
+                g.fillRect(laneGrid);
+            }
+        }
         const auto cardBounds = layout.card.toFloat();
         g.setColour(isSelectedTrack
             ? trackColour.darker(0.70f).withAlpha(0.96f)
@@ -580,9 +601,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             g.setGradientFill(selectedGlow);
             g.fillRoundedRectangle(cardBounds.reduced(2.0f), 8.0f);
         }
-        // Border brightens with the signal so it's obvious which track is sounding.
-        const auto borderAlpha = isSelectedTrack ? 0.88f : (isAudible ? juce::jlimit(0.58f, 0.86f, 0.58f + trackLevel * 0.36f) : 0.58f);
-        g.setColour(trackColour.withAlpha(borderAlpha));
+        // Selected/active track gets a white border (matches the selected-clip highlight);
+        // otherwise the coloured border brightens with the signal so it's obvious which
+        // track is sounding.
+        const auto borderAlpha = isAudible ? juce::jlimit(0.58f, 0.86f, 0.58f + trackLevel * 0.36f) : 0.58f;
+        g.setColour(isSelectedTrack ? juce::Colours::white.withAlpha(0.92f) : trackColour.withAlpha(borderAlpha));
         g.drawRoundedRectangle(cardBounds.reduced(1.0f), 9.0f, isSelectedTrack ? 2.0f : 1.2f);
 
         // Folder collapse triangle (▾ open / ▸ collapsed) + a coloured spine down children.

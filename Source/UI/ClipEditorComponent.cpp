@@ -236,12 +236,18 @@ void ClipEditorComponent::mouseDrag(const juce::MouseEvent& event)
 
 void ClipEditorComponent::mouseUp(const juce::MouseEvent& event)
 {
-    if (waveDragMode != WaveDragMode::none)
-        updateSampleMarker(waveDragMode, event.x, true);
+    const auto endedMode = waveDragMode;
+    if (endedMode != WaveDragMode::none)
+        updateSampleMarker(endedMode, event.x, true);
 
     waveDragMode = WaveDragMode::none;
     trimmedClipDragCandidate = false;
     trimmedClipDragStarted = false;
+
+    // Marker drag finished → tell the host so it can move the loop and (for a START move)
+    // jump playback to the new start, AKAI MPC-style.
+    if ((endedMode == WaveDragMode::start || endedMode == WaveDragMode::end) && onSampleRangeFinalized)
+        onSampleRangeFinalized(state.sampleStartRatio, state.sampleEndRatio, endedMode == WaveDragMode::start);
 }
 
 bool ClipEditorComponent::keyPressed(const juce::KeyPress& key)

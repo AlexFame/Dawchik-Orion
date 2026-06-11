@@ -295,6 +295,10 @@ private:
     // Instant streaming stand-in used while the high-quality buffer renders in the
     // background; one of the two is active at a time on the preview transport.
     std::unique_ptr<StreamingWarpPreviewSource> clipEditorPreviewStreamSource;
+    // Identifies the rendered buffer in clipEditorPreviewStreamSource (path|semitones|
+    // targetSamples). Stop keeps the source alive; replay reuses it when this key matches,
+    // so re-pressing Play is instant (buffer already filled) instead of re-rendering.
+    std::string clipEditorPreviewStreamKey;
     std::unique_ptr<ArrangementPlaybackSource> arrangementPlaybackSource;
     std::unique_ptr<ClickTrackSource> clickTrackSource;
     std::unique_ptr<MasterStripSource> masterStripSource;

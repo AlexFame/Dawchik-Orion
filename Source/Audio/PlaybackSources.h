@@ -117,6 +117,8 @@ public:
         channels = juce::jlimit(1, 2, input.getNumChannels());
         out.setSize(channels, totalOut);
         out.clear();
+        loopStartSample.store(0, std::memory_order_relaxed);
+        loopEndSample.store(totalOut, std::memory_order_relaxed);
         stretch.presetDefault(channels, static_cast<float>(sampleRate));
         stretch.setTransposeFactor(static_cast<float>(juce::jlimit(0.25, 4.0, pitchScale)));
         startThread();
@@ -179,28 +181,55 @@ public:
         }
     }
 
+    // AKAI MPC-style: continuously loop the [loopStart, loopEnd] region. The bounds can be
+    // moved live (setLoopBounds) while playing and the loop follows immediately — the whole
+    // source is rendered, so the markers can be dragged anywhere.
+    void setLoopBounds(double startRatio, double endRatio) noexcept
+    {
+        const int ls = juce::jlimit(0, juce::jmax(0, totalOut - 1), static_cast<int>(std::llround(startRatio * totalOut)));
+        const int le = juce::jlimit(ls + 1, totalOut, static_cast<int>(std::llround(endRatio * totalOut)));
+        loopStartSample.store(ls, std::memory_order_relaxed);
+        loopEndSample.store(le, std::memory_order_relaxed);
+    }
+
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
     {
         info.clearActiveBufferRegion();
         if (info.numSamples <= 0)
             return;
 
-        const int pos = static_cast<int>(positionSamples);
-        if (pos < totalOut)
+        const int ls = loopStartSample.load(std::memory_order_relaxed);
+        const int le = juce::jmax(ls + 1, loopEndSample.load(std::memory_order_relaxed));
+        const int ready = juce::jmin(totalOut, producedSamples.load(std::memory_order_acquire));
+
+        int pos = static_cast<int>(positionSamples);
+        if (pos >= le || pos < 0 || pos >= totalOut)
+            pos = ls;   // wrap at the loop end. NB: don't snap when pos < ls — if START is
+                        // dragged past the playhead we let the current pass finish and wrap
+                        // naturally; snapping every block was what crackled while dragging.
+
+        int written = 0;
+        while (written < info.numSamples)
         {
-            const int ready = juce::jmin(totalOut, producedSamples.load(std::memory_order_acquire));
-            const int n = juce::jmin(info.numSamples, ready - pos);
-            if (n > 0)
-                for (int c = 0; c < info.buffer->getNumChannels(); ++c)
-                {
-                    const int sc = juce::jmin(c, out.getNumChannels() - 1);
-                    info.buffer->copyFrom(c, info.startSample, out, sc, pos, n);
-                }
+            if (pos >= le)
+                pos = ls;                 // wrap at the loop end
+            const int cap = juce::jmin(le, ready);
+            if (pos >= cap)
+                break;                    // producer hasn't filled this far yet → silence rest
+            const int n = juce::jmin(info.numSamples - written, cap - pos);
+            for (int c = 0; c < info.buffer->getNumChannels(); ++c)
+            {
+                const int sc = juce::jmin(c, out.getNumChannels() - 1);
+                info.buffer->copyFrom(c, info.startSample + written, out, sc, pos, n);
+            }
+            pos += n;
+            written += n;
         }
 
-        // Advance the full block so the transport clock keeps moving even if the producer
-        // is momentarily behind (only possible for the first block or two at the start).
-        positionSamples = juce::jmin<juce::int64>(totalOut, positionSamples + info.numSamples);
+        if (pos >= le)
+            pos = ls;   // keep the stored position inside the loop so the transport never
+                        // sees "stream finished" (which would stop playback at loopEnd)
+        positionSamples = pos;
     }
 
     void setNextReadPosition(juce::int64 newPosition) override
@@ -221,6 +250,8 @@ private:
     juce::AudioBuffer<float> out;
     signalsmith::stretch::SignalsmithStretch<float> stretch;
     std::atomic<int> producedSamples { 0 };
+    std::atomic<int> loopStartSample { 0 };
+    std::atomic<int> loopEndSample { 1 };
     juce::int64 positionSamples { 0 };
 };
 

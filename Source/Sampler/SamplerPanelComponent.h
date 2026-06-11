@@ -59,6 +59,7 @@ private:
     bool updateTypingPianoNotes();
     void releaseTypingPianoNotes();
     void startSlicePlaybackIndicator(int sliceIndex);
+    void startLinearPlaybackIndicator(int playablePitch);
     void ensureWaveformPeaksFor(const juce::String& sourcePath);
     void drawWaveform(juce::Graphics& g, juce::Rectangle<int> waveInner, const TrackState* track);
 
@@ -79,6 +80,10 @@ private:
     std::optional<int> playbackSliceIndex;
     double playbackSliceStartedMs { 0.0 };
     double playbackSliceDurationMs { 0.0 };
+    // Playback indicator for the pitched (Classic / One-Shot) modes: a vertical line that
+    // sweeps the waveform for the duration of the most recently triggered note.
+    std::optional<double> playbackLinearStartedMs;
+    double playbackLinearDurationMs { 0.0 };
     std::array<juce::Rectangle<int>, 3> modeButtonBounds;
     std::array<juce::Rectangle<int>, 3> sliceButtonBounds;
     juce::Rectangle<int> samplerWarpButtonBounds;

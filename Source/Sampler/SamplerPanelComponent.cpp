@@ -249,6 +249,23 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
             g.fillEllipse(playheadX - 4.0f, static_cast<float>(waveInner.getY()) - 4.0f, 8.0f, 8.0f);
         }
     }
+    else if (track != nullptr && playbackLinearStartedMs.has_value() && playbackLinearDurationMs > 0.0)
+    {
+        // Classic / One-Shot playback line sweeping the waveform.
+        const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - *playbackLinearStartedMs;
+        const auto progress = juce::jlimit(0.0, 1.0, elapsedMs / playbackLinearDurationMs);
+        const auto playheadX = static_cast<float>(waveInner.getX())
+            + static_cast<float>(waveInner.getWidth()) * static_cast<float>(progress);
+
+        g.setColour(juce::Colours::white.withAlpha(0.96f));
+        g.drawLine(playheadX,
+                   static_cast<float>(waveInner.getY()),
+                   playheadX,
+                   static_cast<float>(waveInner.getBottom()),
+                   2.0f);
+        g.setColour(accentColour);
+        g.fillEllipse(playheadX - 4.0f, static_cast<float>(waveInner.getY()) - 4.0f, 8.0f, 8.0f);
+    }
 
     auto keyboardHelp = content.removeFromTop(74).reduced(0, 12);
     g.setColour(juce::Colours::white.withAlpha(0.88f));
@@ -572,6 +589,15 @@ void SamplerPanelComponent::timerCallback()
 
         repaint();
     }
+
+    if (isVisible() && playbackLinearStartedMs.has_value())
+    {
+        const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - *playbackLinearStartedMs;
+        if (playbackLinearDurationMs <= 0.0 || elapsedMs >= playbackLinearDurationMs)
+            playbackLinearStartedMs.reset();
+
+        repaint();
+    }
 }
 
 juce::Rectangle<int> SamplerPanelComponent::getPanelBounds() const
@@ -782,6 +808,8 @@ bool SamplerPanelComponent::updateTypingPianoNotes()
 
                 if (track->samplerMode == SamplerPlaybackMode::slice)
                     startSlicePlaybackIndicator(sliceIndex);
+                else
+                    startLinearPlaybackIndicator(playablePitch);
             }
 
             consumed = true;
@@ -847,6 +875,33 @@ void SamplerPanelComponent::startSlicePlaybackIndicator(int sliceIndex)
     playbackSliceIndex = juce::jlimit(0, safeSliceCount - 1, sliceIndex);
     playbackSliceStartedMs = juce::Time::getMillisecondCounterHiRes();
     playbackSliceDurationMs = (playbackDurationSeconds / static_cast<double>(safeSliceCount)) * 1000.0;
+    repaint();
+}
+
+void SamplerPanelComponent::startLinearPlaybackIndicator(int playablePitch)
+{
+    auto* track = getActiveTrack();
+    if (track == nullptr || track->samplerMode == SamplerPlaybackMode::slice)
+        return;
+    if (track->samplerSourceDurationSeconds <= 0.0)
+        return;
+
+    // The note plays the whole sample once (Classic & One-Shot both play through). Warp
+    // stretches it to the project tempo, and pitch (vs the root note) scales the speed —
+    // mirror the engine so the playhead lands exactly where the audio is.
+    auto playbackDurationSeconds = track->samplerSourceDurationSeconds;
+    if (track->samplerWarpEnabled && track->samplerSourceBpm > 0.0 && onRequestProjectTempoBpm)
+    {
+        const auto projectTempoBpm = onRequestProjectTempoBpm();
+        if (projectTempoBpm > 0.0)
+            playbackDurationSeconds *= track->samplerSourceBpm / projectTempoBpm;
+    }
+    const auto pitchRatio = std::pow(2.0, static_cast<double>(playablePitch - track->samplerRootMidiNote) / 12.0);
+    if (pitchRatio > 0.0)
+        playbackDurationSeconds /= pitchRatio;
+
+    playbackLinearStartedMs = juce::Time::getMillisecondCounterHiRes();
+    playbackLinearDurationMs = playbackDurationSeconds * 1000.0;
     repaint();
 }
 }  // namespace orion
