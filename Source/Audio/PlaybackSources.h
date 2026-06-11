@@ -98,6 +98,132 @@ private:
     juce::int64 positionSamples { 0 };
 };
 
+// Instant, length-independent clip-editor preview: time-stretches (and optionally
+// pitch-shifts) a region to a target length with signalsmith, but starts playing from
+// sample 0 IMMEDIATELY while a background producer thread fills the rest ahead of the
+// playhead — so Play never waits on a full render, no matter how long the loop is. A
+// high-quality RubberBand buffer can swap in afterwards (handled by the host).
+class StreamingWarpPreviewSource final : public juce::PositionableAudioSource,
+                                         private juce::Thread
+{
+public:
+    StreamingWarpPreviewSource(juce::AudioBuffer<float> sourceRegion, double sr,
+                               int targetSamples, double pitchScale)
+        : juce::Thread("ClipPreviewWarp"),
+          input(std::move(sourceRegion)),
+          sampleRate(sr > 0.0 ? sr : 44100.0),
+          totalOut(juce::jmax(1, targetSamples))
+    {
+        channels = juce::jlimit(1, 2, input.getNumChannels());
+        out.setSize(channels, totalOut);
+        out.clear();
+        stretch.presetDefault(channels, static_cast<float>(sampleRate));
+        stretch.setTransposeFactor(static_cast<float>(juce::jlimit(0.25, 4.0, pitchScale)));
+        startThread();
+
+        // Wait briefly (capped) for a small playback lead so the very first transient
+        // isn't clipped. The producer runs far faster than real time, so in practice this
+        // returns within a few milliseconds — playback still feels instant.
+        const int lead = juce::jmin(totalOut, 8192);
+        const auto deadlineMs = juce::Time::getMillisecondCounter() + 250;
+        while (producedSamples.load(std::memory_order_acquire) < lead
+               && juce::Time::getMillisecondCounter() < deadlineMs)
+            juce::Thread::sleep(2);
+    }
+
+    ~StreamingWarpPreviewSource() override
+    {
+        stopThread(2000);
+    }
+
+    void prepareToPlay(int, double) override {}
+    void releaseResources() override {}
+
+    void run() override
+    {
+        const double inRatio = static_cast<double>(input.getNumSamples()) / juce::jmax(1, totalOut);
+
+        int inputPos = 0;
+        const int seekLength = juce::jmin(input.getNumSamples(), stretch.outputSeekLength(static_cast<float>(inRatio)));
+        if (seekLength > 0)
+        {
+            const float* inPtrs[2] = { input.getReadPointer(0),
+                                       channels > 1 ? input.getReadPointer(juce::jmin(1, input.getNumChannels() - 1)) : nullptr };
+            stretch.outputSeek(inPtrs, seekLength);
+            inputPos = seekLength;
+        }
+
+        juce::AudioBuffer<float> scratch(channels, 4096);
+        const int scratchCap = scratch.getNumSamples();
+        int produced = 0;
+        while (produced < totalOut && ! threadShouldExit())
+        {
+            const int outChunk = juce::jmin(2048, totalOut - produced);
+            const int inChunk = juce::jlimit(1, scratchCap, static_cast<int>(std::llround(outChunk * inRatio)));
+            for (int c = 0; c < channels; ++c)
+            {
+                auto* dst = scratch.getWritePointer(c);
+                const int sc = juce::jmin(c, input.getNumChannels() - 1);
+                for (int i = 0; i < inChunk; ++i)
+                {
+                    const int idx = inputPos + i;
+                    dst[i] = idx < input.getNumSamples() ? input.getSample(sc, idx) : 0.0f;
+                }
+            }
+            inputPos += inChunk;
+            const float* inPtrs[2]  = { scratch.getReadPointer(0), channels > 1 ? scratch.getReadPointer(1) : nullptr };
+            float*       outPtrs[2] = { out.getWritePointer(0) + produced, channels > 1 ? out.getWritePointer(1) + produced : nullptr };
+            stretch.process(inPtrs, inChunk, outPtrs, outChunk);
+            produced += outChunk;
+            producedSamples.store(produced, std::memory_order_release);
+        }
+    }
+
+    void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
+    {
+        info.clearActiveBufferRegion();
+        if (info.numSamples <= 0)
+            return;
+
+        const int pos = static_cast<int>(positionSamples);
+        if (pos < totalOut)
+        {
+            const int ready = juce::jmin(totalOut, producedSamples.load(std::memory_order_acquire));
+            const int n = juce::jmin(info.numSamples, ready - pos);
+            if (n > 0)
+                for (int c = 0; c < info.buffer->getNumChannels(); ++c)
+                {
+                    const int sc = juce::jmin(c, out.getNumChannels() - 1);
+                    info.buffer->copyFrom(c, info.startSample, out, sc, pos, n);
+                }
+        }
+
+        // Advance the full block so the transport clock keeps moving even if the producer
+        // is momentarily behind (only possible for the first block or two at the start).
+        positionSamples = juce::jmin<juce::int64>(totalOut, positionSamples + info.numSamples);
+    }
+
+    void setNextReadPosition(juce::int64 newPosition) override
+    {
+        positionSamples = juce::jlimit<juce::int64>(0, totalOut, newPosition);
+    }
+
+    juce::int64 getNextReadPosition() const override { return positionSamples; }
+    juce::int64 getTotalLength() const override       { return totalOut; }
+    bool isLooping() const override                   { return false; }
+    double getSampleRate() const noexcept             { return sampleRate; }
+
+private:
+    juce::AudioBuffer<float> input;
+    double sampleRate { 44100.0 };
+    int totalOut { 1 };
+    int channels { 1 };
+    juce::AudioBuffer<float> out;
+    signalsmith::stretch::SignalsmithStretch<float> stretch;
+    std::atomic<int> producedSamples { 0 };
+    juce::int64 positionSamples { 0 };
+};
+
 class ArrangementPlaybackSource final : public juce::AudioSource
 {
 public:

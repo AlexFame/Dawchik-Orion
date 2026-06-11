@@ -69,6 +69,14 @@ juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce
                                                                       const juce::String& sourcePath = {},
                                                                       double pitchScale = 1.0);
 
+// Fast signalsmith-only stretch (real-time grade) for INSTANT previews. Optionally
+// pitch-shifts by `pitchScale`. Dramatically faster than the RubberBand backend, so
+// playback can start immediately; a high-quality render can swap in afterwards.
+juce::AudioBuffer<float> stretchBufferFastPreview(const juce::AudioBuffer<float>& source,
+                                                  int outputSamples,
+                                                  double sampleRate,
+                                                  double pitchScale = 1.0);
+
 // Convenience wrapper: tempo-fit a preview buffer from `sourceBpm` to `projectTempoBpm`.
 juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
                                                       double sourceBpm,

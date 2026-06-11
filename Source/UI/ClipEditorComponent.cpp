@@ -547,7 +547,11 @@ void ClipEditorComponent::updateSampleMarker(WaveDragMode mode, int x, bool shou
             onSampleRangeChanged(state.sampleStartRatio, state.sampleEndRatio);
     }
 
-    if (shouldSeek && onPreviewSeek && state.lengthInBeats > 0.0)
+    // Scrub-to-marker only makes sense while STOPPED. During playback, seeking on every
+    // marker move yanks the playhead to the marker each frame while the playback timer
+    // pulls it back to the real position — that fight is what made the line flicker (and
+    // scrubbed the audio). Leave the playing playhead alone.
+    if (shouldSeek && onPreviewSeek && state.lengthInBeats > 0.0 && ! state.playing)
         onPreviewSeek(ratio);
 
     repaint();

@@ -35,6 +35,7 @@ namespace orion
 // Audio render sources now live in Audio/PlaybackSources.h. Forward-declared
 // here so the unique_ptr members below only need the definition in the .cpp.
 class BufferPreviewSource;
+class StreamingWarpPreviewSource;
 class ArrangementPlaybackSource;
 class ClickTrackSource;
 class MasterStripSource;
@@ -141,7 +142,16 @@ private:
     void refreshClipInspector();
     void refreshClipEditor();
     void setClipEditorLocalPreviewPosition(double sourceRatio);
+    // Refresh the arrangement's warp render after a warp/pitch/key change WITHOUT blocking
+    // the message thread: configure streamers + kick the background producer when realtime
+    // warp is on (instant), else fall back to the synchronous cache build.
+    void rebuildArrangementWarpNonBlocking();
     bool startClipEditorPreview();
+    // Loads a prepared (already stretched/pitched) buffer into the clip-editor preview
+    // transport and starts it. `resumeSeconds` < 0 starts from the top.
+    void playClipEditorPreviewBuffer(juce::AudioBuffer<float> buffer, double sampleRate,
+                                     double startRatio, double endRatio,
+                                     double rawDurationSeconds, double resumeSeconds);
     void stopClipEditorPreview(bool resetToStart);
     void updateClipEditorPreviewPlayhead();
     bool setClipEditorPreviewPlaybackPosition(double sourceRatio);
@@ -185,6 +195,10 @@ private:
     // the UI never freezes; a generation counter discards stale builds.
     juce::ThreadPool clipEditorPreviewPool { 1 };
     std::atomic<int> clipEditorPreviewBuildGen { 0 };
+    // Identifies what the preview transport is currently playing, so a high-quality
+    // background render only swaps in if it's still the same region/pitch.
+    int clipEditorPreviewPlayingGen { -1 };
+    std::string clipEditorPreviewPlayingKey;
     // Background signal analysis (key/tempo) for freshly-dropped clips, so dropping is
     // instant; results are applied back on the message thread.
     juce::ThreadPool analysisThreadPool { 1 };
@@ -278,6 +292,9 @@ private:
     std::unique_ptr<BufferPreviewSource> previewBufferSource;
     juce::AudioTransportSource clipEditorPreviewTransportSource;
     std::unique_ptr<BufferPreviewSource> clipEditorPreviewBufferSource;
+    // Instant streaming stand-in used while the high-quality buffer renders in the
+    // background; one of the two is active at a time on the preview transport.
+    std::unique_ptr<StreamingWarpPreviewSource> clipEditorPreviewStreamSource;
     std::unique_ptr<ArrangementPlaybackSource> arrangementPlaybackSource;
     std::unique_ptr<ClickTrackSource> clickTrackSource;
     std::unique_ptr<MasterStripSource> masterStripSource;

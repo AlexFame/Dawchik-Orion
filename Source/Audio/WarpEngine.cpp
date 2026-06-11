@@ -1231,6 +1231,75 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
 }
 }  // namespace
 
+juce::AudioBuffer<float> stretchBufferFastPreview(const juce::AudioBuffer<float>& source,
+                                                  int outputSamples,
+                                                  double sampleRate,
+                                                  double pitchScale)
+{
+    if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
+        return source;
+
+    // No tempo change and no pitch change → hand back the source untouched (instant).
+    if (std::abs(outputSamples - source.getNumSamples()) <= 1 && std::abs(pitchScale - 1.0) < 1.0e-6)
+        return source;
+
+    // Render with the SAME streaming approach the arrangement uses (presetDefault +
+    // outputSeek priming + chunked process). This guarantees the start aligns to the
+    // clip start exactly like timeline playback, and — unlike exact() — never falls back
+    // to the un-stretched source on short regions (which would play at the wrong tempo).
+    const int channels = juce::jlimit(1, 2, source.getNumChannels());
+    const int originalSamples = source.getNumSamples();
+
+    juce::AudioBuffer<float> out(channels, outputSamples);
+    out.clear();
+
+    signalsmith::stretch::SignalsmithStretch<float> stretch;
+    stretch.presetDefault(channels, static_cast<float>(sampleRate));
+    stretch.setTransposeFactor(static_cast<float>(juce::jlimit(0.25, 4.0, pitchScale)));
+
+    const double inRatio = static_cast<double>(originalSamples) / juce::jmax(1, outputSamples);
+    const auto sampleAt = [&](int ch, int idx) -> float
+    {
+        const int sc = juce::jmin(ch, source.getNumChannels() - 1);
+        return idx >= 0 && idx < originalSamples ? source.getSample(sc, idx) : 0.0f;
+    };
+
+    // Prime so the output aligns to the clip start (mirrors the arrangement producer).
+    int inputPos = 0;
+    {
+        const int seekLength = juce::jmin(originalSamples, stretch.outputSeekLength(static_cast<float>(inRatio)));
+        if (seekLength > 0)
+        {
+            const float* inPtrs[2] = { source.getReadPointer(0),
+                                       channels > 1 ? source.getReadPointer(juce::jmin(1, source.getNumChannels() - 1)) : nullptr };
+            stretch.outputSeek(inPtrs, seekLength);
+            inputPos = seekLength;
+        }
+    }
+
+    juce::AudioBuffer<float> scratch(channels, 4096);
+    const int scratchCap = scratch.getNumSamples();
+    int produced = 0;
+    while (produced < outputSamples)
+    {
+        const int outChunk = juce::jmin(2048, outputSamples - produced);
+        const int inChunk = juce::jlimit(1, scratchCap, static_cast<int>(std::llround(outChunk * inRatio)));
+        for (int c = 0; c < channels; ++c)
+        {
+            auto* dst = scratch.getWritePointer(c);
+            for (int i = 0; i < inChunk; ++i)
+                dst[i] = sampleAt(c, inputPos + i);
+        }
+        inputPos += inChunk;
+        const float* inPtrs[2]  = { scratch.getReadPointer(0), channels > 1 ? scratch.getReadPointer(1) : nullptr };
+        float*       outPtrs[2] = { out.getWritePointer(0) + produced, channels > 1 ? out.getWritePointer(1) + produced : nullptr };
+        stretch.process(inPtrs, inChunk, outPtrs, outChunk);
+        produced += outChunk;
+    }
+
+    return out;
+}
+
 juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
                                                                       int outputSamples,
                                                                       double sampleRate,

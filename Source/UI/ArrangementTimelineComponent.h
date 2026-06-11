@@ -242,6 +242,7 @@ private:
     struct HeaderLayout
     {
         juce::Rectangle<int> card;
+        juce::Rectangle<int> number;
         juce::Rectangle<int> title;
         juce::Rectangle<int> muteButton;
         juce::Rectangle<int> soloButton;

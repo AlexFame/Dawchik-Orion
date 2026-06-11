@@ -1266,8 +1266,7 @@ MainComponent::MainComponent()
 
             clip->warpEnabled = shouldWarp;
             refreshAudioClipWarpLengths();
-            if (arrangementPlaybackSource != nullptr)
-                arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+            rebuildArrangementWarpNonBlocking();
             refreshClipInspector();
             refreshClipEditor();
             arrangementTimeline.repaint();
@@ -1278,8 +1277,7 @@ MainComponent::MainComponent()
         if (auto* clip = getSelectedTimelineClip())
         {
             clip->keyShiftEnabled = enabled;
-            if (arrangementPlaybackSource != nullptr)
-                arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+            rebuildArrangementWarpNonBlocking();
             refreshClipEditor();
             arrangementTimeline.repaint();
         }
@@ -1289,8 +1287,7 @@ MainComponent::MainComponent()
         if (auto* clip = getSelectedTimelineClip())
         {
             clip->transposeSemitones = juce::jlimit(-24, 24, semitones);
-            if (arrangementPlaybackSource != nullptr)
-                arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+            rebuildArrangementWarpNonBlocking();
 
             // If the clip-editor preview is playing, re-pitch it live and continue
             // from the same spot — no stop/replay needed. The resume position is
@@ -1314,7 +1311,11 @@ MainComponent::MainComponent()
             clipEditorPreviewClip = selectedArrangementClip;
             clipEditorPreviewStartRatio = start;
             clipEditorPreviewEndRatio = end;
-            clipEditorPreviewPlayheadRatio = juce::jlimit(start, end, clipEditorPreviewPlayheadRatio);
+            // Don't re-clamp the playhead to the new selection while the preview is playing —
+            // the playback timer owns the position; clamping here makes the line flicker as
+            // the marker moves.
+            if (! clipEditorPreviewTransportSource.isPlaying())
+                clipEditorPreviewPlayheadRatio = juce::jlimit(start, end, clipEditorPreviewPlayheadRatio);
             clipEditorSelectionRanges[*selectedArrangementClip] = { start, end };
             refreshClipEditor();
         }
@@ -1924,6 +1925,7 @@ MainComponent::~MainComponent()
     clipEditorPreviewTransportSource.stop();
     clipEditorPreviewTransportSource.setSource(nullptr);
     clipEditorPreviewBufferSource.reset();
+    clipEditorPreviewStreamSource.reset();
     // Stop the device pulling the master stage, then detach the click monitor BEFORE
     // destroying the click (the master stage references it as its monitor source).
     previewSourcePlayer.setSource(nullptr);
@@ -2292,7 +2294,6 @@ void MainComponent::resized()
     auto arrangementPanel = workArea;
 
     auto playlistArea = arrangementPanel;
-    playlistArea.removeFromLeft(2);
     playlistArea.removeFromTop(2);
 
     const auto samplerOpen = samplerPanel.isVisible();
@@ -2308,7 +2309,7 @@ void MainComponent::resized()
 
     if (browserPanelShown())
     {
-        auto browserInner = browserPanelBounds.reduced(8, 16);
+        auto browserInner = browserPanelBounds.withTrimmedTop(16).withTrimmedBottom(16);
         browserPanel.setBounds(browserInner);
         browserPanel.setVisible(true);
     }
@@ -4210,6 +4211,19 @@ void MainComponent::stopBrowserPreview(bool resetPosition)
         previewTransportSource.setPosition(0.0);
 }
 
+void MainComponent::rebuildArrangementWarpNonBlocking()
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+    // Realtime warp configures streamers (cheap) and kicks the background producer, so the
+    // heavy RubberBand stretch never runs on the message thread — pitch/warp toggles stay
+    // instant instead of freezing the UI for seconds.
+    if (arrangementPlaybackSource->isRealtimeWarpEnabled())
+        arrangementPlaybackSource->prepareWarpStreams();
+    else
+        arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+}
+
 bool MainComponent::startClipEditorPreview()
 {
     auto* clip = getSelectedTimelineClip();
@@ -4275,12 +4289,65 @@ bool MainComponent::startClipEditorPreview()
     // generation will be discarded when it finishes.
     const int gen = ++clipEditorPreviewBuildGen;
 
+    const double rawDurationSeconds = static_cast<double>(samplesToRead64) / reader->sampleRate;
+    const double resume = clipEditorPreviewResumeSeconds;
+    clipEditorPreviewResumeSeconds = -1.0;
+
     const auto cacheIt = clipEditorPreviewCache.find(cacheKey);
-    if (cacheIt == clipEditorPreviewCache.end())
+    if (cacheIt != clipEditorPreviewCache.end())
     {
-        // Cache miss: do the expensive read + pitch-stretch on a BACKGROUND thread
-        // so the UI never freezes. When it's ready we cache it and re-enter, which
-        // then takes the instant cache-hit path below.
+        // High-quality version already rendered → play it directly (instant).
+        clipEditorPreviewPlayingGen = gen;
+        clipEditorPreviewPlayingKey = cacheKey;
+        playClipEditorPreviewBuffer(juce::AudioBuffer<float>(*cacheIt->second), reader->sampleRate,
+                                    startRatio, endRatio, rawDurationSeconds, resume);
+        return true;
+    }
+
+    // Cache MISS. Start playback IMMEDIATELY via a streaming stand-in that plays from
+    // sample 0 while a background producer fills the rest ahead of the playhead — so Play
+    // is instant regardless of loop length. The high-quality RubberBand buffer is built in
+    // the background and swapped in at the live position once ready.
+    {
+        juce::AudioBuffer<float> region(juce::jmax(1, static_cast<int>(reader->numChannels)),
+                                        juce::jmax(1, static_cast<int>(samplesToRead64)));
+        region.clear();
+        reader->read(&region, 0, static_cast<int>(samplesToRead64), startSample, true, true);
+        const auto pitchScale = std::pow(2.0, static_cast<double>(semitones) / 12.0);
+
+        if (transportEngine.isPlaying() || transportEngine.isCountInActive())
+        {
+            transportEngine.pause();
+            if (arrangementPlaybackSource != nullptr)
+            {
+                arrangementPlaybackSource->allInstrumentNotesOff();
+                arrangementPlaybackSource->clearClipEditorPreviewTrim();
+                arrangementPlaybackSource->syncToTransportPosition();
+            }
+        }
+        stopBrowserPreview(true);
+        clipEditorPreviewTransportSource.stop();
+        clipEditorPreviewTransportSource.setSource(nullptr);
+        clipEditorPreviewBufferSource.reset();
+        clipEditorPreviewStreamSource.reset();
+        clipEditorPreviewStreamSource = std::make_unique<StreamingWarpPreviewSource>(
+            std::move(region), reader->sampleRate, juce::jmax(1, targetSamples), pitchScale);
+        clipEditorPreviewTransportSource.setSource(clipEditorPreviewStreamSource.get(), 0, nullptr, reader->sampleRate);
+        clipEditorPreviewTransportSource.setPosition(0.0);
+        clipEditorLocalPreviewStartRatio = startRatio;
+        clipEditorLocalPreviewEndRatio = endRatio;
+        clipEditorLocalPreviewDurationSeconds = rawDurationSeconds;
+        setClipEditorLocalPreviewPosition(startRatio);
+        if (resume >= 0.0)
+            clipEditorPreviewTransportSource.setPosition(juce::jlimit(0.0, clipEditorLocalPreviewDurationSeconds, resume));
+        clipEditorPreviewTransportSource.start();
+
+        clipEditorPreviewPlayingGen = gen;
+        clipEditorPreviewPlayingKey = cacheKey;
+    }
+
+    // Background high-quality build.
+    {
         const auto pathStr = clip->sourcePath;
         const auto ss      = startSample;
         const auto n       = static_cast<int>(samplesToRead64);
@@ -4312,22 +4379,38 @@ bool MainComponent::startClipEditorPreview()
             }
             auto preparedPtr = std::make_shared<juce::AudioBuffer<float>>(std::move(built));
 
-            juce::MessageManager::callAsync([safe, cacheKey, preparedPtr, gen]()
+            juce::MessageManager::callAsync([safe, cacheKey, preparedPtr, gen, sr]()
             {
                 auto* self = safe.getComponent();
-                if (self == nullptr || self->clipEditorPreviewBuildGen.load() != gen)
-                    return; // a newer request superseded this build
+                if (self == nullptr)
+                    return;
                 if (self->clipEditorPreviewCache.size() >= 16)
                     self->clipEditorPreviewCache.clear();
                 self->clipEditorPreviewCache[cacheKey] = preparedPtr;
-                self->startClipEditorPreview(); // instant cache hit now
+
+                // If the fast preview for this exact region/pitch is still playing, swap up
+                // to the high-quality buffer seamlessly at the current position.
+                if (self->clipEditorPreviewPlayingGen == gen
+                    && self->clipEditorPreviewPlayingKey == cacheKey
+                    && self->clipEditorPreviewTransportSource.isPlaying())
+                {
+                    const double posSec = self->clipEditorPreviewTransportSource.getCurrentPosition();
+                    self->playClipEditorPreviewBuffer(juce::AudioBuffer<float>(*preparedPtr), sr,
+                                                      self->clipEditorLocalPreviewStartRatio,
+                                                      self->clipEditorLocalPreviewEndRatio,
+                                                      self->clipEditorLocalPreviewDurationSeconds,
+                                                      posSec);
+                }
             });
         });
-        return false; // playback starts when the background build finishes
     }
+    return true;
+}
 
-    juce::AudioBuffer<float> buffer(*cacheIt->second); // the source owns its own copy
-
+void MainComponent::playClipEditorPreviewBuffer(juce::AudioBuffer<float> buffer, double sampleRate,
+                                                double startRatio, double endRatio,
+                                                double rawDurationSeconds, double resumeSeconds)
+{
     if (transportEngine.isPlaying() || transportEngine.isCountInActive())
     {
         transportEngine.pause();
@@ -4342,22 +4425,19 @@ bool MainComponent::startClipEditorPreview()
     stopBrowserPreview(true);
     clipEditorPreviewTransportSource.stop();
     clipEditorPreviewTransportSource.setSource(nullptr);
-    clipEditorPreviewBufferSource = std::make_unique<BufferPreviewSource>(std::move(buffer), reader->sampleRate);
-    clipEditorPreviewTransportSource.setSource(clipEditorPreviewBufferSource.get(), 0, nullptr, reader->sampleRate);
+    clipEditorPreviewStreamSource.reset();   // drop the streaming stand-in, if any
+    clipEditorPreviewBufferSource = std::make_unique<BufferPreviewSource>(std::move(buffer), sampleRate);
+    clipEditorPreviewTransportSource.setSource(clipEditorPreviewBufferSource.get(), 0, nullptr, sampleRate);
     clipEditorPreviewTransportSource.setPosition(0.0);
     clipEditorLocalPreviewStartRatio = startRatio;
     clipEditorLocalPreviewEndRatio = endRatio;
-    clipEditorLocalPreviewDurationSeconds = static_cast<double>(samplesToRead64) / reader->sampleRate;
+    clipEditorLocalPreviewDurationSeconds = rawDurationSeconds;
     setClipEditorLocalPreviewPosition(startRatio);
 
-    // Resume from a captured position (used when re-pitching live during playback).
-    const double resume = clipEditorPreviewResumeSeconds;
-    clipEditorPreviewResumeSeconds = -1.0;
-    if (resume >= 0.0)
-        clipEditorPreviewTransportSource.setPosition(juce::jlimit(0.0, clipEditorLocalPreviewDurationSeconds, resume));
+    if (resumeSeconds >= 0.0)
+        clipEditorPreviewTransportSource.setPosition(juce::jlimit(0.0, clipEditorLocalPreviewDurationSeconds, resumeSeconds));
 
     clipEditorPreviewTransportSource.start();
-    return true;
 }
 
 void MainComponent::stopClipEditorPreview(bool resetToStart)
@@ -4366,6 +4446,7 @@ void MainComponent::stopClipEditorPreview(bool resetToStart)
     clipEditorPreviewTransportSource.setPosition(0.0);
     clipEditorPreviewTransportSource.setSource(nullptr);
     clipEditorPreviewBufferSource.reset();
+    clipEditorPreviewStreamSource.reset();
     clipEditorLocalPreviewDurationSeconds = 0.0;
     if (resetToStart)
         setClipEditorLocalPreviewPosition(clipEditorPreviewStartRatio);
@@ -4389,7 +4470,13 @@ void MainComponent::updateClipEditorPreviewPlayhead()
                                                   clipEditorLocalPreviewEndRatio,
                                                   clipEditorLocalPreviewStartRatio + progress * span);
 
-    if (progress >= 0.999)
+    // Stop at the LIVE selection end even if the streaming buffer was locked to a wider
+    // range at Play time — otherwise trimming the end during playback lets the playhead
+    // run past the new marker.
+    const auto liveEnd = juce::jlimit(clipEditorLocalPreviewStartRatio,
+                                      clipEditorLocalPreviewEndRatio,
+                                      clipEditorPreviewEndRatio);
+    if (progress >= 0.999 || clipEditorPreviewPlayheadRatio >= liveEnd - 1.0e-6)
         stopClipEditorPreview(true);
 }
 
@@ -5418,9 +5505,13 @@ void MainComponent::refreshClipEditor()
         }
         editorState.sampleStartRatio = juce::jlimit(0.0, 0.999, clipEditorPreviewStartRatio);
         editorState.sampleEndRatio = juce::jlimit(editorState.sampleStartRatio + 0.001, 1.0, clipEditorPreviewEndRatio);
-        auto previewSourceRatio = juce::jlimit(editorState.sampleStartRatio,
-                                               editorState.sampleEndRatio,
-                                               clipEditorPreviewPlayheadRatio);
+        // While the preview is playing it sweeps the range that was locked in at Play time
+        // (clipEditorLocalPreview*). Clamp the displayed playhead to THAT range, not the
+        // editor's live selection — otherwise dragging the start/end markers pins the line
+        // to the moving marker and it flickers against the real playback position.
+        auto previewSourceRatio = clipEditorPreviewTransportSource.isPlaying()
+            ? juce::jlimit(clipEditorLocalPreviewStartRatio, clipEditorLocalPreviewEndRatio, clipEditorPreviewPlayheadRatio)
+            : juce::jlimit(editorState.sampleStartRatio, editorState.sampleEndRatio, clipEditorPreviewPlayheadRatio);
         if (! clipEditorPreviewTransportSource.isPlaying()
             && transportEngine.isPlaying()
             && editorState.isAudioClip

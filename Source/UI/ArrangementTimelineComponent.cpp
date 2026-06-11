@@ -27,7 +27,7 @@ const auto majorGridColour = juce::Colour(0xff56616b);
 const auto minorGridColour = juce::Colour(0xff3b444c);
 const auto markerColour = juce::Colours::white.withAlpha(0.64f);
 const auto textColour = juce::Colours::white.withAlpha(0.88f);
-const auto playheadColour = juce::Colour(0xfff25454);
+const auto playheadColour = orion::theme::states::playhead;
 const auto loopRangeColour = juce::Colour(0xff7ecb6f);
 constexpr auto resizeHandleWidth = 12;
 constexpr auto fadeHandleHitRadius = 8;
@@ -76,7 +76,6 @@ int chooseGridStepBeats(double pixelsPerBeat, int beatsPerBar, double minimumSpa
 juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 {
     auto bounds = component.getLocalBounds();
-    bounds.removeFromLeft(6);
     bounds.removeFromTop(4);
     return bounds;
 }
@@ -566,23 +565,25 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         const auto layout = computeHeaderLayout(trackIndex);
         const auto trackColour = tracks[trackArrayIndex].colour.withSaturation(0.70f).darker(0.03f);
         const auto cardBounds = layout.card.toFloat();
-        g.setColour(juce::Colours::black.withAlpha(0.32f));
-        g.fillRoundedRectangle(cardBounds.translated(0.0f, 2.0f), 14.0f);
         g.setColour(isSelectedTrack
-            ? trackColour.darker(0.72f).withAlpha(0.96f)
-            : juce::Colour(0xff141821).withAlpha(0.92f));
-        g.fillRoundedRectangle(cardBounds, 14.0f);
+            ? trackColour.darker(0.70f).withAlpha(0.96f)
+            : juce::Colour(0xff34393e).withAlpha(0.94f));
+        g.fillRoundedRectangle(cardBounds.reduced(1.0f), 9.0f);
+
+        g.setColour(trackColour.withAlpha(0.92f));
+        g.fillRoundedRectangle(layout.card.withWidth(5).toFloat().reduced(0.0f, 1.0f), 2.5f);
+
         if (isSelectedTrack)
         {
             juce::ColourGradient selectedGlow(trackColour.withAlpha(0.16f), cardBounds.getX(), cardBounds.getY(),
                                               trackColour.withAlpha(0.035f), cardBounds.getRight(), cardBounds.getBottom(), false);
             g.setGradientFill(selectedGlow);
-            g.fillRoundedRectangle(cardBounds.reduced(1.0f), 13.0f);
+            g.fillRoundedRectangle(cardBounds.reduced(2.0f), 8.0f);
         }
         // Border brightens with the signal so it's obvious which track is sounding.
         const auto borderAlpha = isSelectedTrack ? 0.88f : (isAudible ? juce::jlimit(0.58f, 0.86f, 0.58f + trackLevel * 0.36f) : 0.58f);
         g.setColour(trackColour.withAlpha(borderAlpha));
-        g.drawRoundedRectangle(cardBounds.reduced(1.0f), 14.0f, isSelectedTrack ? 2.8f : (isAudible ? 1.6f + trackLevel * 1.4f : 1.6f));
+        g.drawRoundedRectangle(cardBounds.reduced(1.0f), 9.0f, isSelectedTrack ? 2.0f : 1.2f);
 
         // Folder collapse triangle (▾ open / ▸ collapsed) + a coloured spine down children.
         if (tracks[trackArrayIndex].isFolder && ! layout.collapseTriangle.isEmpty())
@@ -615,11 +616,15 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 if (f.isFolder && f.groupId == tracks[trackArrayIndex].parentGroup) { spine = f.colour; break; }
             auto sp = layout.card.toFloat();
             g.setColour(spine.withAlpha(0.75f));
-            g.fillRoundedRectangle(sp.getX() - 6.0f, sp.getY() + 2.0f, 3.0f, sp.getHeight() - 4.0f, 1.5f);
+            g.fillRect(juce::Rectangle<float>(sp.getX() + 5.0f, sp.getY(), 3.0f, sp.getHeight()));
         }
 
+        g.setColour(juce::Colours::white.withAlpha(0.70f));
+        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.drawText(juce::String(trackIndex + 1), layout.number, juce::Justification::centred);
+
         g.setColour(textColour.withAlpha(0.94f));
-        g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
         g.drawFittedText(tracks[trackArrayIndex].name, layout.title, juce::Justification::centredLeft, 1);
 
         const std::array<std::pair<juce::String, juce::Rectangle<int>>, 3> buttons {{
@@ -756,18 +761,26 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             g.saveState();
             g.reduceClipRegion(clipBoundsInt);
 
-            // Body fill. Selected clips get a separate, lighter state like Studio One:
-            // same hue, clearer focus, without relying on the outline alone.
-            const auto clipBase = clip.colour.withSaturation(0.68f).darker(0.02f);
-            const auto clipFill = isSelected
-                ? clipBase.brighter(0.18f).withSaturation(0.58f)
-                : clipBase.withAlpha(0.90f);
-            const auto waveformColour = isSelected
-                ? clipBase.darker(0.66f).withAlpha(0.72f)
-                : clipBase.darker(0.44f).withAlpha(clip.colour.getPerceivedBrightness() > 0.62f ? 0.48f : 0.58f);
+            // Body fill: vertical gradient from the colour-system variants (top highlight
+            // → bottom shade). Selected clips get the Studio One-style lightened body and
+            // white focus border below, without changing the track lane/header.
+            const auto variant    = theme::tracks::variantsFor(clip.colour);
+            const auto clipBase   = variant.base;
+            const auto gradTop    = isSelected ? variant.gradientTop.interpolatedWith(juce::Colours::white, 0.34f) : variant.gradientTop;
+            const auto gradBottom = isSelected ? variant.gradientBottom.interpolatedWith(juce::Colours::white, 0.24f) : variant.gradientBottom;
+            const auto waveformColour = variant.waveform.withAlpha(isSelected ? 0.78f : 0.92f);
 
-            g.setColour(clipFill);
-            g.fillRoundedRectangle(clipBounds, 10.0f);
+            {
+                juce::ColourGradient bodyGradient(gradTop, clipBounds.getX(), clipBounds.getY(),
+                                                  gradBottom, clipBounds.getX(), clipBounds.getBottom(), false);
+                g.setGradientFill(bodyGradient);
+                g.fillRoundedRectangle(clipBounds, 10.0f);
+                if (isSelected)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.14f));
+                    g.fillRoundedRectangle(clipBounds.reduced(1.0f), 9.0f);
+                }
+            }
 
             // Studio One-style header strip: a darker band at the top where the clip
             // name lives. Gives every clip a visible top edge even when adjacent clips
@@ -781,11 +794,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                                                headerStrip.getWidth(), headerStrip.getHeight(),
                                                10.0f, 10.0f,
                                                true, true, false, false);
-                g.setColour((isSelected ? clipFill.darker(0.28f) : clipBase.darker(0.42f)).withAlpha(0.92f));
-                g.fillPath(headerPath);
-                juce::ColourGradient headerShade((isSelected ? clipFill.brighter(0.08f) : clipBase.brighter(0.12f)).withAlpha(0.36f), headerStrip.getX(), headerStrip.getY(),
-                                                 (isSelected ? clipFill.darker(0.16f) : clipBase.darker(0.28f)).withAlpha(0.76f), headerStrip.getRight(), headerStrip.getBottom(), false);
-                g.setGradientFill(headerShade);
+                g.setColour((isSelected
+                    ? variant.gradientBottom.interpolatedWith(juce::Colours::white, 0.22f).darker(0.08f)
+                    : variant.gradientBottom.darker(0.30f)).withAlpha(0.92f));
                 g.fillPath(headerPath);
             }
 
@@ -888,13 +899,13 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             // Always draw a 1px darker outline around every clip. This is what makes two
             // flush clips visually separable — without it adjacent clips read as one
             // continuous block (the issue raised when we removed the 2px inset gap).
-            g.setColour(clipBase.darker(0.58f).withAlpha(isSelected ? 0.95f : 0.85f));
-            g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), 9.5f, isSelected ? 1.4f : 1.0f);
+            g.setColour(variant.waveform.withAlpha(isSelected ? 0.95f : 0.85f));
+            g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), 9.5f, 1.0f);
 
             if (isSelected)
             {
-                g.setColour(juce::Colours::white.withAlpha(0.86f));
-                g.drawRoundedRectangle(clipBounds.reduced(1.4f, 1.4f), 8.8f, 2.8f);
+                g.setColour(juce::Colours::white.withAlpha(0.92f));
+                g.drawRoundedRectangle(clipBounds.reduced(1.2f, 1.2f), 8.8f, 2.2f);
             }
 
             // Fade in/out overlays (Studio One style). The curve shows the gain ramp;
@@ -1026,6 +1037,13 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                                  juce::Justification::topLeft,
                                  1,
                                  0.90f);
+            }
+
+            // Muted clips dim under a 40% black overlay (colour-system UI state).
+            if (clip.muted)
+            {
+                g.setColour(theme::states::mutedClipOverlay);
+                g.fillRoundedRectangle(clipBounds, 10.0f);
             }
             g.restoreState();
         }
@@ -2277,22 +2295,17 @@ ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::compute
 
     auto lane = getTrackLaneBounds(trackIndex);
     auto headerArea = lane.removeFromLeft(trackHeaderWidth);
-    // Rounded header card, sized to the full lane height (clips inset ~1-2px) so it matches
-    // the track rather than looking shorter.
-    layout.card = headerArea.reduced(8, 2);
-
-    // Children of a folder are indented to the right so the grouping reads visually.
     const auto& tracks = project.getTracks();
-    if (trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
-        && tracks[static_cast<std::size_t>(trackIndex)].parentGroup >= 0)
-        layout.card.removeFromLeft(folderChildIndentPx);
+    layout.card = headerArea;
 
-    // Content is anchored to the top of the card with consistent gaps, so it looks
-    // identical regardless of how tall the track lane is. A thin vertical level meter
-    // runs down the right edge (space-efficient on the default 78px lane).
-    auto inner = layout.card.reduced(13, 6);
+    // Studio One-style full-row track headers: a fixed number gutter on the left,
+    // content fills the remaining row, and the meter stays on the right edge.
+    auto inner = layout.card.reduced(8, 6);
     const bool isFolderTrack = trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size())
                             && tracks[static_cast<std::size_t>(trackIndex)].isFolder;
+
+    layout.number = inner.removeFromLeft(28);
+    inner.removeFromLeft(6);
 
     layout.meter = inner.removeFromRight(9);
     inner.removeFromRight(10);

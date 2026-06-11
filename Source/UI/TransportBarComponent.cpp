@@ -13,7 +13,8 @@ constexpr int kReadoutRowHeight = 36;   // remainder of the panel is the button 
 constexpr int kUtilityHeight = 56;
 constexpr int kBrandWidth = 272;
 constexpr int kSideGroupWidth = 260;
-constexpr int kCpuWidth = 58;
+constexpr int kCpuWidth = 92;            // CPU readout (label + bars + %)
+constexpr int kMasterMeterWidth = 230;   // master meter is fixed-width, not edge-to-edge
 constexpr int kOuterPadding = 24;
 constexpr int kGroupGap = 24;
 
@@ -325,9 +326,11 @@ void TransportBarComponent::resized()
                                                 juce::jmax(kSideGroupWidth, monitorRight - monitorX),
                                                 kUtilityHeight);
     auto monitorContent = monitorClusterBounds.reduced(12, 7);
-    cpuMeterBounds = monitorContent.removeFromRight(kCpuWidth);
-    monitorContent.removeFromRight(12);
-    masterMeterBounds = monitorContent;
+    // Master meter is a fixed-width readout anchored to the left of the cluster (it used to
+    // stretch all the way to the window edge); CPU follows it with a bit more room.
+    masterMeterBounds = monitorContent.removeFromLeft(juce::jmin(kMasterMeterWidth, monitorContent.getWidth()));
+    monitorContent.removeFromLeft(16);
+    cpuMeterBounds = monitorContent.removeFromLeft(juce::jmin(kCpuWidth, monitorContent.getWidth()));
 
     // Readouts: three equal columns spread across the full width (BPM | TIME | KEY).
     auto readouts = panel.removeFromTop(kReadoutRowHeight).reduced(16, 0);
