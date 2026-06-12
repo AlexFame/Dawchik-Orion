@@ -26,8 +26,8 @@ juce::String formatDb(double db)
 void styleButton(juce::TextButton& button)
 {
     button.setColour(juce::TextButton::buttonColourId, theme::core::voidBlack);
-    button.setColour(juce::TextButton::buttonOnColourId, theme::warm::pink);
-    button.setColour(juce::TextButton::textColourOffId, theme::warm::pink.withAlpha(0.92f));
+    button.setColour(juce::TextButton::buttonOnColourId, theme::accent::brandCyan);
+    button.setColour(juce::TextButton::textColourOffId, theme::text::secondary);
     button.setColour(juce::TextButton::textColourOnId, theme::text::inverse);
 }
 
@@ -62,11 +62,12 @@ public:
     {
         const auto role = button.getComponentID();
         const auto active = button.getToggleState();
-        auto colour = active ? theme::text::inverse : theme::warm::pink;
+        // Neutral icons by default; toggles light up cyan when active. Record stays red.
+        auto colour = active ? theme::text::inverse : theme::text::secondary;
         if (role == "record")
-            colour = active ? theme::warm::red : theme::warm::salmon;
+            colour = theme::accent::recordRed;
         else if (role == "play")
-            colour = active ? theme::text::inverse : theme::text::primary;
+            colour = theme::text::primary;
         else if (role == "loop" && active)
             colour = theme::text::inverse;
 
@@ -93,7 +94,7 @@ public:
         }
         else if (role == "record")
         {
-            g.setColour(theme::warm::red);
+            g.setColour(theme::accent::recordRed);
             g.fillEllipse(area.withSizeKeepingCentre(w * 0.58f, h * 0.58f));
         }
         else if (role == "loop")
@@ -117,30 +118,34 @@ public:
         }
         else if (role == "metronome")
         {
-            // Classic metronome: trapezoid body (narrow top, wide base), a base bar,
-            // and a diagonal pendulum rod with a small weight.
+            // MPC-style metronome: a triangular body outline, a diagonal pendulum rod that
+            // pokes above the apex, and a round weight (bob) high on the rod.
             const auto cx = area.getCentreX();
-            const auto top = area.getY() + h * 0.13f;
-            const auto bottom = area.getBottom() - h * 0.15f;
+            const auto top = area.getY() + h * 0.16f;
+            const auto bottom = area.getBottom() - h * 0.13f;
+            const juce::PathStrokeType stroke(2.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded);
 
+            // Near-triangular body (very narrow top → wide base).
             juce::Path body;
-            body.startNewSubPath(cx - w * 0.11f, top);
-            body.lineTo(cx + w * 0.11f, top);
-            body.lineTo(cx + w * 0.31f, bottom);
-            body.lineTo(cx - w * 0.31f, bottom);
+            body.startNewSubPath(cx - w * 0.07f, top);
+            body.lineTo(cx + w * 0.07f, top);
+            body.lineTo(cx + w * 0.34f, bottom);
+            body.lineTo(cx - w * 0.34f, bottom);
             body.closeSubPath();
-            g.strokePath(body, juce::PathStrokeType(2.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+            g.strokePath(body, stroke);
 
-            // Base bar.
-            g.fillRect(juce::Rectangle<float>(cx - w * 0.31f, bottom - 1.0f, w * 0.62f, 2.0f));
+            // Base bar (stand).
+            g.fillRoundedRectangle(juce::Rectangle<float>(cx - w * 0.34f, bottom - 1.3f, w * 0.68f, 2.6f), 1.0f);
 
-            // Pendulum rod, leaning right, with a weight midway.
-            const juce::Point<float> rodTop(cx - w * 0.04f, top + h * 0.07f);
-            const juce::Point<float> rodBottom(cx + w * 0.08f, bottom - h * 0.10f);
-            g.drawLine(rodTop.x, rodTop.y, rodBottom.x, rodBottom.y, 1.8f);
-            const juce::Point<float> weightCentre(rodTop.x + (rodBottom.x - rodTop.x) * 0.55f,
-                                                  rodTop.y + (rodBottom.y - rodTop.y) * 0.55f);
-            g.fillRect(juce::Rectangle<float>(w * 0.13f, h * 0.07f).withCentre(weightCentre));
+            // Pendulum rod: from the base up, leaning right, tip poking just above the apex.
+            const juce::Point<float> rodBottom(cx - w * 0.05f, bottom - h * 0.06f);
+            const juce::Point<float> rodTop(cx + w * 0.16f, top - h * 0.06f);
+            g.drawLine(rodBottom.x, rodBottom.y, rodTop.x, rodTop.y, 2.2f);
+
+            // Weight (bob) high on the rod — a solid square like the reference.
+            const juce::Point<float> bob(rodTop.x + (rodBottom.x - rodTop.x) * 0.34f,
+                                         rodTop.y + (rodBottom.y - rodTop.y) * 0.34f);
+            g.fillRect(juce::Rectangle<float>(w * 0.17f, w * 0.13f).withCentre(bob));
         }
     }
 };
@@ -210,7 +215,7 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.setGradientFill(leftGlow);
     g.fillRect(area);
 
-    juce::ColourGradient rightGlow(theme::warm::red.withAlpha(0.10f), area.getRight(), area.getY(),
+    juce::ColourGradient rightGlow(theme::accent::brandCyan.withAlpha(0.06f), area.getRight(), area.getY(),
                                    juce::Colours::transparentBlack, area.getX() + area.getWidth() * 0.55f, area.getBottom(), false);
     g.setGradientFill(rightGlow);
     g.fillRect(area);

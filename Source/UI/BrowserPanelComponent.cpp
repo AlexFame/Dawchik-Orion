@@ -544,11 +544,43 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     const auto bar = getPreviewBarBounds();
     const auto accent = th::cool::turquoise;
 
-    // Card.
-    g.setColour(th::core::voidBlack);
-    g.fillRoundedRectangle(bar.toFloat().reduced(2.0f), 10.0f);
-    g.setColour(th::line::subtle.withAlpha(0.55f));
-    g.drawRoundedRectangle(bar.toFloat().reduced(2.0f), 10.0f, 1.0f);
+    // Glass card (same language as the timeline clips): soft outer glow, dark glass body
+    // with a diagonal gradient + sweep, and a crisp bright rim.
+    const auto cardF = bar.toFloat().reduced(2.0f);
+    const auto cardR = 10.0f;
+    {
+        juce::Path glow;
+        glow.addRoundedRectangle(cardF, cardR);
+        juce::DropShadow(juce::Colours::white.withAlpha(0.14f), 12, { 0, 0 }).drawForPath(g, glow);
+
+        const auto tint = accent.withMultipliedSaturation(1.2f);
+        juce::ColourGradient body(tint.withMultipliedBrightness(0.42f).withAlpha(0.50f),
+                                  cardF.getX(), cardF.getY(),
+                                  tint.withMultipliedBrightness(0.22f).withAlpha(0.64f),
+                                  cardF.getRight(), cardF.getBottom(), false);
+        g.setGradientFill(body);
+        g.fillRoundedRectangle(cardF, cardR);
+
+        juce::Path shape;
+        shape.addRoundedRectangle(cardF, cardR);
+        g.saveState();
+        g.reduceClipRegion(shape);
+        juce::ColourGradient sweep(juce::Colours::white.withAlpha(0.16f),
+                                   cardF.getX(), cardF.getY(),
+                                   juce::Colours::white.withAlpha(0.0f),
+                                   cardF.getX() + cardF.getWidth() * 0.55f,
+                                   cardF.getY() + cardF.getHeight() * 0.95f, false);
+        g.setGradientFill(sweep);
+        g.fillRect(cardF);
+        g.restoreState();
+
+        juce::ColourGradient rim(juce::Colours::white.withAlpha(0.6f),
+                                 cardF.getX(), cardF.getY(),
+                                 juce::Colours::white.withAlpha(0.16f),
+                                 cardF.getRight(), cardF.getBottom(), false);
+        g.setGradientFill(rim);
+        g.drawRoundedRectangle(cardF.reduced(0.5f), cardR, 1.2f);
+    }
 
     // SYNC toggle pill — sits in its own row just below the card so nothing overlaps it.
     {
@@ -622,7 +654,8 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
         const auto idx = juce::jlimit(0, n - 1, static_cast<int>(static_cast<float>(x) / waveBox.getWidth() * n));
         const auto h = juce::jmax(1.0f, previewPeaks[static_cast<std::size_t>(idx)] * halfH);
         const auto px = waveBox.getX() + x;
-        g.setColour(px <= playedX ? accent.withAlpha(0.95f) : juce::Colours::white.withAlpha(0.28f));
+        g.setColour(px <= playedX ? accent.interpolatedWith(juce::Colours::white, 0.6f).withAlpha(0.95f)
+                                  : juce::Colours::white.withAlpha(0.5f));
         g.fillRect(static_cast<float>(px), midY - h, 1.0f, h * 2.0f);
     }
 

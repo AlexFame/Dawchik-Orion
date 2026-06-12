@@ -586,27 +586,58 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             }
         }
         const auto cardBounds = layout.card.toFloat();
-        g.setColour(isSelectedTrack
-            ? trackColour.darker(0.70f).withAlpha(0.96f)
-            : juce::Colour(0xff34393e).withAlpha(0.94f));
-        g.fillRoundedRectangle(cardBounds.reduced(1.0f), 9.0f);
+        const auto cardR = 9.0f;
 
-        g.setColour(trackColour.withAlpha(0.92f));
-        g.fillRoundedRectangle(layout.card.withWidth(5).toFloat().reduced(0.0f, 1.0f), 2.5f);
+        // Header card is rounded only on the RIGHT — the left edge is square so it reads as
+        // anchored to the timeline edge.
+        const auto rightRoundedCard = [cardR](juce::Rectangle<float> r)
+        {
+            juce::Path p;
+            p.addRoundedRectangle(r.getX(), r.getY(), r.getWidth(), r.getHeight(),
+                                  cardR, cardR, false, true, false, true);
+            return p;
+        };
 
+        // Glass track header (matches the reference): translucent dark body + a soft top
+        // gloss + a crisp bright rim. Selection tints it with the track colour.
+        {
+            juce::ColourGradient cardFill(juce::Colour(0xff2c333d).withAlpha(0.58f),
+                                          cardBounds.getX(), cardBounds.getY(),
+                                          juce::Colour(0xff121821).withAlpha(0.64f),
+                                          cardBounds.getX(), cardBounds.getBottom(), false);
+            g.setGradientFill(cardFill);
+            g.fillPath(rightRoundedCard(cardBounds.reduced(1.0f)));
+        }
         if (isSelectedTrack)
         {
-            juce::ColourGradient selectedGlow(trackColour.withAlpha(0.16f), cardBounds.getX(), cardBounds.getY(),
-                                              trackColour.withAlpha(0.035f), cardBounds.getRight(), cardBounds.getBottom(), false);
-            g.setGradientFill(selectedGlow);
-            g.fillRoundedRectangle(cardBounds.reduced(2.0f), 8.0f);
+            g.setColour(trackColour.withAlpha(0.18f));
+            g.fillPath(rightRoundedCard(cardBounds.reduced(1.0f)));
         }
-        // Selected/active track gets a white border (matches the selected-clip highlight);
-        // otherwise the coloured border brightens with the signal so it's obvious which
-        // track is sounding.
-        const auto borderAlpha = isAudible ? juce::jlimit(0.58f, 0.86f, 0.58f + trackLevel * 0.36f) : 0.58f;
-        g.setColour(isSelectedTrack ? juce::Colours::white.withAlpha(0.92f) : trackColour.withAlpha(borderAlpha));
-        g.drawRoundedRectangle(cardBounds.reduced(1.0f), 9.0f, isSelectedTrack ? 2.0f : 1.2f);
+
+        // Colour spine on the left edge (square).
+        g.setColour(trackColour.withAlpha(0.92f));
+        g.fillRect(layout.card.withWidth(5).toFloat().reduced(0.0f, 1.0f));
+
+        // Top gloss reflection.
+        {
+            g.saveState();
+            g.reduceClipRegion(rightRoundedCard(cardBounds.reduced(1.0f)));
+            const auto gh = cardBounds.getHeight() * 0.5f;
+            juce::ColourGradient gloss(juce::Colours::white.withAlpha(0.10f), cardBounds.getX(), cardBounds.getY(),
+                                       juce::Colours::white.withAlpha(0.0f), cardBounds.getX(), cardBounds.getY() + gh, false);
+            g.setGradientFill(gloss);
+            g.fillRect(cardBounds.withHeight(gh));
+            g.restoreState();
+        }
+
+        // Crisp bright rim — brightest when selected, brightens with signal otherwise.
+        const auto rimTop = isSelectedTrack ? 0.9f : (isAudible ? juce::jlimit(0.45f, 0.8f, 0.45f + trackLevel * 0.35f) : 0.42f);
+        juce::ColourGradient rim(juce::Colours::white.withAlpha(rimTop),
+                                 cardBounds.getX(), cardBounds.getY(),
+                                 juce::Colours::white.withAlpha(rimTop * 0.35f),
+                                 cardBounds.getX(), cardBounds.getBottom(), false);
+        g.setGradientFill(rim);
+        g.strokePath(rightRoundedCard(cardBounds.reduced(1.0f)), juce::PathStrokeType(isSelectedTrack ? 1.6f : 1.0f));
 
         // Folder collapse triangle (▾ open / ▸ collapsed) + a coloured spine down children.
         if (tracks[trackArrayIndex].isFolder && ! layout.collapseTriangle.isEmpty())
@@ -781,6 +812,17 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                                                             static_cast<float>(clipHeaderHeight));
 
             const auto isSelected = isClipSelected(SelectedClip { trackIndex, clipIndex });
+
+            // Soft outer glow (floating halo) — drawn before the clip is clipped to its
+            // own bounds so the glow can spill outside the edges.
+            if (clipBounds.getHeight() > 14.0f)
+            {
+                juce::Path glowPath;
+                glowPath.addRoundedRectangle(clipBounds.expanded(1.0f), 10.0f);
+                juce::DropShadow(juce::Colours::white.withAlpha(isSelected ? 0.30f : 0.20f),
+                                 14, { 0, 0 }).drawForPath(g, glowPath);
+            }
+
             g.saveState();
             g.reduceClipRegion(clipBoundsInt);
 
@@ -791,18 +833,21 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto clipBase   = variant.base;
             const auto gradTop    = isSelected ? variant.gradientTop.interpolatedWith(juce::Colours::white, 0.34f) : variant.gradientTop;
             const auto gradBottom = isSelected ? variant.gradientBottom.interpolatedWith(juce::Colours::white, 0.24f) : variant.gradientBottom;
-            const auto waveformColour = variant.waveform.withAlpha(isSelected ? 0.78f : 0.92f);
+            // Bright, glowing waveform like the glass reference (light tint of the clip
+            // colour rather than the dark waveform variant).
+            const auto waveformColour = clip.colour.interpolatedWith(juce::Colours::white, 0.62f).withAlpha(0.95f);
 
             {
-                juce::ColourGradient bodyGradient(gradTop, clipBounds.getX(), clipBounds.getY(),
-                                                  gradBottom, clipBounds.getX(), clipBounds.getBottom(), false);
-                g.setGradientFill(bodyGradient);
+                juce::ignoreUnused(gradTop, gradBottom);
+                // Glass body: a diagonal gradient (brighter top-left → deeper bottom-right),
+                // saturated so the track colour stays vivid through the glass.
+                const auto tint = clip.colour.withMultipliedSaturation(1.25f);
+                const auto tl = tint.withMultipliedBrightness(1.02f).withAlpha(0.80f);
+                const auto br = tint.withMultipliedBrightness(0.58f).withAlpha(0.86f);
+                juce::ColourGradient body(tl, clipBounds.getX(), clipBounds.getY(),
+                                          br, clipBounds.getRight(), clipBounds.getBottom(), false);
+                g.setGradientFill(body);
                 g.fillRoundedRectangle(clipBounds, 10.0f);
-                if (isSelected)
-                {
-                    g.setColour(juce::Colours::white.withAlpha(0.14f));
-                    g.fillRoundedRectangle(clipBounds.reduced(1.0f), 9.0f);
-                }
             }
 
             // Studio One-style header strip: a darker band at the top where the clip
@@ -929,6 +974,36 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             {
                 g.setColour(juce::Colours::white.withAlpha(0.92f));
                 g.drawRoundedRectangle(clipBounds.reduced(1.2f, 1.2f), 8.8f, 2.2f);
+            }
+
+            // --- Glass treatment (on top of header/waveform/outline) ---
+            if (clipBounds.getHeight() > 14.0f)
+            {
+                juce::Path glassShape;
+                glassShape.addRoundedRectangle(clipBounds, 10.0f);
+                g.saveState();
+                g.reduceClipRegion(glassShape);
+
+                // Diagonal glossy sweep — the signature reflection of glassmorphism. A soft
+                // bright wash from the top-left, plus a crisper diagonal streak through the
+                // upper portion.
+                juce::ColourGradient sweep(juce::Colours::white.withAlpha(0.22f),
+                                           clipBounds.getX(), clipBounds.getY(),
+                                           juce::Colours::white.withAlpha(0.0f),
+                                           clipBounds.getX() + clipBounds.getWidth() * 0.55f,
+                                           clipBounds.getY() + clipBounds.getHeight() * 0.95f, false);
+                g.setGradientFill(sweep);
+                g.fillRect(clipBounds);
+                g.restoreState();
+
+                // Crisp thin rim — brightest at the top-left (lit edge), fading to the
+                // bottom-right, like the reference.
+                juce::ColourGradient rim(juce::Colours::white.withAlpha(0.9f),
+                                         clipBounds.getX(), clipBounds.getY(),
+                                         juce::Colours::white.withAlpha(0.22f),
+                                         clipBounds.getRight(), clipBounds.getBottom(), false);
+                g.setGradientFill(rim);
+                g.drawRoundedRectangle(clipBounds.reduced(0.75f), 9.5f, 1.2f);
             }
 
             // Fade in/out overlays (Studio One style). The curve shows the gain ramp;
@@ -2900,6 +2975,7 @@ void ArrangementTimelineComponent::timerCallback()
             }
         }
     }
+
     repaint();
 }
 
