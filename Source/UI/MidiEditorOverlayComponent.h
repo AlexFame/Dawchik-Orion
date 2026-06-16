@@ -34,6 +34,11 @@ public:
     std::function<void(bool)> onScaleLockChanged; // fired when the in-editor toggle is flipped
     std::function<void(int, int)> onPreviewNoteOn;
     std::function<void(int)> onPreviewNoteOff;
+    std::function<void(double)> onStartGlobalSpacePreview;
+    std::function<void()> onStopGlobalSpacePreview;
+    // A short space TAP promotes the running preview into normal playback (keeps playing,
+    // no rewind); a HOLD stops on release. This commits the tap case.
+    std::function<void()> onCommitGlobalSpacePreview;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -134,6 +139,19 @@ private:
         resizeEnd
     };
 
+    enum class PianoRollTool
+    {
+        select,
+        draw,
+        cut,
+        erase,
+        quantize,
+        velocity,
+        slide,
+        step,
+        audition
+    };
+
     struct SlideHit
     {
         int slideIndex { -1 };
@@ -151,6 +169,8 @@ private:
 
     void buttonClicked(juce::Button* button) override;
     juce::Rectangle<int> getTopBarBounds() const noexcept;
+    juce::Rectangle<int> getEditToolbarBounds() const noexcept;
+    juce::Rectangle<int> getToolButtonBounds(int index) const noexcept;
     juce::Rectangle<int> getKeyboardBounds() const noexcept;
     juce::Rectangle<int> getGridBounds() const noexcept;
     juce::Rectangle<int> getVelocityLaneBounds() const noexcept;
@@ -196,6 +216,11 @@ private:
     void showScaleMenu();
     void showSnapMenu();
     void showStepLengthMenu();
+    void paintEditToolbar(juce::Graphics& g);
+    bool handleEditToolbarClick(juce::Point<int> position);
+    bool splitNoteAtPoint(juce::Point<int> position);
+    bool auditionNoteAtPoint(juce::Point<int> position);
+    void setPianoRollTool(PianoRollTool tool);
     bool updateLiveKeyboardPitches();
     bool updateStepWriteKeyboardPitches();
     void commitStepWritePendingChord();
@@ -217,6 +242,13 @@ private:
     void releaseLiveKeyboardPitches();
     void auditionPlacedNote(int pitch, int velocity);
     void releasePlacedNotePreview();
+    bool isTextInputFocused() const noexcept;
+    bool canStartGlobalSpacePreview() const noexcept;
+    bool startGlobalSpacePreviewFromMouse();
+    // Hold-Command preview: starts from the hovered beat (or the playhead if the mouse isn't
+    // over the grid) and plays while Cmd is held.
+    bool startGlobalSpacePreviewHeld();
+    void stopGlobalSpacePreview();
 
     juce::String trackName;
     juce::String clipName;
@@ -229,12 +261,19 @@ private:
     std::optional<int> mousePreviewPitch;
     std::optional<int> placedNotePreviewPitch;
     double placedNotePreviewOffMs { 0.0 };
+    std::optional<double> hoveredGridBeat;
+    bool globalSpacePreviewActive { false };
+    // Hold-Command preview: start is debounced so Cmd+key shortcuts (Cmd+Z…) don't blip it.
+    bool cmdWasDown { false };
+    bool cmdPreviewPending { false };
+    juce::uint32 cmdDownMs { 0 };
     std::optional<NoteHit> hoverNote;
     std::optional<NoteDragState> noteDragState;
     std::optional<MarqueeState> marqueeState;
     std::optional<VelocityDragState> velocityDragState;
     std::optional<SlideDrawState> slideDrawState;
     std::optional<SlideEditState> slideEditState;
+    PianoRollTool currentTool { PianoRollTool::select };
 
     juce::Label titleLabel;
     juce::Label subtitleLabel;

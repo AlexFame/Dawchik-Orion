@@ -165,11 +165,17 @@ add_custom_command(
 )
 
 if(APPLE)
+    # Sign with a STABLE code-signing identity (not ad-hoc) so macOS privacy (TCC)
+    # remembers folder-access grants across rebuilds instead of re-prompting every time.
+    # Defaults to the local Apple Development cert; override with -DORION_CODESIGN_IDENTITY=...
+    # ("-" forces ad-hoc).
+    set(ORION_CODESIGN_IDENTITY "85A371FB83A1D2DB4B026A765BCE16CA397C69A5"
+        CACHE STRING "codesign identity for Orion.app")
     add_custom_command(
         TARGET Orion
         POST_BUILD
-        COMMAND /usr/bin/codesign --force --deep --sign - --identifier "${ORION_BUNDLE_ID}" "$<TARGET_BUNDLE_DIR:Orion>"
-        COMMENT "Ad-hoc signing Orion.app with stable bundle id for macOS privacy permissions"
+        COMMAND /usr/bin/codesign --force --deep --sign "${ORION_CODESIGN_IDENTITY}" --identifier "${ORION_BUNDLE_ID}" "$<TARGET_BUNDLE_DIR:Orion>"
+        COMMENT "Signing Orion.app with a stable identity for persistent macOS privacy permissions"
         VERBATIM
     )
 endif()

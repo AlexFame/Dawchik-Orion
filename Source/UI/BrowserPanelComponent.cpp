@@ -544,42 +544,21 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     const auto bar = getPreviewBarBounds();
     const auto accent = th::cool::turquoise;
 
-    // Glass card (same language as the timeline clips): soft outer glow, dark glass body
-    // with a diagonal gradient + sweep, and a crisp bright rim.
+    // Clean Studio One card: a solid dark vertical-gradient body with a simple border.
+    // No glass, no sweep, no glow.
     const auto cardF = bar.toFloat().reduced(2.0f);
     const auto cardR = 10.0f;
     {
-        juce::Path glow;
-        glow.addRoundedRectangle(cardF, cardR);
-        juce::DropShadow(juce::Colours::white.withAlpha(0.14f), 12, { 0, 0 }).drawForPath(g, glow);
-
-        const auto tint = accent.withMultipliedSaturation(1.2f);
-        juce::ColourGradient body(tint.withMultipliedBrightness(0.42f).withAlpha(0.50f),
+        const auto tint = accent.withMultipliedSaturation(1.05f);
+        juce::ColourGradient body(tint.withMultipliedBrightness(0.34f),
                                   cardF.getX(), cardF.getY(),
-                                  tint.withMultipliedBrightness(0.22f).withAlpha(0.64f),
-                                  cardF.getRight(), cardF.getBottom(), false);
+                                  tint.withMultipliedBrightness(0.20f),
+                                  cardF.getX(), cardF.getBottom(), false);
         g.setGradientFill(body);
         g.fillRoundedRectangle(cardF, cardR);
 
-        juce::Path shape;
-        shape.addRoundedRectangle(cardF, cardR);
-        g.saveState();
-        g.reduceClipRegion(shape);
-        juce::ColourGradient sweep(juce::Colours::white.withAlpha(0.16f),
-                                   cardF.getX(), cardF.getY(),
-                                   juce::Colours::white.withAlpha(0.0f),
-                                   cardF.getX() + cardF.getWidth() * 0.55f,
-                                   cardF.getY() + cardF.getHeight() * 0.95f, false);
-        g.setGradientFill(sweep);
-        g.fillRect(cardF);
-        g.restoreState();
-
-        juce::ColourGradient rim(juce::Colours::white.withAlpha(0.6f),
-                                 cardF.getX(), cardF.getY(),
-                                 juce::Colours::white.withAlpha(0.16f),
-                                 cardF.getRight(), cardF.getBottom(), false);
-        g.setGradientFill(rim);
-        g.drawRoundedRectangle(cardF.reduced(0.5f), cardR, 1.2f);
+        g.setColour(juce::Colours::white.withAlpha(0.12f));
+        g.drawRoundedRectangle(cardF.reduced(0.5f), cardR, 1.0f);
     }
 
     // SYNC toggle pill — sits in its own row just below the card so nothing overlaps it.

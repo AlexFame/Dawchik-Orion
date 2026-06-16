@@ -112,11 +112,29 @@ private:
         int clipIndex { -1 };
     };
 
-    // Visible tool palette (top-left corner). Pointer = select/move/trim, Knife = split.
+    // Visible tool palette (top-left corner).
     enum class ToolMode
     {
-        pointer,
-        knife
+        select,
+        range,
+        split,
+        trim,
+        stretch,
+        fade,
+        draw,
+        mute,
+        erase,
+        audition
+    };
+
+    enum class SplitSnapMode
+    {
+        smart,
+        bar,
+        beat,
+        halfBeat,
+        quarterBeat,
+        free
     };
 
     enum class DragMode
@@ -268,16 +286,32 @@ private:
     double xToBeatDelta(int xDelta) const noexcept;
     int trackIndexFromY(int y) const noexcept;
     double snapBeatValue(double beat) const noexcept;
+    double snapClipCreationBeat(double beat) const noexcept;
     bool canClipLiveOnTrack(const TimelineClip& clip, int trackIndex) const noexcept;
     void moveSelectedClipToTrack(int targetTrackIndex);
     // Splits a clip at an absolute timeline beat into two clips (non-destructive).
     // Returns true if a split happened. splitBeat must lie strictly inside the clip.
     bool splitClipAtBeat(int trackIndex, int clipIndex, double splitBeat);
+    double snapSplitBeatToClipEdge(double splitBeat, const TimelineClip& clip) const noexcept;
+    double snapSplitBeatForClip(double splitBeat, const TimelineClip& clip) const noexcept;
+    double getSplitSnapStepInBeats() const noexcept;
+    juce::String getSplitSnapName() const;
     // Splits every selected clip (or the clip under the playhead) at the playhead.
     void splitSelectionAtPlayhead();
-    // Bounds of tool-palette button `index` (0 = pointer, 1 = knife) in the corner.
+    // Ableton-style split: split at the last clicked beat inside the selected clip.
+    // Falls back to the playhead when no focused beat is available.
+    void splitSelectionAtFocusedBeat();
+    juce::Rectangle<int> getEditToolbarBounds() const noexcept;
+    // Bounds of edit-toolbar button `index`:
+    // 0 Cursor, 1 Range, 2 Cut, 3 Trim, 4 Stretch, 5 Draw, 6 Mute, 7 Erase, 8 Audition.
     juce::Rectangle<int> getToolButtonBounds(int index) const noexcept;
+    juce::Rectangle<int> getSplitSnapButtonBounds() const noexcept;
     void paintToolPalette(juce::Graphics& g);
+    bool handleEditToolbarClick(juce::Point<int> position);
+    void showSplitSnapMenu();
+    bool duplicateSelectedClip();
+    bool deleteSelectedClips();
+    bool loopToSelectedClip();
     void pushUndoSnapshot();
     void restoreSnapshot(const TimelineSnapshot& snapshot);
     bool hasTimelineChangedSince(const TimelineSnapshot& snapshot) const noexcept;
@@ -342,6 +376,8 @@ private:
     juce::TextEditor trackVolumeInlineEditor;
     std::optional<int> volumeEditorTrackIndex;
     std::optional<ClipHit> hoverClip;
+    std::optional<double> focusedSplitBeat;
+    std::optional<double> knifePreviewBeat;
     std::vector<TimelineSnapshot> undoStack;
     std::vector<TimelineSnapshot> redoStack;
     
@@ -362,7 +398,8 @@ private:
     // opens/closes smoothly via browserAppendAnim (0..1), driven by the timer.
     bool  browserAppendActive { false };
     float browserAppendAnim { 0.0f };
-    ToolMode currentTool { ToolMode::pointer };
+    ToolMode currentTool { ToolMode::select };
+    SplitSnapMode splitSnapMode { SplitSnapMode::smart };
 
     int liveWaveformTrack { -1 };
     int liveWaveformClip { -1 };

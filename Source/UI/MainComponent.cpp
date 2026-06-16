@@ -1773,6 +1773,9 @@ MainComponent::MainComponent()
     };
     midiEditorOverlay.onRequestPlayheadBeat = [this]() { return transportEngine.getPlayheadBeat(); };
     midiEditorOverlay.onRequestPlayingState = [this]() { return transportEngine.isPlaying(); };
+    midiEditorOverlay.onStartGlobalSpacePreview = [this](double startBeat) { startGlobalSpacePreview(startBeat); };
+    midiEditorOverlay.onStopGlobalSpacePreview = [this]() { stopGlobalSpacePreview(); };
+    midiEditorOverlay.onCommitGlobalSpacePreview = [this]() { commitGlobalSpacePreview(); };
     arrangementTimeline.onMidiClipDoubleClick = [this](int trackIndex, int clipIndex)
     {
         auto& track = projectState.getTracks()[static_cast<std::size_t>(trackIndex)];
@@ -2489,8 +2492,11 @@ void MainComponent::mouseUp(const juce::MouseEvent&)
 
 bool MainComponent::keyPressed(const juce::KeyPress& key)
 {
-    if (midiEditorOverlay.isVisible() && midiEditorOverlay.keyPressed(key))
+    if (midiEditorOverlay.isVisible() && midiEditorOverlay.hasKeyboardFocus(true) && midiEditorOverlay.keyPressed(key))
         return true;
+
+    if (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+        return false;
 
     if (mixerPanel.isVisible() && key == juce::KeyPress::escapeKey)
     {
@@ -2506,6 +2512,35 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
     if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyPressed(key))
         return true;
+
+    if (key == juce::KeyPress('r', juce::ModifierKeys::commandModifier, 0))
+    {
+        const auto selectedTrackIndex = arrangementTimeline.getSelectedTrackIndex();
+        bool shouldRecord = ! transportEngine.isRecordArmed();
+
+        if (selectedTrackIndex.has_value())
+        {
+            auto& tracks = projectState.getTracks();
+            if (*selectedTrackIndex >= 0 && *selectedTrackIndex < static_cast<int>(tracks.size()))
+            {
+                auto& track = tracks[static_cast<std::size_t>(*selectedTrackIndex)];
+                shouldRecord = ! (track.recordArmed && transportEngine.isRecordArmed());
+                track.recordArmed = shouldRecord;
+                arrangementTimeline.repaint();
+                mixerPanel.repaint();
+            }
+        }
+
+        transportController.setRecordArmed(shouldRecord);
+        if (! transportEngine.isRecordArmed())
+        {
+            finalizeRecordingClip();
+            finalizeAudioRecordingClip();
+        }
+        recordButton.setToggleState(transportEngine.isRecordArmed(), juce::dontSendNotification);
+        updateTransportLabels();
+        return true;
+    }
 
     if (key == juce::KeyPress::returnKey)
     {
@@ -2542,8 +2577,8 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
 bool MainComponent::keyStateChanged(bool isKeyDown)
 {
-    if (midiEditorOverlay.isVisible())
-        midiEditorOverlay.keyStateChanged(isKeyDown);
+    if (midiEditorOverlay.isVisible() && midiEditorOverlay.keyStateChanged(isKeyDown))
+        return true;
 
     if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyStateChanged(isKeyDown))
         return true;
@@ -2553,6 +2588,7 @@ bool MainComponent::keyStateChanged(bool isKeyDown)
 
 void MainComponent::resetToPlaylistView()
 {
+    stopGlobalSpacePreview();
     midiEditorOverlay.setVisible(false);
     samplerPanel.setVisible(false);
     resized();
@@ -2834,26 +2870,51 @@ void MainComponent::timerCallback()
         {
             finalizeRecordingClip();
             const auto playheadBeat = transportEngine.getPlayheadBeat();
-            const auto clipStart    = std::floor(playheadBeat);
             auto& track = tracks[static_cast<std::size_t>(armedTrack)];
             arrangementTimeline.captureUndoSnapshot();
-            track.clips.push_back(TimelineClip {
-                "Recording",
-                ClipType::midi,
-                clipStart,
-                juce::jmax(0.25, playheadBeat - clipStart),
-                track.colour.brighter(0.1f),
-                {}, {}, "", 0.0, false, false,
-                0.0, 0.0, 0,
-                false, false, 0.0,
-                -1, false, true
-            });
-            track.clips.back().recording = true;
+
+            // Overdub: if the playhead is inside an existing MIDI clip on this track, record
+            // INTO it (merge the new notes) instead of stacking a separate overlapping clip.
+            int targetClip = -1;
+            for (int i = 0; i < static_cast<int>(track.clips.size()); ++i)
+            {
+                const auto& c = track.clips[i];
+                if (c.type == ClipType::midi
+                    && playheadBeat >= c.startBeat - 1.0e-6
+                    && playheadBeat < c.startBeat + c.lengthInBeats - 1.0e-6)
+                {
+                    targetClip = i;
+                    break;
+                }
+            }
+
             RecordingSession session;
-            session.trackIndex    = armedTrack;
-            session.clipIndex     = static_cast<int>(track.clips.size()) - 1;
-            session.clipStartBeat = clipStart;
-            recordingSession      = std::move(session);
+            session.trackIndex = armedTrack;
+            if (targetClip >= 0)
+            {
+                track.clips[static_cast<std::size_t>(targetClip)].recording = true;
+                session.clipIndex     = targetClip;
+                session.clipStartBeat = track.clips[static_cast<std::size_t>(targetClip)].startBeat;
+            }
+            else
+            {
+                const auto clipStart = std::floor(playheadBeat);
+                track.clips.push_back(TimelineClip {
+                    "Recording",
+                    ClipType::midi,
+                    clipStart,
+                    juce::jmax(0.25, playheadBeat - clipStart),
+                    track.colour.brighter(0.1f),
+                    {}, {}, "", 0.0, false, false,
+                    0.0, 0.0, 0,
+                    false, false, 0.0,
+                    -1, false, true
+                });
+                track.clips.back().recording = true;
+                session.clipIndex     = static_cast<int>(track.clips.size()) - 1;
+                session.clipStartBeat = clipStart;
+            }
+            recordingSession = std::move(session);
         }
 
         // (b) Live-grow the clip so it sweeps with the playhead — but snap the visible
@@ -4419,6 +4480,73 @@ void MainComponent::updateClipEditorPreviewPlayhead()
     // full-output-duration, which lands inside the live loop region.
     const auto position = clipEditorPreviewTransportSource.getCurrentPosition();
     clipEditorPreviewPlayheadRatio = juce::jlimit(0.0, 1.0, position / clipEditorLocalPreviewDurationSeconds);
+}
+
+void MainComponent::startGlobalSpacePreview(double startBeat)
+{
+    if (! globalSpacePreviewRestoreBeat.has_value())
+    {
+        globalSpacePreviewRestoreBeat = transportEngine.getPlayheadBeat();
+        globalSpacePreviewWasRecordArmed = transportEngine.isRecordArmed();
+    }
+
+    stopBrowserPreview(true);
+    stopClipEditorPreview(true);
+
+    // NB: do NOT panic the instruments here. allInstrumentNotesOff() starts a 3-block panic
+    // that skips clip note-ons, which dropped the very first note when the preview started
+    // right before it. (Stop still panics to silence the tail.)
+
+    transportEngine.pause();
+    transportController.setRecordArmed(false);
+    transportEngine.setPlayheadBeat(startBeat);
+
+    if (arrangementPlaybackSource != nullptr)
+    {
+        if (arrangementPlaybackSource->isRealtimeWarpEnabled())
+            arrangementPlaybackSource->prepareWarpStreams();
+        else
+            arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+
+        arrangementPlaybackSource->syncToTransportPosition();
+    }
+
+    transportEngine.play(false);
+    updateTransportLabels();
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::commitGlobalSpacePreview()
+{
+    // A space TAP turns the momentary preview into normal playback: keep playing and drop
+    // the rewind anchor so it doesn't snap back.
+    globalSpacePreviewRestoreBeat.reset();
+    updateTransportLabels();
+}
+
+void MainComponent::stopGlobalSpacePreview()
+{
+    if (! globalSpacePreviewRestoreBeat.has_value())
+        return;
+
+    transportEngine.pause();
+
+    if (arrangementPlaybackSource != nullptr)
+    {
+        arrangementPlaybackSource->allSamplerNotesOff();
+        arrangementPlaybackSource->allInstrumentNotesOff();
+    }
+
+    const auto restoreBeat = *globalSpacePreviewRestoreBeat;
+    globalSpacePreviewRestoreBeat.reset();
+    transportController.setRecordArmed(globalSpacePreviewWasRecordArmed);
+    transportEngine.setPlayheadBeat(restoreBeat);
+
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->syncToTransportPosition();
+
+    updateTransportLabels();
+    arrangementTimeline.repaint();
 }
 
 void MainComponent::toggleTransportFromUi()

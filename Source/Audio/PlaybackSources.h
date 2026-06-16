@@ -674,14 +674,43 @@ public:
 
         if (! transport.isPlaying())
         {
-            currentTimelineBeat = transport.getPlayheadBeat();
-            wasPlaying = false;
+            const auto beatsPerSecondStopped = project.getTempoBpm() / 60.0;
+
+            // Falling edge: start a short fade-out tail from the last playing position so the
+            // arrangement audio doesn't cut with a click.
+            if (wasPlaying)
+            {
+                declickRemaining = juce::jmax(1, static_cast<int>(outputSampleRate * 0.006));
+                declickTotal = declickRemaining;
+                wasPlaying = false;
+            }
+
+            if (declickRemaining > 0 && beatsPerSecondStopped > 0.0)
+            {
+                const int n = juce::jmin(info.numSamples, declickRemaining);
+                const auto loopActive = transport.isLoopEnabled() && project.hasLoopRange();
+                // Audio clips only (includeInstruments=false) — re-triggering MIDI here would
+                // fire note-ons with no matching note-off and leave stuck/ringing notes.
+                renderAudioIntoBuffer(*info.buffer, info.startSample, n, currentTimelineBeat, outputSampleRate, loopActive, ! loopActive, true, false);
+                const auto g0 = static_cast<float>(declickRemaining) / static_cast<float>(declickTotal);
+                const auto g1 = static_cast<float>(declickRemaining - n) / static_cast<float>(declickTotal);
+                for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
+                    info.buffer->applyGainRamp(ch, info.startSample, n, g0, g1);
+                currentTimelineBeat += static_cast<double>(n) * beatsPerSecondStopped / outputSampleRate;
+                declickRemaining -= n;
+            }
+            else
+            {
+                currentTimelineBeat = transport.getPlayheadBeat();
+            }
+
             samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
             processInstruments(*info.buffer, info.startSample, info.numSamples,
-                               currentTimelineBeat, project.getTempoBpm() / 60.0,
+                               currentTimelineBeat, beatsPerSecondStopped,
                                false, true, false);
             return;
         }
+        declickRemaining = 0;   // playing again — cancel any pending fade tail
 
         const auto beatsPerSecond = project.getTempoBpm() / 60.0;
         if (beatsPerSecond <= 0.0)
@@ -1042,7 +1071,8 @@ private:
                                double renderSampleRate,
                                bool wrapToLoop,
                                bool wrapToProjectEnd,
-                               bool isRealtime)
+                               bool isRealtime,
+                               bool includeInstruments = true)
     {
         // Flush-to-zero: stretched/reverb tails produce denormal floats which are ~100x
         // slower to process on x86. Without this, routing through an extra bus buffer (e.g.
@@ -1456,9 +1486,10 @@ private:
 
         // Render any hosted VST instruments for this block (clip notes + live keyboard).
         // Pass the loop/project wrap context so notes at the loop start fire on every repeat.
-        processInstruments(targetBuffer, startSample, numSamples, blockStartBeat, beatsPerSecond,
-                           true, isRealtime, anySoloActive,
-                           wrapToLoop, wrapToProject, loopStartBeat, loopEndBeat, repeatEndBeat);
+        if (includeInstruments)
+            processInstruments(targetBuffer, startSample, numSamples, blockStartBeat, beatsPerSecond,
+                               true, isRealtime, anySoloActive,
+                               wrapToLoop, wrapToProject, loopStartBeat, loopEndBeat, repeatEndBeat);
 
         // Master insert chain: process the full arrangement mix (tracks + buses + instruments)
         // through the master inserts, pre-fader (the master gain/meter live downstream).
@@ -1846,6 +1877,9 @@ private:
     int preparedBlockSize { 512 };
     double currentTimelineBeat { 0.0 };
     bool wasPlaying { false };
+    // Short fade-out tail rendered when playback stops, so the arrangement doesn't click.
+    int declickRemaining { 0 };
+    int declickTotal { 1 };
     std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
     juce::CriticalSection warpCacheLock;   // guards warpedAudioCache (audio vs message thread)

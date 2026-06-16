@@ -122,6 +122,9 @@ private:
     double getCurrentPluginSampleRate() const noexcept;
     int getCurrentPluginBlockSize() const noexcept;
     void stopBrowserPreview(bool resetPosition);
+    void startGlobalSpacePreview(double startBeat);
+    void stopGlobalSpacePreview();
+    void commitGlobalSpacePreview();   // space tap → keep playing as normal (no rewind)
     void toggleTransportFromUi();
     void stopTransportFromUi();
     void rewindTransportFromUi();
@@ -284,6 +287,8 @@ private:
     juce::AudioFormatManager audioFormatManager;
     juce::AudioDeviceManager audioDeviceManager;
     juce::StringArray activeMidiInputDeviceIds;   // devices we've attached note callbacks to
+    std::optional<double> globalSpacePreviewRestoreBeat;
+    bool globalSpacePreviewWasRecordArmed { false };
     juce::StringArray seenMidiInputDeviceIds;     // devices auto-enabled once (plug-and-play)
     int midiDeviceRescanCounter { 0 };            // throttles hot-plug rescans in timerCallback
     juce::AudioSourcePlayer previewSourcePlayer;

@@ -37,6 +37,7 @@ constexpr double maximumVerticalZoom = 3.0;
 constexpr double maximumAutoFocusVerticalZoom = 1.45;
 constexpr double minimumSlidePointBeatDistance = 0.02;
 constexpr double placedNoteAuditionMs = 180.0;
+constexpr int pianoRollToolButtonCount = 9;
 
 struct ScalePattern
 {
@@ -64,6 +65,32 @@ constexpr std::array<SnapSetting, 5> snapSettings {{
     { "1/32", 0.125 },
     { "1/64", 0.0625 },
 }};
+
+struct PianoRollToolInfo
+{
+    const char* name;
+    const char* shortcut;
+};
+
+PianoRollToolInfo getPianoRollToolInfo(int index) noexcept
+{
+    static constexpr std::array<PianoRollToolInfo, pianoRollToolButtonCount> tools {{
+        { "Select", "Cmd+V" },
+        { "Draw", "Cmd+Shift+D" },
+        { "Cut", "Cmd+B" },
+        { "Erase", "Cmd+Shift+E" },
+        { "Quantize", "Option+Q" },
+        { "Velocity", "Cmd+Shift+V" },
+        { "Slide", "Cmd+Shift+S" },
+        { "Step", "Cmd+Shift+W" },
+        { "Audition", "Cmd+Shift+A" }
+    }};
+
+    if (index < 0 || index >= static_cast<int>(tools.size()))
+        return { "", "" };
+
+    return tools[static_cast<std::size_t>(index)];
+}
 
 	std::optional<int> pitchForTypingKeyCode(int keyCode)
 	{
@@ -154,7 +181,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     quantizeButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
     quantizeButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     quantizeButton.addListener(this);
-    addAndMakeVisible(quantizeButton);
+    addChildComponent(quantizeButton);
 
     slidePenButton.setButtonText("Slide Pen");
     slidePenButton.setClickingTogglesState(true);
@@ -164,7 +191,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     slidePenButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     slidePenButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
     slidePenButton.addListener(this);
-    addAndMakeVisible(slidePenButton);
+    addChildComponent(slidePenButton);
 
     slideVisibilityButton.setButtonText(getSlideVisibilityName());
     slideVisibilityButton.setTooltip("Cycle slide visibility: Ghost, Active, Off");
@@ -181,7 +208,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     stepWriteButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     stepWriteButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
     stepWriteButton.addListener(this);
-    addAndMakeVisible(stepWriteButton);
+    addChildComponent(stepWriteButton);
 
     stepLengthButton.setTooltip("Step Write length");
     stepLengthButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
@@ -250,7 +277,9 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     releaseLiveKeyboardPitches();
     releaseMousePreviewPitch();
     releasePlacedNotePreview();
+    stopGlobalSpacePreview();
     hoverNote.reset();
+    hoveredGridBeat.reset();
     noteDragState.reset();
     marqueeState.reset();
     velocityDragState.reset();
@@ -278,6 +307,7 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     stepWritePendingVelocities.clear();
     focusModeEnabled = false;
     slidePenEnabled = false;
+    currentTool = PianoRollTool::select;
     slideVisibilityMode = SlideVisibilityMode::ghost;
     hasStoredViewportBeforeFocus = false;
     ignoreNextMouseDown = false;
@@ -300,12 +330,14 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
 void MidiEditorOverlayComponent::closeEditor()
 {
     commitStepWritePendingChord();
+    stopGlobalSpacePreview();
     releaseLiveKeyboardPitches();
     releaseMousePreviewPitch();
     releasePlacedNotePreview();
     setVisible(false);
     clearSelection();
     hoverNote.reset();
+    hoveredGridBeat.reset();
     noteDragState.reset();
     marqueeState.reset();
     velocityDragState.reset();
@@ -336,6 +368,32 @@ void MidiEditorOverlayComponent::timerCallback()
         && juce::Time::getMillisecondCounterHiRes() >= placedNotePreviewOffMs)
     {
         releasePlacedNotePreview();
+    }
+
+    // Hold-Command preview, polled here so it works even without keyboard focus (just
+    // hovering the editor). Cmd down arms a debounced start; Cmd up ends it; a Cmd+key
+    // shortcut cancels it via keyPressed.
+    {
+        const bool cmdDown = isShowing() && juce::ModifierKeys::getCurrentModifiers().isCommandDown();
+        if (cmdDown && ! cmdWasDown)
+        {
+            cmdDownMs = juce::Time::getMillisecondCounter();
+            cmdPreviewPending = true;
+        }
+        else if (! cmdDown)
+        {
+            cmdPreviewPending = false;
+            if (globalSpacePreviewActive)
+                stopGlobalSpacePreview();
+        }
+        cmdWasDown = cmdDown;
+
+        if (cmdPreviewPending && ! globalSpacePreviewActive && cmdDown
+            && juce::Time::getMillisecondCounter() - cmdDownMs >= 180)
+        {
+            cmdPreviewPending = false;
+            startGlobalSpacePreviewHeld();
+        }
     }
 
     if (! isVisible())
@@ -370,6 +428,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     g.drawRoundedRectangle(keyboardArea.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(visibleGrid.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(velocityLane.toFloat(), 16.0f, 1.0f);
+    paintEditToolbar(g);
 
     const auto laneHeight = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
     const auto visibleBeatRange = getVisibleBeatRange();
@@ -737,16 +796,19 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         }
     }
 
-    // Solid clip-end line so the boundary is crystal-clear.
+    // Clip-end boundary. Keep it visually distinct from the red playhead.
     if (activeClipLengthBeats > 0.0)
     {
         const auto clipEndX = static_cast<float>(gridArea.getX() + (activeClipLengthBeats * pixelsPerBeat) - scrollX);
         if (clipEndX >= static_cast<float>(visibleGrid.getX() - 4)
             && clipEndX <= static_cast<float>(visibleGrid.getRight() + 4))
         {
-            g.setColour(theme::warm::red.withAlpha(0.88f));
+            g.setColour(theme::core::voidBlack.withAlpha(0.36f));
+            g.drawLine(clipEndX + 1.0f, static_cast<float>(visibleGrid.getY()),
+                       clipEndX + 1.0f, static_cast<float>(visibleGrid.getBottom()), 2.0f);
+            g.setColour(theme::line::strong.withAlpha(0.62f));
             g.drawLine(clipEndX, static_cast<float>(visibleGrid.getY()),
-                       clipEndX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
+                       clipEndX, static_cast<float>(visibleGrid.getBottom()), 1.1f);
         }
     }
 
@@ -848,15 +910,20 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     {
         const auto playheadX = static_cast<float>(gridArea.getX())
             + static_cast<float>((localBeat * pixelsPerBeat) - scrollX);
+        const auto lineColour = globalSpacePreviewActive ? theme::cool::aqua : playheadColour;
 
-        juce::ColourGradient gradient(playheadColour.withAlpha(0.0f), playheadX - 8.0f, 0.0f,
-                                      playheadColour.withAlpha(0.0f), playheadX + 8.0f, 0.0f, false);
-        gradient.addColour(0.5, playheadColour.withAlpha(livePlayingState ? 0.35f : 0.15f));
+        juce::ColourGradient gradient(lineColour.withAlpha(0.0f), playheadX - 8.0f, 0.0f,
+                                      lineColour.withAlpha(0.0f), playheadX + 8.0f, 0.0f, false);
+        gradient.addColour(0.5, lineColour.withAlpha(globalSpacePreviewActive ? 0.42f : (livePlayingState ? 0.35f : 0.15f)));
         g.setGradientFill(gradient);
         g.fillRect(playheadX - 8.0f, static_cast<float>(visibleGrid.getY()), 16.0f, static_cast<float>(visibleGrid.getHeight()));
 
-        g.setColour(playheadColour.withAlpha(livePlayingState ? 0.95f : 0.75f));
-        g.drawLine(playheadX, static_cast<float>(visibleGrid.getY()), playheadX, static_cast<float>(visibleGrid.getBottom()), 2.0f);
+        g.setColour(lineColour.withAlpha(globalSpacePreviewActive ? 0.98f : (livePlayingState ? 0.95f : 0.75f)));
+        g.drawLine(playheadX,
+                   static_cast<float>(visibleGrid.getY()),
+                   playheadX,
+                   static_cast<float>(visibleGrid.getBottom()),
+                   globalSpacePreviewActive ? 2.4f : 2.0f);
     }
 
     if (stepWriteEnabled && activeClip != nullptr)
@@ -940,15 +1007,9 @@ void MidiEditorOverlayComponent::resized()
     scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 1));
     controlsArea.removeFromLeft(8);
     snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 1));
-    controlsArea.removeFromLeft(6);
-    quantizeButton.setBounds(controlsArea.removeFromLeft(86).reduced(0, 1));
-    controlsArea.removeFromLeft(6);
-    slidePenButton.setBounds(controlsArea.removeFromLeft(92).reduced(0, 1));
-    controlsArea.removeFromLeft(6);
-    slideVisibilityButton.setBounds(controlsArea.removeFromLeft(104).reduced(0, 1));
-    controlsArea.removeFromLeft(12);
-    stepWriteButton.setBounds(controlsArea.removeFromLeft(96).reduced(0, 1));
-    controlsArea.removeFromLeft(6);
+    controlsArea.removeFromLeft(10);
+    slideVisibilityButton.setBounds(controlsArea.removeFromLeft(112).reduced(0, 1));
+    controlsArea.removeFromLeft(10);
     stepLengthButton.setBounds(controlsArea.removeFromLeft(58).reduced(0, 1));
     controlsArea.removeFromLeft(6);
     stepRestButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 1));
@@ -959,6 +1020,9 @@ void MidiEditorOverlayComponent::resized()
     controlsArea.removeFromLeft(10);
     scaleLockToggle.setBounds(controlsArea.removeFromLeft(28).reduced(0, 3));
     scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 1));
+    quantizeButton.setBounds({});
+    slidePenButton.setBounds({});
+    stepWriteButton.setBounds({});
     clampScrollOffsets();
 }
 
@@ -968,6 +1032,12 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
     const auto lowerKeyCode = juce::CharacterFunctions::toLowerCase(static_cast<juce::juce_wchar>(key.getKeyCode()));
     const auto commandShortcut = modifiers.isCommandDown() && ! modifiers.isCtrlDown() && ! modifiers.isAltDown();
     const auto shiftedCommandShortcut = commandShortcut && modifiers.isShiftDown();
+
+    // Any real key press cancels a pending hold-Command preview and ends a running one, so
+    // Cmd+key shortcuts (undo/copy/…) don't trigger or keep the preview.
+    cmdPreviewPending = false;
+    if (globalSpacePreviewActive)
+        stopGlobalSpacePreview();
 
     if (! key.getModifiers().isCommandDown()
         && ! key.getModifiers().isCtrlDown()
@@ -1018,23 +1088,24 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
 
     if (key == juce::KeyPress::spaceKey)
     {
-        // FL-style: space toggles playback; if it's already playing, stop AND rewind
-        // to the start of THIS clip (not project zero). So the second tap of space
-        // sends the cursor back to the beginning of the pattern.
-        const auto isPlayingNow = onRequestPlayingState && onRequestPlayingState();
-        if (isPlayingNow)
+        // Play from the clip start; Stop rewinds back to the clip start so the next play
+        // begins from the beginning (not where it was paused). Momentary preview is hold-Cmd.
+        const bool playing = onRequestPlayingState && onRequestPlayingState();
+        if (playing)
         {
-            if (onStopAndRewindToClipStart) onStopAndRewindToClipStart();
-            else if (onTogglePlayback)       onTogglePlayback();
+            if (onStopAndRewindToClipStart)
+                onStopAndRewindToClipStart();
+            else if (onTogglePlayback)
+                onTogglePlayback();
         }
         else if (onTogglePlayback)
         {
-            onTogglePlayback();
+            onTogglePlayback();   // playhead is already at the clip start after a stop
         }
         return true;
     }
 
-    if (commandShortcut && lowerKeyCode == 'a' && activeClip != nullptr)
+    if (commandShortcut && ! shiftedCommandShortcut && lowerKeyCode == 'a' && activeClip != nullptr)
     {
         selectedNotes.clear();
         for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
@@ -1043,7 +1114,7 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    if (commandShortcut && lowerKeyCode == 'd' && ! selectedNotes.empty())
+    if (commandShortcut && ! shiftedCommandShortcut && lowerKeyCode == 'd' && ! selectedNotes.empty())
     {
         duplicateSelectedNotes();
         return true;
@@ -1066,6 +1137,43 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress('q', juce::ModifierKeys::altModifier, 0))
     {
         quantizeSelectedNotes();
+        currentTool = PianoRollTool::quantize;
+        return true;
+    }
+
+    if (shiftedCommandShortcut && lowerKeyCode == 'v')
+        return setPianoRollTool(PianoRollTool::velocity), true;
+
+    if (commandShortcut && ! shiftedCommandShortcut && lowerKeyCode == 'v')
+        return setPianoRollTool(PianoRollTool::select), true;
+
+    if (shiftedCommandShortcut && lowerKeyCode == 'd')
+        return setPianoRollTool(PianoRollTool::draw), true;
+
+    if (commandShortcut && ! shiftedCommandShortcut && lowerKeyCode == 'b')
+        return setPianoRollTool(PianoRollTool::cut), true;
+
+    if (shiftedCommandShortcut && lowerKeyCode == 'e')
+        return setPianoRollTool(PianoRollTool::erase), true;
+
+    if (shiftedCommandShortcut && lowerKeyCode == 'a')
+        return setPianoRollTool(PianoRollTool::audition), true;
+
+    if (shiftedCommandShortcut && lowerKeyCode == 's')
+    {
+        setPianoRollTool(PianoRollTool::slide);
+        slidePenEnabled = true;
+        slidePenButton.setToggleState(true, juce::dontSendNotification);
+        repaint();
+        return true;
+    }
+
+    if (shiftedCommandShortcut && lowerKeyCode == 'w')
+    {
+        setPianoRollTool(PianoRollTool::step);
+        stepWriteEnabled = true;
+        stepWriteButton.setToggleState(true, juce::dontSendNotification);
+        repaint();
         return true;
     }
 
@@ -1080,6 +1188,8 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
 
 bool MidiEditorOverlayComponent::keyStateChanged(bool)
 {
+    // (Hold-Command preview is handled by the timer poll so it works without focus.)
+
     if (stepWriteEnabled)
     {
         updateStepWriteKeyboardPitches();
@@ -1093,6 +1203,7 @@ bool MidiEditorOverlayComponent::keyStateChanged(bool)
 void MidiEditorOverlayComponent::focusLost(FocusChangeType)
 {
     ignoreNextMouseDown = false;
+    stopGlobalSpacePreview();
     commitStepWritePendingChord();
     releaseLiveKeyboardPitches();
     releasePlacedNotePreview();
@@ -1101,15 +1212,36 @@ void MidiEditorOverlayComponent::focusLost(FocusChangeType)
 
 void MidiEditorOverlayComponent::mouseMove(const juce::MouseEvent& event)
 {
+    if (getEditToolbarBounds().contains(event.getPosition()))
+    {
+        bool overButton = false;
+        for (int i = 0; i < pianoRollToolButtonCount; ++i)
+            overButton = overButton || getToolButtonBounds(i).contains(event.getPosition());
+        setMouseCursor(overButton ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        repaint();
+        return;
+    }
+
     hoverNote = hitTestNote(event.getPosition());
-    setMouseCursor(hoverNote.has_value() && hoverNote->overResizeHandle
-                       ? juce::MouseCursor::LeftRightResizeCursor
-                       : juce::MouseCursor::NormalCursor);
+    hoveredGridBeat = getVisibleGridViewport().contains(event.getPosition())
+        ? std::optional<double>(xToBeat(event.getPosition().x))
+        : std::nullopt;
+    if (currentTool == PianoRollTool::cut)
+        setMouseCursor(hoverNote.has_value() ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
+    else if (currentTool == PianoRollTool::draw
+             || currentTool == PianoRollTool::erase
+             || currentTool == PianoRollTool::audition)
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    else
+        setMouseCursor(hoverNote.has_value() && hoverNote->overResizeHandle
+                           ? juce::MouseCursor::LeftRightResizeCursor
+                           : juce::MouseCursor::NormalCursor);
 }
 
 void MidiEditorOverlayComponent::mouseExit(const juce::MouseEvent&)
 {
     hoverNote.reset();
+    hoveredGridBeat.reset();
     releaseMousePreviewPitch();
     setMouseCursor(juce::MouseCursor::NormalCursor);
 }
@@ -1121,6 +1253,9 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
 
     ignoreNextMouseDown = false;
     grabKeyboardFocus();
+
+    if (handleEditToolbarClick(event.getPosition()))
+        return;
 
     if (getKeyboardBounds().contains(event.getPosition()))
     {
@@ -1170,6 +1305,33 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
         return;
 
     const auto hit = hitTestNote(event.getPosition());
+
+    if (currentTool == PianoRollTool::cut)
+    {
+        splitNoteAtPoint(event.getPosition());
+        return;
+    }
+
+    if (currentTool == PianoRollTool::erase)
+    {
+        if (hit.has_value())
+        {
+            selectSingleNote(hit->selected.noteIndex);
+            deleteSelectedNotes();
+        }
+        else if (const auto hitSlide = hitTestSlide(event.getPosition()))
+        {
+            selectedSlide = hitSlide->slideIndex;
+            deleteSelectedSlide();
+        }
+        return;
+    }
+
+    if (currentTool == PianoRollTool::audition)
+    {
+        auditionNoteAtPoint(event.getPosition());
+        return;
+    }
 
     if (slidePenEnabled)
     {
@@ -1597,6 +1759,7 @@ void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
     else if (button == &stepWriteButton)
     {
         stepWriteEnabled = stepWriteButton.getToggleState();
+        currentTool = stepWriteEnabled ? PianoRollTool::step : PianoRollTool::select;
         commitStepWritePendingChord();
         releaseLiveKeyboardPitches();
         releasePlacedNotePreview();
@@ -1632,6 +1795,7 @@ void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
     else if (button == &slidePenButton)
     {
         slidePenEnabled = slidePenButton.getToggleState();
+        currentTool = slidePenEnabled ? PianoRollTool::slide : PianoRollTool::select;
         if (slidePenEnabled)
         {
             stepWriteEnabled = false;
@@ -2268,6 +2432,420 @@ void MidiEditorOverlayComponent::releasePlacedNotePreview()
     placedNotePreviewOffMs = 0.0;
     if (onPreviewNoteOff)
         onPreviewNoteOff(pitch);
+}
+
+bool MidiEditorOverlayComponent::isTextInputFocused() const noexcept
+{
+    return dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent()) != nullptr;
+}
+
+bool MidiEditorOverlayComponent::canStartGlobalSpacePreview() const noexcept
+{
+    return activeClip != nullptr
+        && hoveredGridBeat.has_value()
+        && hasKeyboardFocus(true)
+        && ! isTextInputFocused();
+}
+
+bool MidiEditorOverlayComponent::startGlobalSpacePreviewFromMouse()
+{
+    // Already previewing → swallow the key-repeat (holding space fires keyPressed over and
+    // over; without this guard each repeat restarted playback at the start, so it looked
+    // stuck looping a tiny range).
+    if (globalSpacePreviewActive)
+        return true;
+
+    if (! canStartGlobalSpacePreview())
+        return false;
+
+    const auto localBeat = juce::jlimit(0.0, activeClip->lengthInBeats, *hoveredGridBeat);
+    const auto globalBeat = activeClip->startBeat + localBeat;
+
+    if (onStartGlobalSpacePreview)
+        onStartGlobalSpacePreview(globalBeat);
+
+    globalSpacePreviewActive = true;
+    repaint();
+    return true;
+}
+
+bool MidiEditorOverlayComponent::startGlobalSpacePreviewHeld()
+{
+    if (globalSpacePreviewActive)
+        return true;
+    if (activeClip == nullptr || ! isShowing() || isTextInputFocused())
+        return false;
+
+    // Prefer the hovered beat; otherwise play from the current playhead.
+    double globalBeat;
+    if (hoveredGridBeat.has_value())
+        globalBeat = activeClip->startBeat + juce::jlimit(0.0, activeClip->lengthInBeats, *hoveredGridBeat);
+    else
+        globalBeat = onRequestPlayheadBeat ? onRequestPlayheadBeat() : activeClip->startBeat;
+
+    if (onStartGlobalSpacePreview)
+        onStartGlobalSpacePreview(globalBeat);
+
+    globalSpacePreviewActive = true;
+    repaint();
+    return true;
+}
+
+juce::Rectangle<int> MidiEditorOverlayComponent::getEditToolbarBounds() const noexcept
+{
+    auto topBar = getTopBarBounds().reduced(20, 12);
+    topBar.removeFromRight(210);
+    auto toolbar = topBar.removeFromBottom(28);
+    toolbar.setLeft(getVisibleGridViewport().getX());
+    return toolbar;
+}
+
+juce::Rectangle<int> MidiEditorOverlayComponent::getToolButtonBounds(int index) const noexcept
+{
+    auto toolbar = getEditToolbarBounds();
+    constexpr int w = 30, h = 24, gap = 5;
+    return juce::Rectangle<int>(toolbar.getX() + index * (w + gap),
+                                toolbar.getCentreY() - h / 2,
+                                w,
+                                h);
+}
+
+void MidiEditorOverlayComponent::paintEditToolbar(juce::Graphics& g)
+{
+    const auto toolbar = getEditToolbarBounds();
+    if (toolbar.isEmpty())
+        return;
+
+    const auto toolForIndex = [](int index)
+    {
+        switch (index)
+        {
+            case 0:  return PianoRollTool::select;
+            case 1:  return PianoRollTool::draw;
+            case 2:  return PianoRollTool::cut;
+            case 3:  return PianoRollTool::erase;
+            case 4:  return PianoRollTool::quantize;
+            case 5:  return PianoRollTool::velocity;
+            case 6:  return PianoRollTool::slide;
+            case 7:  return PianoRollTool::step;
+            case 8:  return PianoRollTool::audition;
+            default: return PianoRollTool::select;
+        }
+    };
+
+    const auto mouse = getMouseXYRelative();
+    int hoveredIndex = -1;
+    for (int i = 0; i < pianoRollToolButtonCount; ++i)
+        if (getToolButtonBounds(i).contains(mouse))
+            hoveredIndex = i;
+
+    const auto stripWidth = pianoRollToolButtonCount * 30 + (pianoRollToolButtonCount - 1) * 5;
+    auto strip = juce::Rectangle<float>(static_cast<float>(toolbar.getX()),
+                                        static_cast<float>(toolbar.getY()),
+                                        static_cast<float>(stripWidth),
+                                        static_cast<float>(toolbar.getHeight()));
+    g.setColour(theme::core::voidBlack.withAlpha(0.22f));
+    g.fillRoundedRectangle(strip.expanded(6.0f, 3.0f), 8.0f);
+    g.setColour(theme::line::subtle.withAlpha(0.26f));
+    g.drawRoundedRectangle(strip.expanded(6.0f, 3.0f), 8.0f, 1.0f);
+
+    auto isActive = [&](PianoRollTool tool)
+    {
+        if (tool == PianoRollTool::slide)
+            return slidePenEnabled;
+        if (tool == PianoRollTool::step)
+            return stepWriteEnabled;
+        return currentTool == tool;
+    };
+
+    for (int i = 0; i < pianoRollToolButtonCount; ++i)
+    {
+        const auto tool = toolForIndex(i);
+        const auto active = isActive(tool);
+        const auto b = getToolButtonBounds(i).toFloat();
+        const auto hover = hoveredIndex == i;
+        const auto iconColour = theme::text::primary.withAlpha(active ? 0.98f : 0.76f);
+        const auto accentColour = theme::warm::red.withAlpha(active ? 0.98f : 0.86f);
+        const auto stroke = juce::PathStrokeType(1.9f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+
+        g.setColour(hover ? theme::surface::primary.withAlpha(0.78f)
+                          : theme::surface::primary.withAlpha(active ? 0.58f : 0.34f));
+        g.fillRoundedRectangle(b, 7.0f);
+        g.setColour(active ? accentColour.withAlpha(0.82f) : theme::line::subtle.withAlpha(0.70f));
+        g.drawRoundedRectangle(b, 7.0f, active ? 1.4f : 1.0f);
+        g.setColour(iconColour);
+
+        const auto cx = b.getCentreX();
+        const auto cy = b.getCentreY();
+        if (i == 0)
+        {
+            juce::Path p;
+            const auto x = b.getX() + 8.0f;
+            const auto y = b.getY() + 4.5f;
+            p.startNewSubPath(x, y);
+            p.lineTo(x + 1.1f, y + 17.0f);
+            p.lineTo(x + 6.1f, y + 11.4f);
+            p.lineTo(x + 9.6f, y + 17.0f);
+            p.lineTo(x + 12.6f, y + 15.2f);
+            p.lineTo(x + 9.1f, y + 10.1f);
+            p.lineTo(x + 15.5f, y + 10.1f);
+            p.closeSubPath();
+            g.strokePath(p, stroke);
+        }
+        else if (i == 1)
+        {
+            juce::Path pen;
+            pen.startNewSubPath(b.getX() + 8.0f, b.getBottom() - 5.0f);
+            pen.lineTo(b.getRight() - 8.0f, b.getY() + 5.0f);
+            pen.lineTo(b.getRight() - 4.5f, b.getY() + 8.5f);
+            pen.lineTo(b.getX() + 11.5f, b.getBottom() - 3.0f);
+            pen.closeSubPath();
+            g.strokePath(pen, stroke);
+            g.setColour(accentColour);
+            g.drawLine(b.getX() + 7.0f, b.getBottom() - 3.0f, b.getX() + 13.0f, b.getBottom() - 5.7f, 1.8f);
+        }
+        else if (i == 2)
+        {
+            g.drawEllipse(cx - 11.0f, cy + 2.0f, 7.5f, 7.5f, 1.8f);
+            g.drawEllipse(cx + 3.5f, cy + 2.0f, 7.5f, 7.5f, 1.8f);
+            g.drawLine(cx - 5.0f, cy + 5.0f, cx + 1.0f, cy - 1.0f, 2.0f);
+            g.drawLine(cx + 5.0f, cy + 5.0f, cx - 1.0f, cy - 1.0f, 2.0f);
+            g.drawLine(cx - 1.5f, cy - 1.0f, cx - 9.0f, cy - 10.0f, 2.0f);
+            g.drawLine(cx + 1.5f, cy - 1.0f, cx + 9.0f, cy - 10.0f, 2.0f);
+            g.setColour(accentColour);
+            g.fillEllipse(cx - 2.1f, cy - 2.1f, 4.2f, 4.2f);
+        }
+        else if (i == 3)
+        {
+            auto eraser = b.reduced(7.0f, 5.5f);
+            juce::Path e;
+            e.startNewSubPath(eraser.getX() + 4.0f, eraser.getBottom() - 1.0f);
+            e.lineTo(eraser.getX(), eraser.getBottom() - 6.0f);
+            e.lineTo(eraser.getRight() - 7.0f, eraser.getY());
+            e.lineTo(eraser.getRight(), eraser.getY() + 6.0f);
+            e.lineTo(eraser.getX() + 11.0f, eraser.getBottom() - 1.0f);
+            e.closeSubPath();
+            g.strokePath(e, stroke);
+            g.setColour(accentColour);
+            g.drawLine(eraser.getX() + 2.0f, eraser.getBottom() + 1.0f, eraser.getRight(), eraser.getBottom() + 1.0f, 1.8f);
+        }
+        else if (i == 4)
+        {
+            for (int n = 0; n < 4; ++n)
+            {
+                const auto x = b.getX() + 7.0f + static_cast<float>(n) * 4.3f;
+                const auto h = 5.0f + static_cast<float>((n + 1) % 3) * 3.0f;
+                g.fillRoundedRectangle(x, cy + 8.0f - h, 2.4f, h, 1.0f);
+            }
+            g.setColour(accentColour);
+            g.drawLine(b.getX() + 6.0f, cy - 7.0f, b.getRight() - 6.0f, cy - 7.0f, 1.7f);
+            g.drawLine(b.getX() + 6.0f, cy - 2.0f, b.getRight() - 6.0f, cy - 2.0f, 1.7f);
+        }
+        else if (i == 5)
+        {
+            g.drawLine(b.getX() + 8.0f, b.getBottom() - 6.0f, b.getX() + 8.0f, b.getY() + 7.0f, 1.7f);
+            g.drawLine(b.getX() + 8.0f, b.getBottom() - 6.0f, b.getRight() - 6.0f, b.getBottom() - 6.0f, 1.7f);
+            g.setColour(accentColour);
+            g.fillRoundedRectangle(b.getX() + 12.0f, cy + 2.0f, 3.0f, 5.0f, 1.0f);
+            g.fillRoundedRectangle(b.getX() + 17.0f, cy - 4.0f, 3.0f, 11.0f, 1.0f);
+            g.fillRoundedRectangle(b.getX() + 22.0f, cy - 8.0f, 3.0f, 15.0f, 1.0f);
+        }
+        else if (i == 6)
+        {
+            juce::Path curve;
+            curve.startNewSubPath(b.getX() + 6.0f, cy + 5.0f);
+            curve.cubicTo(b.getX() + 11.0f, cy - 11.0f, b.getRight() - 13.0f, cy + 11.0f, b.getRight() - 6.0f, cy - 5.0f);
+            g.strokePath(curve, stroke);
+            g.setColour(accentColour);
+            g.fillEllipse(b.getX() + 5.0f, cy + 3.0f, 4.0f, 4.0f);
+            g.fillEllipse(b.getRight() - 8.0f, cy - 7.0f, 4.0f, 4.0f);
+        }
+        else if (i == 7)
+        {
+            for (int n = 0; n < 4; ++n)
+            {
+                const auto x = b.getX() + 7.0f + static_cast<float>(n) * 5.0f;
+                g.drawLine(x, b.getY() + 6.0f, x, b.getBottom() - 5.0f, 1.5f);
+            }
+            g.setColour(accentColour);
+            juce::Path arrow;
+            arrow.addTriangle(b.getRight() - 10.0f, cy - 4.0f, b.getRight() - 10.0f, cy + 4.0f, b.getRight() - 4.0f, cy);
+            g.fillPath(arrow);
+        }
+        else if (i == 8)
+        {
+            juce::Path ear;
+            ear.startNewSubPath(cx + 4.0f, cy - 8.5f);
+            ear.cubicTo(cx - 2.5f, cy - 13.0f, cx - 10.0f, cy - 6.5f, cx - 8.0f, cy);
+            ear.cubicTo(cx - 6.0f, cy + 6.0f, cx - 1.0f, cy + 4.0f, cx, cy + 9.0f);
+            g.strokePath(ear, stroke);
+            g.drawLine(b.getX() + 6.0f, cy + 1.0f, b.getX() + 6.0f, cy + 7.0f, 1.5f);
+            g.drawLine(b.getX() + 10.0f, cy - 3.0f, b.getX() + 10.0f, cy + 7.0f, 1.5f);
+            g.setColour(accentColour);
+            juce::Path play;
+            play.addTriangle(b.getRight() - 7.0f, cy - 4.0f, b.getRight() - 7.0f, cy + 4.0f, b.getRight() - 1.5f, cy);
+            g.fillPath(play);
+        }
+    }
+
+    if (hoveredIndex >= 0)
+    {
+        const auto info = getPianoRollToolInfo(hoveredIndex);
+        const auto text = juce::String(info.name) + "  " + juce::String(info.shortcut);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        const auto textW = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), text);
+        auto tip = juce::Rectangle<float>(0.0f, 0.0f, textW + 20.0f, 22.0f);
+        const auto target = getToolButtonBounds(hoveredIndex);
+        const auto topBar = getTopBarBounds().reduced(20, 12);
+        tip.setCentre(static_cast<float>(target.getCentreX()), static_cast<float>(toolbar.getY() - 13));
+        tip.setY(juce::jmax(static_cast<float>(topBar.getY() + 2), tip.getY()));
+        tip.setX(juce::jlimit(static_cast<float>(topBar.getX()),
+                              static_cast<float>(topBar.getRight()) - tip.getWidth(),
+                              tip.getX()));
+        g.setColour(theme::core::voidBlack.withAlpha(0.48f));
+        g.fillRoundedRectangle(tip.translated(0.0f, 1.5f), 6.0f);
+        g.setColour(theme::surface::primary.withAlpha(0.96f));
+        g.fillRoundedRectangle(tip, 6.0f);
+        g.setColour(theme::line::normal.withAlpha(0.72f));
+        g.drawRoundedRectangle(tip, 6.0f, 1.0f);
+        g.setColour(theme::text::primary);
+        g.drawText(text, tip.reduced(9.0f, 0.0f), juce::Justification::centred);
+    }
+}
+
+void MidiEditorOverlayComponent::setPianoRollTool(PianoRollTool tool)
+{
+    currentTool = tool;
+    if (tool != PianoRollTool::slide && slidePenEnabled)
+    {
+        slidePenEnabled = false;
+        slidePenButton.setToggleState(false, juce::dontSendNotification);
+    }
+    if (tool != PianoRollTool::step && stepWriteEnabled)
+    {
+        stepWriteEnabled = false;
+        stepWriteButton.setToggleState(false, juce::dontSendNotification);
+        commitStepWritePendingChord();
+    }
+
+    repaint();
+}
+
+bool MidiEditorOverlayComponent::handleEditToolbarClick(juce::Point<int> position)
+{
+    if (! getEditToolbarBounds().contains(position))
+        return false;
+
+    for (int i = 0; i < pianoRollToolButtonCount; ++i)
+    {
+        if (! getToolButtonBounds(i).contains(position))
+            continue;
+
+        switch (i)
+        {
+            case 0: setPianoRollTool(PianoRollTool::select); break;
+            case 1: setPianoRollTool(PianoRollTool::draw); break;
+            case 2: setPianoRollTool(PianoRollTool::cut); break;
+            case 3: setPianoRollTool(PianoRollTool::erase); break;
+            case 4: quantizeSelectedNotes(); currentTool = PianoRollTool::quantize; repaint(); break;
+            case 5: setPianoRollTool(PianoRollTool::velocity); break;
+            case 6:
+                setPianoRollTool(PianoRollTool::slide);
+                slidePenEnabled = true;
+                slidePenButton.setToggleState(true, juce::dontSendNotification);
+                stepWriteEnabled = false;
+                stepWriteButton.setToggleState(false, juce::dontSendNotification);
+                commitStepWritePendingChord();
+                clearSelection();
+                selectedSlide.reset();
+                repaint();
+                break;
+            case 7:
+                setPianoRollTool(PianoRollTool::step);
+                stepWriteEnabled = true;
+                stepWriteButton.setToggleState(true, juce::dontSendNotification);
+                slidePenEnabled = false;
+                slidePenButton.setToggleState(false, juce::dontSendNotification);
+                repaint();
+                break;
+            case 8: setPianoRollTool(PianoRollTool::audition); break;
+            default: break;
+        }
+
+        grabKeyboardFocus();
+        return true;
+    }
+
+    return true;
+}
+
+bool MidiEditorOverlayComponent::splitNoteAtPoint(juce::Point<int> position)
+{
+    if (activeClip == nullptr)
+        return false;
+
+    const auto hit = hitTestNote(position);
+    if (! hit.has_value())
+        return false;
+
+    const auto index = hit->selected.noteIndex;
+    if (index < 0 || index >= static_cast<int>(activeClip->midiNotes.size()))
+        return false;
+
+    auto note = activeClip->midiNotes[static_cast<std::size_t>(index)];
+    const auto splitBeat = snapBeatNearest(xToBeat(static_cast<double>(position.x)));
+    const auto noteEnd = note.startBeat + note.lengthInBeats;
+    if (splitBeat <= note.startBeat + beatEpsilon || splitBeat >= noteEnd - beatEpsilon)
+        return false;
+
+    pushUndoSnapshot();
+    auto right = note;
+    note.lengthInBeats = splitBeat - note.startBeat;
+    right.startBeat = splitBeat;
+    right.lengthInBeats = noteEnd - splitBeat;
+    activeClip->midiNotes[static_cast<std::size_t>(index)] = note;
+    activeClip->midiNotes.insert(activeClip->midiNotes.begin() + index + 1, right);
+    selectedNotes.clear();
+    selectedNotes.insert(index + 1);
+    repaint();
+    return true;
+}
+
+bool MidiEditorOverlayComponent::auditionNoteAtPoint(juce::Point<int> position)
+{
+    if (activeClip == nullptr)
+        return false;
+
+    if (const auto hit = hitTestNote(position))
+    {
+        const auto index = hit->selected.noteIndex;
+        if (index >= 0 && index < static_cast<int>(activeClip->midiNotes.size()))
+        {
+            const auto& note = activeClip->midiNotes[static_cast<std::size_t>(index)];
+            auditionPlacedNote(note.pitch, note.velocity);
+            selectSingleNote(index);
+            return true;
+        }
+    }
+
+    if (getKeyboardBounds().contains(position))
+    {
+        setMousePreviewPitch(keyboardPitchForPoint(position));
+        return true;
+    }
+
+    return false;
+}
+
+void MidiEditorOverlayComponent::stopGlobalSpacePreview()
+{
+    if (! globalSpacePreviewActive)
+        return;
+
+    globalSpacePreviewActive = false;
+    if (onStopGlobalSpacePreview)
+        onStopGlobalSpacePreview();
+    repaint();
 }
 
 juce::Rectangle<int> MidiEditorOverlayComponent::getTopBarBounds() const noexcept

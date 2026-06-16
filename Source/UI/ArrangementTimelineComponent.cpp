@@ -34,6 +34,8 @@ constexpr auto fadeHandleHitRadius = 8;
 constexpr auto fadeHandleBandHeight = 18;
 constexpr auto minimumClipLengthInBeats = 1.0;
 constexpr auto snapSizeInBeats = 0.25;
+constexpr auto splitEdgeSnapPixels = 12.0;
+constexpr auto splitEdgeSnapMaxBeats = 0.125;
 constexpr auto minTrackHeaderWidth = 176;
 constexpr auto maxTrackHeaderWidth = 360;
 constexpr auto beatEpsilon = 0.0001;
@@ -42,7 +44,10 @@ constexpr auto minimumLaneHeight = 42;
 constexpr auto maximumLaneHeight = 176;
 constexpr auto minimumVerticalZoom = 0.54;
 constexpr auto maximumVerticalZoom = 2.26;
+constexpr auto editToolbarHeight = 34;
 constexpr auto timelineRulerHeight = 30;
+constexpr auto timelineTopChromeHeight = editToolbarHeight + timelineRulerHeight;
+constexpr auto editToolButtonCount = 9;
 constexpr auto loopLaneHeight = 11;
 constexpr auto loopHandleHitWidth = 8;
 constexpr auto playheadHitWidth = 8;
@@ -83,7 +88,7 @@ juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 juce::Rectangle<int> getVisibleTrackAreaBounds(const juce::Component& component)
 {
     auto bounds = getTimelineContentBounds(component);
-    bounds.removeFromTop(timelineRulerHeight);
+    bounds.removeFromTop(timelineTopChromeHeight);
     return bounds.getIntersection(component.getLocalBounds());
 }
 
@@ -166,6 +171,32 @@ juce::String clipNameForImportedFile(const juce::File& file, const juce::Dynamic
     const auto category = payload.getProperty("category").toString();
     const auto name = payload.getProperty("name").toString();
     return category.isNotEmpty() ? category + " / " + name : name;
+}
+
+struct EditToolInfo
+{
+    const char* name;
+    const char* shortcut;
+};
+
+EditToolInfo getEditToolInfo(int index) noexcept
+{
+    static constexpr std::array<EditToolInfo, editToolButtonCount> tools {{
+        { "Select", "Cmd+V" },
+        { "Range", "Cmd+R" },
+        { "Cut", "Cmd+B / Cmd+E" },
+        { "Trim", "Cmd+T" },
+        { "Stretch", "Cmd+S" },
+        { "Draw", "Cmd+Shift+D" },
+        { "Mute", "Cmd+M" },
+        { "Erase", "Cmd+Shift+E" },
+        { "Audition", "Cmd+A" }
+    }};
+
+    if (index < 0 || index >= static_cast<int>(tools.size()))
+        return { "", "" };
+
+    return tools[static_cast<std::size_t>(index)];
 }
 }  // namespace
 
@@ -270,9 +301,11 @@ void ArrangementTimelineComponent::resetForNewProject()
     lastClickedClip.reset();
     selectedTrackIndex.reset();
     selectedClips.clear();
+    focusedSplitBeat.reset();
     dragState.reset();
     loopSelectionState.reset();
     hoverClip.reset();
+    knifePreviewBeat.reset();
     undoStack.clear();
     redoStack.clear();
     scrollX = 0.0;
@@ -421,6 +454,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.fillAll(timelineBackground);
 
     auto bounds = getTimelineContentBounds(*this);
+    auto editToolbarArea = bounds.removeFromTop(editToolbarHeight);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto tracksArea = bounds;
     auto gridArea = tracksArea;
@@ -440,6 +474,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     auto markerLane = rulerGridArea;
     g.setColour(juce::Colours::white.withAlpha(0.06f));
     g.fillRoundedRectangle(loopLane.toFloat(), 4.0f);
+
+    g.setColour(juce::Colours::black.withAlpha(0.18f));
+    g.fillRect(editToolbarArea);
+    g.setColour(juce::Colours::white.withAlpha(0.055f));
+    g.drawHorizontalLine(editToolbarArea.getBottom(), static_cast<float>(editToolbarArea.getX()), static_cast<float>(editToolbarArea.getRight()));
 
     const auto addTrackButton = getAddTrackButtonBounds().toFloat();
     g.setColour(theme::surface::primary.withAlpha(0.34f));
@@ -813,16 +852,6 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
             const auto isSelected = isClipSelected(SelectedClip { trackIndex, clipIndex });
 
-            // Soft outer glow (floating halo) — drawn before the clip is clipped to its
-            // own bounds so the glow can spill outside the edges.
-            if (clipBounds.getHeight() > 14.0f)
-            {
-                juce::Path glowPath;
-                glowPath.addRoundedRectangle(clipBounds.expanded(1.0f), 10.0f);
-                juce::DropShadow(juce::Colours::white.withAlpha(isSelected ? 0.30f : 0.20f),
-                                 14, { 0, 0 }).drawForPath(g, glowPath);
-            }
-
             g.saveState();
             g.reduceClipRegion(clipBoundsInt);
 
@@ -833,19 +862,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto clipBase   = variant.base;
             const auto gradTop    = isSelected ? variant.gradientTop.interpolatedWith(juce::Colours::white, 0.34f) : variant.gradientTop;
             const auto gradBottom = isSelected ? variant.gradientBottom.interpolatedWith(juce::Colours::white, 0.24f) : variant.gradientBottom;
-            // Bright, glowing waveform like the glass reference (light tint of the clip
-            // colour rather than the dark waveform variant).
-            const auto waveformColour = clip.colour.interpolatedWith(juce::Colours::white, 0.62f).withAlpha(0.95f);
+            // Studio One-style waveform: a darker shade of the clip colour sitting on the
+            // saturated body (not a glowing light tint).
+            const auto waveformColour = variant.waveform.withAlpha(0.92f);
 
             {
-                juce::ignoreUnused(gradTop, gradBottom);
-                // Glass body: a diagonal gradient (brighter top-left → deeper bottom-right),
-                // saturated so the track colour stays vivid through the glass.
-                const auto tint = clip.colour.withMultipliedSaturation(1.25f);
-                const auto tl = tint.withMultipliedBrightness(1.02f).withAlpha(0.80f);
-                const auto br = tint.withMultipliedBrightness(0.58f).withAlpha(0.86f);
-                juce::ColourGradient body(tl, clipBounds.getX(), clipBounds.getY(),
-                                          br, clipBounds.getRight(), clipBounds.getBottom(), false);
+                juce::ignoreUnused(clipBase);
+                // Clean Studio One body: an opaque top→bottom vertical gradient of the
+                // track colour. No glass, no translucency — fast and solid.
+                juce::ColourGradient body(gradTop, clipBounds.getX(), clipBounds.getY(),
+                                          gradBottom, clipBounds.getX(), clipBounds.getBottom(), false);
                 g.setGradientFill(body);
                 g.fillRoundedRectangle(clipBounds, 10.0f);
             }
@@ -976,34 +1002,40 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 g.drawRoundedRectangle(clipBounds.reduced(1.2f, 1.2f), 8.8f, 2.2f);
             }
 
-            // --- Glass treatment (on top of header/waveform/outline) ---
+            // Subtle 1px top highlight for a clean Studio One sheen (cheap — no blur, no
+            // diagonal glass sweep).
             if (clipBounds.getHeight() > 14.0f)
             {
-                juce::Path glassShape;
-                glassShape.addRoundedRectangle(clipBounds, 10.0f);
+                g.setColour(juce::Colours::white.withAlpha(0.16f));
+                g.drawLine(clipBounds.getX() + 4.0f, clipBounds.getY() + 1.0f,
+                           clipBounds.getRight() - 4.0f, clipBounds.getY() + 1.0f, 1.0f);
+            }
+
+            // Subtle internal beat/bar grid for MIDI clips — clean low-contrast vertical
+            // lines like Ableton (single thin line, not the old harsh black+white stripes).
+            if (clip.type == ClipType::midi && clip.lengthInBeats > beatEpsilon && clipBounds.getWidth() > 20.0f)
+            {
+                juce::Path clipShape;
+                clipShape.addRoundedRectangle(clipBounds, 10.0f);
                 g.saveState();
-                g.reduceClipRegion(glassShape);
+                g.reduceClipRegion(clipShape);
 
-                // Diagonal glossy sweep — the signature reflection of glassmorphism. A soft
-                // bright wash from the top-left, plus a crisper diagonal streak through the
-                // upper portion.
-                juce::ColourGradient sweep(juce::Colours::white.withAlpha(0.22f),
-                                           clipBounds.getX(), clipBounds.getY(),
-                                           juce::Colours::white.withAlpha(0.0f),
-                                           clipBounds.getX() + clipBounds.getWidth() * 0.55f,
-                                           clipBounds.getY() + clipBounds.getHeight() * 0.95f, false);
-                g.setGradientFill(sweep);
-                g.fillRect(clipBounds);
+                const auto clipStartBeat = clip.startBeat;
+                const auto clipEndBeat = clip.startBeat + clip.lengthInBeats;
+                const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+                const auto firstLineBeat = std::ceil(clipStartBeat + beatEpsilon);
+                const auto lastLineBeat = std::floor(clipEndBeat - beatEpsilon);
+
+                for (double beat = firstLineBeat; beat <= lastLineBeat; beat += 1.0)
+                {
+                    const auto localBeat = beat - clipStartBeat;
+                    const auto x = clipBounds.getX() + static_cast<float>((localBeat / clip.lengthInBeats) * clipBounds.getWidth());
+                    const auto isBarLine = std::abs(std::fmod(beat, beatsPerBar)) <= beatEpsilon
+                        || std::abs(std::fmod(beat, beatsPerBar) - beatsPerBar) <= beatEpsilon;
+                    g.setColour(juce::Colours::white.withAlpha(isBarLine ? 0.15f : 0.06f));
+                    g.drawLine(x, clipBounds.getY() + 3.0f, x, clipBounds.getBottom() - 3.0f, 1.0f);
+                }
                 g.restoreState();
-
-                // Crisp thin rim — brightest at the top-left (lit edge), fading to the
-                // bottom-right, like the reference.
-                juce::ColourGradient rim(juce::Colours::white.withAlpha(0.9f),
-                                         clipBounds.getX(), clipBounds.getY(),
-                                         juce::Colours::white.withAlpha(0.22f),
-                                         clipBounds.getRight(), clipBounds.getBottom(), false);
-                g.setGradientFill(rim);
-                g.drawRoundedRectangle(clipBounds.reduced(0.75f), 9.5f, 1.2f);
             }
 
             // Fade in/out overlays (Studio One style). The curve shows the gain ramp;
@@ -1149,6 +1181,58 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     g.restoreState();
 
+    auto drawSplitPreview = [&](const SelectedClip& target, double rawBeat, bool liveKnife)
+    {
+        const auto& tracksRef = project.getTracks();
+        if (target.trackIndex < 0 || target.trackIndex >= static_cast<int>(tracksRef.size()))
+            return;
+
+        const auto& clips = tracksRef[static_cast<std::size_t>(target.trackIndex)].clips;
+        if (target.clipIndex < 0 || target.clipIndex >= static_cast<int>(clips.size()))
+            return;
+
+        const auto& clip = clips[static_cast<std::size_t>(target.clipIndex)];
+        const auto previewBeat = snapSplitBeatForClip(rawBeat, clip);
+        const auto clipEnd = clip.startBeat + clip.lengthInBeats;
+        if (previewBeat < clip.startBeat - beatEpsilon || previewBeat > clipEnd + beatEpsilon)
+            return;
+
+        const auto clipBounds = getClipBounds(clip, target.trackIndex);
+        if (clipBounds.isEmpty())
+            return;
+
+        const auto x = beatToX(previewBeat, visibleGridArea);
+        if (x < static_cast<float>(clipBounds.getX()) - 1.0f || x > static_cast<float>(clipBounds.getRight()) + 1.0f)
+            return;
+
+        const auto top = static_cast<float>(clipBounds.getY() + 2);
+        const auto bottom = static_cast<float>(clipBounds.getBottom() - 2);
+        g.setColour(juce::Colours::black.withAlpha(liveKnife ? 0.50f : 0.36f));
+        g.drawLine(x + 1.0f, top, x + 1.0f, bottom, liveKnife ? 3.0f : 2.2f);
+        g.setColour(theme::text::primary.withAlpha(liveKnife ? 0.96f : 0.78f));
+        g.drawLine(x, top, x, bottom, liveKnife ? 1.7f : 1.3f);
+        g.setColour(theme::warm::red.withAlpha(liveKnife ? 0.98f : 0.78f));
+        g.fillRoundedRectangle(x - 3.5f, top - 1.0f, 7.0f, 3.0f, 1.5f);
+        g.fillRoundedRectangle(x - 3.5f, bottom - 2.0f, 7.0f, 3.0f, 1.5f);
+    };
+
+    g.saveState();
+    g.reduceClipRegion(visibleGridArea);
+    if (! dragState.has_value())
+    {
+        if (knifePreviewBeat.has_value() && hoverClip.has_value())
+            drawSplitPreview(hoverClip->clip, *knifePreviewBeat, true);
+        else if (focusedSplitBeat.has_value())
+        {
+            if (selectedClip.has_value())
+                drawSplitPreview(*selectedClip, *focusedSplitBeat, false);
+            else
+                for (const auto& selected : selectedClips)
+                    drawSplitPreview(selected, *focusedSplitBeat, false);
+        }
+    }
+    g.restoreState();
+
     // Draw Playhead with a top cap in the ruler
     g.saveState();
     g.reduceClipRegion(visibleGridArea);
@@ -1229,61 +1313,453 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     paintToolPalette(g);
 }
 
+juce::Rectangle<int> ArrangementTimelineComponent::getEditToolbarBounds() const noexcept
+{
+    auto bounds = getTimelineContentBounds(*this);
+    return bounds.removeFromTop(editToolbarHeight);
+}
+
 juce::Rectangle<int> ArrangementTimelineComponent::getToolButtonBounds(int index) const noexcept
 {
-    const auto bounds = getTimelineContentBounds(*this);
-    constexpr int w = 28, h = 24, gap = 6, padX = 10, padY = 3;
-    return juce::Rectangle<int>(bounds.getX() + padX + index * (w + gap), bounds.getY() + padY, w, h);
+    auto toolbar = getEditToolbarBounds();
+    constexpr int w = 30, h = 26, gap = 5, padX = 0;
+    return juce::Rectangle<int>(toolbar.getX() + padX + index * (w + gap),
+                                toolbar.getCentreY() - h / 2,
+                                w,
+                                h);
+}
+
+juce::Rectangle<int> ArrangementTimelineComponent::getSplitSnapButtonBounds() const noexcept
+{
+    auto toolbar = getEditToolbarBounds();
+    toolbar.removeFromLeft(trackHeaderWidth);
+    return toolbar.removeFromRight(126).reduced(8, 6);
 }
 
 void ArrangementTimelineComponent::paintToolPalette(juce::Graphics& g)
 {
-    // Tool palette hidden for now — placement is being reconsidered.
-    juce::ignoreUnused(g);
-    return;
+    auto toolbar = getEditToolbarBounds();
 
-    const std::array<const char*, 2> tips { "Select / Move (V)", "Knife / Split (B)" };
-    juce::ignoreUnused(tips);
-    for (int i = 0; i < 2; ++i)
+    g.saveState();
+    auto paintRegion = toolbar;
+    paintRegion.setBottom(juce::jmin(getLocalBounds().getBottom(), toolbar.getBottom() + 34));
+    g.reduceClipRegion(paintRegion);
+
+    g.setColour(juce::Colours::black.withAlpha(0.10f));
+    g.fillRect(toolbar);
+    g.setColour(theme::line::subtle.withAlpha(0.60f));
+    g.drawVerticalLine(toolbar.getX() + trackHeaderWidth, static_cast<float>(toolbar.getY()), static_cast<float>(toolbar.getBottom()));
+    g.drawHorizontalLine(toolbar.getBottom() - 1, static_cast<float>(toolbar.getX()), static_cast<float>(toolbar.getRight()));
+
+    const auto toolModeForIndex = [](int index)
     {
-        const auto b = getToolButtonBounds(i).toFloat();
-        const auto active = (i == 0 && currentTool == ToolMode::pointer)
-                         || (i == 1 && currentTool == ToolMode::knife);
-        g.setColour(active ? orion::theme::warm::red.withAlpha(0.92f) : juce::Colours::black.withAlpha(0.42f));
-        g.fillRoundedRectangle(b, 6.0f);
-        g.setColour(juce::Colours::white.withAlpha(active ? 0.85f : 0.16f));
-        g.drawRoundedRectangle(b, 6.0f, 1.0f);
+        switch (index)
+        {
+            case 0:  return ToolMode::select;
+            case 1:  return ToolMode::range;
+            case 2:  return ToolMode::split;
+            case 3:  return ToolMode::trim;
+            case 4:  return ToolMode::stretch;
+            case 5:  return ToolMode::draw;
+            case 6:  return ToolMode::mute;
+            case 7:  return ToolMode::erase;
+            case 8:  return ToolMode::audition;
+            default: return ToolMode::select;
+        }
+    };
 
-        g.setColour(juce::Colours::white.withAlpha(active ? 0.98f : 0.72f));
+    const auto mouse = getMouseXYRelative();
+    auto hoveredIndex = -1;
+    for (int i = 0; i < editToolButtonCount; ++i)
+        if (getToolButtonBounds(i).contains(mouse))
+            hoveredIndex = i;
+    const auto snapHovered = getSplitSnapButtonBounds().contains(mouse);
+
+    auto drawButtonShell = [&](int index, bool active, bool enabled)
+    {
+        const auto b = getToolButtonBounds(index).toFloat();
+        const auto hover = hoveredIndex == index;
+        const auto base = hover && enabled ? theme::surface::primary.withAlpha(0.72f)
+                                           : theme::surface::primary.withAlpha(active ? 0.56f : 0.34f);
+        g.setColour(base);
+        g.fillRoundedRectangle(b, 7.0f);
+        g.setColour(active ? theme::warm::red.withAlpha(0.82f)
+                           : juce::Colours::white.withAlpha(enabled ? 0.18f : 0.07f));
+        g.drawRoundedRectangle(b, 7.0f, active ? 1.4f : 1.0f);
+        return b;
+    };
+
+    for (int i = 0; i < editToolButtonCount; ++i)
+    {
+        const auto active = currentTool == toolModeForIndex(i);
+        const auto enabled = true;
+        const auto b = drawButtonShell(i, active, enabled);
+        const auto iconColour = juce::Colours::white.withAlpha(enabled ? (active ? 0.98f : 0.76f) : 0.28f);
+        const auto accentColour = theme::warm::red.withAlpha(enabled ? (active ? 0.98f : 0.86f) : 0.24f);
+        const auto iconStroke = juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+        g.setColour(iconColour);
+
         if (i == 0)
         {
-            // Pointer arrow.
             juce::Path p;
-            const auto x = b.getX() + b.getWidth() * 0.34f;
-            const auto y = b.getY() + b.getHeight() * 0.24f;
-            const auto s = juce::jmin(b.getWidth(), b.getHeight());
+            const auto x = b.getX() + 8.0f;
+            const auto y = b.getY() + 4.5f;
+            const auto s = 18.0f;
             p.startNewSubPath(x, y);
-            p.lineTo(x, y + s * 0.62f);
-            p.lineTo(x + s * 0.18f, y + s * 0.44f);
-            p.lineTo(x + s * 0.40f, y + s * 0.44f);
+            p.lineTo(x + 1.1f, y + s);
+            p.lineTo(x + 6.3f, y + 12.0f);
+            p.lineTo(x + 10.0f, y + 18.0f);
+            p.lineTo(x + 13.2f, y + 16.0f);
+            p.lineTo(x + 9.5f, y + 10.4f);
+            p.lineTo(x + 16.4f, y + 10.4f);
             p.closeSubPath();
-            g.fillPath(p);
+            g.strokePath(p, iconStroke);
         }
-        else
+        else if (i == 1)
         {
-            // Knife: a blade (filled triangle) with a handle line.
+            // Dashed selection rectangle (red), like the reference Range icon.
+            const auto r = b.reduced(7.5f, 6.0f);
+            g.setColour(accentColour);
+            const float dashes[] = { 2.6f, 2.4f };
+            g.drawDashedLine({ r.getTopLeft(),    r.getTopRight() },    dashes, 2, 1.7f);
+            g.drawDashedLine({ r.getBottomLeft(), r.getBottomRight() }, dashes, 2, 1.7f);
+            g.drawDashedLine({ r.getTopLeft(),    r.getBottomLeft() },  dashes, 2, 1.7f);
+            g.drawDashedLine({ r.getTopRight(),   r.getBottomRight() }, dashes, 2, 1.7f);
+        }
+        else if (i == 2)
+        {
             const auto cx = b.getCentreX();
+            const auto cy = b.getCentreY() + 1.5f;
+            const auto leftRing = juce::Rectangle<float>(cx - 12.0f, cy + 1.8f, 8.0f, 8.0f);
+            const auto rightRing = juce::Rectangle<float>(cx + 4.0f, cy + 1.8f, 8.0f, 8.0f);
+
+            g.drawEllipse(leftRing, 2.0f);
+            g.drawEllipse(rightRing, 2.0f);
+
+            juce::Path leftBlade;
+            leftBlade.startNewSubPath(cx - 1.2f, cy - 1.0f);
+            leftBlade.lineTo(cx - 10.0f, cy - 11.5f);
+            leftBlade.lineTo(cx - 7.2f, cy - 13.0f);
+            leftBlade.lineTo(cx + 2.4f, cy - 2.4f);
+            g.strokePath(leftBlade, iconStroke);
+
+            juce::Path rightBlade;
+            rightBlade.startNewSubPath(cx + 1.2f, cy - 1.0f);
+            rightBlade.lineTo(cx + 10.0f, cy - 11.5f);
+            rightBlade.lineTo(cx + 7.2f, cy - 13.0f);
+            rightBlade.lineTo(cx - 2.4f, cy - 2.4f);
+            g.strokePath(rightBlade, iconStroke);
+
+            g.drawLine(cx - 4.5f, cy + 4.5f, cx + 1.5f, cy - 1.5f, 2.0f);
+            g.drawLine(cx + 4.5f, cy + 4.5f, cx - 1.5f, cy - 1.5f, 2.0f);
+            g.setColour(accentColour);
+            g.fillEllipse(cx - 2.2f, cy - 2.2f, 4.4f, 4.4f);
+        }
+        else if (i == 3)
+        {
+            const auto y = b.getCentreY();
+            g.drawLine(b.getX() + 7.0f, b.getY() + 6.0f, b.getX() + 7.0f, b.getBottom() - 6.0f, 2.0f);
+            g.drawLine(b.getRight() - 7.0f, b.getY() + 6.0f, b.getRight() - 7.0f, b.getBottom() - 6.0f, 2.0f);
+            g.setColour(accentColour);
+            g.drawLine(b.getX() + 12.5f, y, b.getRight() - 12.5f, y, 1.8f);
+            juce::Path left;
+            left.addTriangle(b.getX() + 13.0f, y - 4.0f, b.getX() + 13.0f, y + 4.0f, b.getX() + 8.0f, y);
+            g.fillPath(left);
+            juce::Path right;
+            right.addTriangle(b.getRight() - 13.0f, y - 4.0f, b.getRight() - 13.0f, y + 4.0f, b.getRight() - 8.0f, y);
+            g.fillPath(right);
+        }
+        else if (i == 4)
+        {
+            const auto y = b.getCentreY();
+            g.drawLine(b.getX() + 7.0f, b.getY() + 6.0f, b.getX() + 7.0f, b.getBottom() - 6.0f, 2.0f);
+            g.drawLine(b.getRight() - 7.0f, b.getY() + 6.0f, b.getRight() - 7.0f, b.getBottom() - 6.0f, 2.0f);
+            g.setColour(accentColour);
+            g.drawLine(b.getX() + 11.5f, y, b.getRight() - 11.5f, y, 1.8f);
+            juce::Path left;
+            left.addTriangle(b.getX() + 10.5f, y, b.getX() + 15.5f, y - 4.7f, b.getX() + 15.5f, y + 4.7f);
+            g.fillPath(left);
+            juce::Path right;
+            right.addTriangle(b.getRight() - 10.5f, y, b.getRight() - 15.5f, y - 4.7f, b.getRight() - 15.5f, y + 4.7f);
+            g.fillPath(right);
+        }
+        else if (i == 5)
+        {
+            // Pencil body (white) with a red nib at the tip (reference Draw).
+            const auto tipX = b.getX() + 8.0f;
+            const auto tipY = b.getBottom() - 6.0f;
+            juce::Path pen;
+            pen.startNewSubPath(tipX + 2.6f, tipY - 2.6f);
+            pen.lineTo(b.getRight() - 9.0f, b.getY() + 5.5f);
+            pen.lineTo(b.getRight() - 4.5f, b.getY() + 10.0f);
+            pen.lineTo(tipX + 6.0f, tipY + 1.0f);
+            pen.closeSubPath();
+            g.strokePath(pen, iconStroke);
+            g.setColour(accentColour);
+            juce::Path nib;
+            nib.startNewSubPath(tipX, tipY + 2.0f);
+            nib.lineTo(tipX + 2.6f, tipY - 2.6f);
+            nib.lineTo(tipX + 6.0f, tipY + 1.0f);
+            nib.closeSubPath();
+            g.fillPath(nib);
+        }
+        else if (i == 6)
+        {
+            auto speaker = b.reduced(7.0f, 7.0f);
+            juce::Path sp;
+            sp.startNewSubPath(speaker.getX(), speaker.getCentreY() - 4.5f);
+            sp.lineTo(speaker.getX() + 5.0f, speaker.getCentreY() - 4.5f);
+            sp.lineTo(speaker.getX() + 10.8f, speaker.getY() - 1.0f);
+            sp.lineTo(speaker.getX() + 10.8f, speaker.getBottom() + 1.0f);
+            sp.lineTo(speaker.getX() + 5.0f, speaker.getCentreY() + 4.5f);
+            sp.lineTo(speaker.getX(), speaker.getCentreY() + 4.5f);
+            sp.closeSubPath();
+            g.strokePath(sp, iconStroke);
+            g.setColour(accentColour);
+            g.drawLine(speaker.getRight() - 1.0f, speaker.getY() + 1.0f,
+                       speaker.getRight() + 5.5f, speaker.getBottom() - 1.0f, 2.1f);
+            g.drawLine(speaker.getRight() + 5.5f, speaker.getY() + 1.0f,
+                       speaker.getRight() - 1.0f, speaker.getBottom() - 1.0f, 2.1f);
+        }
+        else if (i == 7)
+        {
+            // Slanted eraser block (parallelogram) with a band line + red underline.
+            auto er = b.reduced(6.5f, 8.0f);
+            const float shear = 6.0f;
+            juce::Path e;
+            e.startNewSubPath(er.getX(),            er.getBottom());
+            e.lineTo(er.getRight() - shear,         er.getBottom());
+            e.lineTo(er.getRight(),                 er.getY());
+            e.lineTo(er.getX() + shear,             er.getY());
+            e.closeSubPath();
+            g.strokePath(e, iconStroke);
+            // Band line across the eraser (top of the rubber tip).
+            g.drawLine(er.getX() + shear * 0.5f, er.getCentreY() + 2.5f,
+                       er.getRight() - shear * 0.5f, er.getCentreY() + 2.5f, 1.4f);
+            // Red underline.
+            g.setColour(accentColour);
+            g.drawLine(er.getX() - 1.0f, er.getBottom() + 3.5f, er.getRight() + 1.0f, er.getBottom() + 3.5f, 2.0f);
+        }
+        else if (i == 8)
+        {
+            const auto cx = b.getCentreX() - 1.0f;
             const auto cy = b.getCentreY();
-            const auto s  = juce::jmin(b.getWidth(), b.getHeight());
-            juce::Path blade;
-            blade.startNewSubPath(cx - s * 0.30f, cy - s * 0.28f);
-            blade.lineTo(cx + s * 0.10f, cy + s * 0.30f);
-            blade.lineTo(cx - s * 0.30f, cy + s * 0.30f);
-            blade.closeSubPath();
-            g.fillPath(blade);
-            g.drawLine(cx + s * 0.10f, cy + s * 0.30f, cx + s * 0.34f, cy - s * 0.06f, 2.0f);
+            juce::Path ear;
+            ear.startNewSubPath(cx + 5.0f, cy - 9.0f);
+            ear.cubicTo(cx - 2.0f, cy - 14.0f, cx - 10.0f, cy - 8.0f, cx - 9.0f, cy - 1.0f);
+            ear.cubicTo(cx - 8.0f, cy + 4.0f, cx - 3.0f, cy + 3.0f, cx - 3.0f, cy + 7.5f);
+            ear.cubicTo(cx - 3.0f, cy + 10.5f, cx + 1.0f, cy + 10.5f, cx + 1.5f, cy + 7.5f);
+            g.strokePath(ear, iconStroke);
+            // Sound-wave arcs to the left of the ear.
+            for (int k = 1; k <= 2; ++k)
+            {
+                const auto ox = b.getX() + 3.0f + static_cast<float>(k) * 3.2f;
+                juce::Path wave;
+                wave.startNewSubPath(ox, cy - 4.0f);
+                wave.quadraticTo(ox + 3.0f, cy, ox, cy + 4.0f);
+                g.strokePath(wave, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            }
+            g.setColour(accentColour);
+            juce::Path play;
+            play.addTriangle(b.getRight() - 7.0f, b.getCentreY() - 4.0f,
+                             b.getRight() - 7.0f, b.getCentreY() + 4.0f,
+                             b.getRight() - 1.0f, b.getCentreY());
+            g.fillPath(play);
         }
     }
+
+    auto snap = getSplitSnapButtonBounds().toFloat();
+    g.setColour(theme::surface::primary.withAlpha(snapHovered ? 0.56f : 0.30f));
+    g.fillRoundedRectangle(snap, 6.0f);
+    g.setColour(theme::line::subtle.withAlpha(0.72f));
+    g.drawRoundedRectangle(snap, 6.0f, 1.0f);
+    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+    g.setColour(theme::text::muted);
+    g.drawText("Snap", snap.removeFromLeft(38.0f), juce::Justification::centred);
+    g.setColour(theme::text::primary.withAlpha(0.88f));
+    g.drawText(getSplitSnapName(), snap, juce::Justification::centred);
+
+    if (hoveredIndex >= 0 || snapHovered)
+    {
+        const auto enabled = true;
+        const auto text = snapHovered
+            ? juce::String("Split Snap  ") + getSplitSnapName() + "  - click to change"
+            : (juce::String(getEditToolInfo(hoveredIndex).name) + "  " + juce::String(getEditToolInfo(hoveredIndex).shortcut)
+                + (enabled ? "" : ""));
+        g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+        const auto textW = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), text);
+        auto tip = juce::Rectangle<float>(0.0f, 0.0f, textW + 22.0f, 24.0f);
+        const auto target = snapHovered ? getSplitSnapButtonBounds() : getToolButtonBounds(hoveredIndex);
+        tip.setCentre(static_cast<float>(target.getCentreX()), static_cast<float>(toolbar.getBottom() + 15));
+        tip.setX(juce::jlimit(static_cast<float>(toolbar.getX() + 6),
+                              static_cast<float>(toolbar.getRight() - 6) - tip.getWidth(),
+                              tip.getX()));
+
+        g.setColour(juce::Colours::black.withAlpha(0.50f));
+        g.fillRoundedRectangle(tip.translated(0.0f, 2.0f), 6.0f);
+        g.setColour(theme::surface::primary.withAlpha(0.96f));
+        g.fillRoundedRectangle(tip, 6.0f);
+        g.setColour(theme::line::normal.withAlpha(0.75f));
+        g.drawRoundedRectangle(tip, 6.0f, 1.0f);
+        g.setColour(enabled ? theme::text::primary : theme::text::muted);
+        g.drawText(text, tip.reduced(10.0f, 0.0f), juce::Justification::centred);
+    }
+
+    g.restoreState();
+}
+
+bool ArrangementTimelineComponent::handleEditToolbarClick(juce::Point<int> position)
+{
+    if (! getEditToolbarBounds().contains(position))
+        return false;
+
+    if (getSplitSnapButtonBounds().contains(position))
+    {
+        showSplitSnapMenu();
+        return true;
+    }
+
+    for (int i = 0; i < editToolButtonCount; ++i)
+    {
+        if (! getToolButtonBounds(i).contains(position))
+            continue;
+
+        switch (i)
+        {
+            case 0: currentTool = ToolMode::select; break;
+            case 1: currentTool = ToolMode::range; break;
+            case 2: currentTool = ToolMode::split; break;
+            case 3: currentTool = ToolMode::trim; break;
+            case 4: currentTool = ToolMode::stretch; break;
+            case 5: currentTool = ToolMode::draw; break;
+            case 6: currentTool = ToolMode::mute; break;
+            case 7: currentTool = ToolMode::erase; break;
+            case 8: currentTool = ToolMode::audition; break;
+            default: currentTool = ToolMode::select; break;
+        }
+
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        grabKeyboardFocus();
+        repaint();
+        return true;
+    }
+
+    return true;
+}
+
+void ArrangementTimelineComponent::showSplitSnapMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "Smart", true, splitSnapMode == SplitSnapMode::smart);
+    menu.addItem(2, "Bar", true, splitSnapMode == SplitSnapMode::bar);
+    menu.addItem(3, "Beat", true, splitSnapMode == SplitSnapMode::beat);
+    menu.addItem(4, "1/2 Beat", true, splitSnapMode == SplitSnapMode::halfBeat);
+    menu.addItem(5, "1/4 Beat", true, splitSnapMode == SplitSnapMode::quarterBeat);
+    menu.addSeparator();
+    menu.addItem(6, "Free", true, splitSnapMode == SplitSnapMode::free);
+
+    menu.showMenuAsync(juce::PopupMenu::Options()
+                           .withTargetComponent(this)
+                           .withTargetScreenArea(localAreaToGlobal(getSplitSnapButtonBounds())),
+                       [this](int result)
+                       {
+                           if (result == 1) splitSnapMode = SplitSnapMode::smart;
+                           else if (result == 2) splitSnapMode = SplitSnapMode::bar;
+                           else if (result == 3) splitSnapMode = SplitSnapMode::beat;
+                           else if (result == 4) splitSnapMode = SplitSnapMode::halfBeat;
+                           else if (result == 5) splitSnapMode = SplitSnapMode::quarterBeat;
+                           else if (result == 6) splitSnapMode = SplitSnapMode::free;
+                           else return;
+
+                           repaint();
+                       });
+}
+
+bool ArrangementTimelineComponent::duplicateSelectedClip()
+{
+    if (! selectedClip.has_value())
+        return false;
+
+    auto& tracks = project.getTracks();
+    if (selectedClip->trackIndex < 0 || selectedClip->trackIndex >= static_cast<int>(tracks.size()))
+        return false;
+
+    auto& clips = tracks[static_cast<std::size_t>(selectedClip->trackIndex)].clips;
+    if (selectedClip->clipIndex < 0 || selectedClip->clipIndex >= static_cast<int>(clips.size()))
+        return false;
+
+    pushUndoSnapshot();
+    auto duplicateClip = clips[static_cast<std::size_t>(selectedClip->clipIndex)];
+    duplicateClip.startBeat = juce::jlimit(
+        0.0,
+        juce::jmax(0.0, getTimelineEndBeats() - duplicateClip.lengthInBeats),
+        duplicateClip.startBeat + duplicateClip.lengthInBeats);
+    duplicateClip.name += " Copy";
+    clips.push_back(duplicateClip);
+    selectedClip = SelectedClip { selectedClip->trackIndex, static_cast<int>(clips.size()) - 1 };
+    selectedClips = { *selectedClip };
+    lastClickedClip = selectedClip;
+    focusedSplitBeat.reset();
+    notifyClipSelectionChanged();
+    repaint();
+    return true;
+}
+
+bool ArrangementTimelineComponent::deleteSelectedClips()
+{
+    if (! selectedClip.has_value())
+        return false;
+
+    pushUndoSnapshot();
+    auto& tracks = project.getTracks();
+    auto clipsToDelete = selectedClips;
+    std::sort(clipsToDelete.begin(), clipsToDelete.end(), [](const auto& a, const auto& b)
+    {
+        if (a.trackIndex != b.trackIndex)
+            return a.trackIndex > b.trackIndex;
+
+        return a.clipIndex > b.clipIndex;
+    });
+
+    for (const auto& clipToDelete : clipsToDelete)
+    {
+        if (clipToDelete.trackIndex < 0 || clipToDelete.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        auto& clips = tracks[static_cast<std::size_t>(clipToDelete.trackIndex)].clips;
+        if (clipToDelete.clipIndex >= 0 && clipToDelete.clipIndex < static_cast<int>(clips.size()))
+            clips.erase(clips.begin() + clipToDelete.clipIndex);
+    }
+
+    selectedClip.reset();
+    selectedClips.clear();
+    lastClickedClip.reset();
+    focusedSplitBeat.reset();
+    notifyClipSelectionChanged();
+    hoverClip.reset();
+    dragState.reset();
+    repaint();
+    return true;
+}
+
+bool ArrangementTimelineComponent::loopToSelectedClip()
+{
+    if (! selectedClip.has_value())
+        return false;
+
+    const auto& tracks = project.getTracks();
+    if (selectedClip->trackIndex < 0 || selectedClip->trackIndex >= static_cast<int>(tracks.size()))
+        return false;
+
+    const auto& clips = tracks[static_cast<std::size_t>(selectedClip->trackIndex)].clips;
+    if (selectedClip->clipIndex < 0 || selectedClip->clipIndex >= static_cast<int>(clips.size()))
+        return false;
+
+    const auto& clip = clips[static_cast<std::size_t>(selectedClip->clipIndex)];
+    project.setLoopRange(clip.startBeat, clip.startBeat + clip.lengthInBeats);
+    transport.setLoopEnabled(true);
+    repaint();
+    return true;
 }
 
 void ArrangementTimelineComponent::resized()
@@ -1299,6 +1775,9 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     if (volumeEditorTrackIndex.has_value() && ! trackVolumeInlineEditor.getBounds().contains(event.getPosition()))
         commitTrackVolumeEditor(true);
 
+    if (handleEditToolbarClick(event.getPosition()))
+        return;
+
     if (getAddTrackButtonBounds().contains(event.getPosition()))
     {
         if (onAddTrackRequested)
@@ -1308,22 +1787,8 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
-    // Tool palette hidden for now — click handling disabled.
-    if ((false) && getToolButtonBounds(0).contains(event.getPosition()))
-    {
-        currentTool = ToolMode::pointer;
-        setMouseCursor(juce::MouseCursor::NormalCursor);
-        repaint();
-        return;
-    }
-    if ((false) && getToolButtonBounds(1).contains(event.getPosition()))
-    {
-        currentTool = ToolMode::knife;
-        repaint();
-        return;
-    }
-
     auto bounds = getTimelineContentBounds(*this);
+    bounds.removeFromTop(editToolbarHeight);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto tracksArea = bounds;
     auto gridArea = tracksArea;
@@ -1492,14 +1957,18 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
 
     const auto hit = hitTestClipDetailed(event.getPosition(), false);
 
-    // Knife tool: clicking a clip splits it at the clicked position (snapped).
-    if (currentTool == ToolMode::knife && hit.has_value())
+    // Split tool: clicking a clip splits it at the clicked position, with edge magnet.
+    if (currentTool == ToolMode::split && hit.has_value())
     {
-        const auto splitBeat = snapBeatValue(xToBeatPosition(event.getPosition().x));
+        const auto& clip = project.getTracks()[static_cast<std::size_t>(hit->clip.trackIndex)]
+                               .clips[static_cast<std::size_t>(hit->clip.clipIndex)];
+        const auto rawBeat = xToBeatPosition(event.getPosition().x);
+        const auto splitBeat = snapSplitBeatForClip(rawBeat, clip);
         pushUndoSnapshot();
         if (splitClipAtBeat(hit->clip.trackIndex, hit->clip.clipIndex, splitBeat))
         {
             setSingleSelection(std::nullopt);
+            knifePreviewBeat.reset();
             notifyClipSelectionChanged();
         }
         else if (! undoStack.empty())
@@ -1511,9 +1980,56 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
+    if (currentTool == ToolMode::mute && hit.has_value())
+    {
+        auto& clip = project.getTracks()[static_cast<std::size_t>(hit->clip.trackIndex)]
+                         .clips[static_cast<std::size_t>(hit->clip.clipIndex)];
+        pushUndoSnapshot();
+        clip.muted = ! clip.muted;
+        setSingleSelection(hit->clip);
+        focusedSplitBeat.reset();
+        grabKeyboardFocus();
+        repaint();
+        return;
+    }
+
+    if (currentTool == ToolMode::erase && hit.has_value())
+    {
+        setSingleSelection(hit->clip);
+        deleteSelectedClips();
+        grabKeyboardFocus();
+        repaint();
+        return;
+    }
+
+    if (currentTool == ToolMode::draw && ! hit.has_value() && gridArea.contains(event.getPosition()))
+    {
+        const auto trackIndex = trackIndexFromY(event.getPosition().y);
+        if (trackIndex >= 0 && trackIndex < static_cast<int>(project.getTracks().size())
+            && project.getTracks()[static_cast<std::size_t>(trackIndex)].isMidiTrack)
+        {
+            createMidiClipAt(trackIndex, snapClipCreationBeat(xToBeatPosition(event.getPosition().x)));
+            grabKeyboardFocus();
+            repaint();
+            return;
+        }
+    }
+
     if (hit.has_value())
     {
-        if (event.mods.isShiftDown() && ! hit->overResizeHandle)
+        const auto overClipEditHandle = hit->overResizeHandle
+            || hit->overLeftResizeHandle
+            || hit->overFadeInHandle
+            || hit->overFadeOutHandle
+            || hit->overFadeInCurveHandle
+            || hit->overFadeOutCurveHandle;
+
+        if (overClipEditHandle)
+            focusedSplitBeat.reset();
+        else
+            focusedSplitBeat = xToBeatPosition(event.getPosition().x);
+
+        if (event.mods.isShiftDown() && ! overClipEditHandle)
             selectRangeTo(hit->clip);
         else
             setSingleSelection(hit->clip);
@@ -1524,6 +2040,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         {
             selectedTrackIndex.reset();
             setSingleSelection(std::nullopt);
+            focusedSplitBeat.reset();
         }
 
         selectionBoxState = SelectionBoxState { true, event.getPosition(), event.getPosition() };
@@ -1536,6 +2053,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     {
         selectedTrackIndex.reset();
         setSingleSelection(std::nullopt);
+        focusedSplitBeat.reset();
     }
     dragState.reset();
 
@@ -1543,18 +2061,20 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     {
         const auto& clip = project.getTracks()[static_cast<std::size_t>(hit->clip.trackIndex)].clips[static_cast<std::size_t>(hit->clip.clipIndex)];
         // Edge drags: plain = trim (constant speed), Alt = time-stretch.
-        const auto stretch = event.mods.isAltDown();
-        const auto dragMode = hit->overFadeInCurveHandle
+        const auto stretch = event.mods.isAltDown() || currentTool == ToolMode::stretch;
+        const auto trimMode = currentTool == ToolMode::trim || currentTool == ToolMode::select || currentTool == ToolMode::range;
+        const auto fadeMode = currentTool == ToolMode::fade || currentTool == ToolMode::select;
+        const auto dragMode = (fadeMode && hit->overFadeInCurveHandle)
             ? DragMode::fadeInCurve
-            : hit->overFadeOutCurveHandle
+            : (fadeMode && hit->overFadeOutCurveHandle)
                 ? DragMode::fadeOutCurve
-                : hit->overFadeInHandle
+                : (fadeMode && hit->overFadeInHandle)
                     ? DragMode::fadeIn
-                    : hit->overFadeOutHandle
+                    : (fadeMode && hit->overFadeOutHandle)
                         ? DragMode::fadeOut
-                        : hit->overResizeHandle
+                        : ((trimMode || currentTool == ToolMode::stretch) && hit->overResizeHandle)
                             ? (stretch ? DragMode::stretchRight : DragMode::resizeRight)
-                            : hit->overLeftResizeHandle
+                            : ((trimMode || currentTool == ToolMode::stretch) && hit->overLeftResizeHandle)
                                 ? (stretch ? DragMode::stretchLeft : DragMode::resizeLeft)
                                 : DragMode::move;
         dragState = DragState {
@@ -1734,6 +2254,37 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     const auto origStart = dragState->originalStartBeat;
     const auto origLen   = dragState->originalLengthInBeats;
     const auto origEnd   = origStart + origLen;
+    const auto minLen = minimumClipLengthInBeats;
+
+    if (clip.type == ClipType::midi)
+    {
+        switch (dragState->mode)
+        {
+            case DragMode::resizeRight:
+            case DragMode::stretchRight:
+            {
+                const auto maxLenTimeline = getTimelineEndBeats() - origStart;
+                clip.lengthInBeats = juce::jlimit(minLen,
+                                                  juce::jmax(minLen, maxLenTimeline),
+                                                  snapBeatValue(origLen + beatDelta));
+                break;
+            }
+            case DragMode::resizeLeft:
+            case DragMode::stretchLeft:
+            {
+                const auto newStart = juce::jlimit(0.0, origEnd - minLen, snapBeatValue(origStart + beatDelta));
+                clip.startBeat = newStart;
+                clip.lengthInBeats = origEnd - newStart;
+                break;
+            }
+            default:
+                break;
+        }
+
+        repaint();
+        return;
+    }
+
     const auto trimStart0 = juce::jlimit(0.0, 0.999, dragState->originalSampleStartRatio);
     const auto trimEnd0   = juce::jlimit(trimStart0 + 0.001, 1.0, dragState->originalSampleEndRatio);
     const auto trimSpan0  = juce::jmax(0.001, trimEnd0 - trimStart0);
@@ -1741,7 +2292,6 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     const auto fullLen = dragState->originalWarpTargetLengthInBeats > 0.0
         ? dragState->originalWarpTargetLengthInBeats
         : origLen / trimSpan0;
-    const auto minLen = minimumClipLengthInBeats;
 
     switch (dragState->mode)
     {
@@ -1804,6 +2354,17 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 {
+    if (getEditToolbarBounds().contains(event.getPosition()))
+    {
+        bool overButton = getSplitSnapButtonBounds().contains(event.getPosition());
+        for (int i = 0; i < editToolButtonCount; ++i)
+            overButton = overButton || getToolButtonBounds(i).contains(event.getPosition());
+
+        setMouseCursor(overButton ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        repaint();
+        return;
+    }
+
     if (getAddTrackButtonBounds().contains(event.getPosition()))
     {
         setMouseCursor(juce::MouseCursor::PointingHandCursor);
@@ -1811,7 +2372,7 @@ void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
     }
 
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(timelineRulerHeight);
+    bounds.removeFromTop(timelineTopChromeHeight);
     const auto tracksArea = bounds;
     const auto headerResizeX = tracksArea.getX() + trackHeaderWidth;
     if (tracksArea.contains(event.getPosition())
@@ -1840,8 +2401,14 @@ void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
             || hoverClip->overFadeInCurveHandle || hoverClip->overFadeOutCurveHandle);
     const auto overEdge = hoverClip.has_value()
         && (hoverClip->overResizeHandle || hoverClip->overLeftResizeHandle);
-    if (currentTool == ToolMode::knife)
+    knifePreviewBeat = (currentTool == ToolMode::split && hoverClip.has_value())
+        ? std::optional<double>(xToBeatPosition(event.getPosition().x))
+        : std::nullopt;
+
+    if (currentTool == ToolMode::split)
         setMouseCursor(hoverClip.has_value() ? juce::MouseCursor::IBeamCursor : juce::MouseCursor::NormalCursor);
+    else if (currentTool == ToolMode::erase || currentTool == ToolMode::mute || currentTool == ToolMode::draw)
+        setMouseCursor(hoverClip.has_value() || currentTool == ToolMode::draw ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     else
         setMouseCursor(overFade
                            ? juce::MouseCursor::PointingHandCursor
@@ -1853,6 +2420,7 @@ void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 void ArrangementTimelineComponent::mouseExit(const juce::MouseEvent&)
 {
     hoverClip.reset();
+    knifePreviewBeat.reset();
     setMouseCursor(juce::MouseCursor::NormalCursor);
     repaint();
 }
@@ -1887,6 +2455,7 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& event)
 {
     auto bounds = getTimelineContentBounds(*this);
+    bounds.removeFromTop(editToolbarHeight);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto rulerGridArea = rulerArea;
     rulerGridArea.removeFromLeft(trackHeaderWidth);
@@ -1964,7 +2533,7 @@ void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& even
         if (trackIndex >= 0 && trackIndex < static_cast<int>(project.getTracks().size())
             && project.getTracks()[static_cast<std::size_t>(trackIndex)].isMidiTrack)
         {
-            createMidiClipAt(trackIndex, snapBeatValue(xToBeatPosition(event.getPosition().x)));
+            createMidiClipAt(trackIndex, snapClipCreationBeat(xToBeatPosition(event.getPosition().x)));
             return;
         }
     }
@@ -1991,35 +2560,7 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
 
     if (selectedClip.has_value() && (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey))
     {
-        pushUndoSnapshot();
-        auto& tracks = project.getTracks();
-        auto clipsToDelete = selectedClips;
-        std::sort(clipsToDelete.begin(), clipsToDelete.end(), [](const auto& a, const auto& b)
-        {
-            if (a.trackIndex != b.trackIndex)
-                return a.trackIndex > b.trackIndex;
-
-            return a.clipIndex > b.clipIndex;
-        });
-
-        for (const auto& clipToDelete : clipsToDelete)
-        {
-            if (clipToDelete.trackIndex < 0 || clipToDelete.trackIndex >= static_cast<int>(tracks.size()))
-                continue;
-
-            auto& clips = tracks[static_cast<std::size_t>(clipToDelete.trackIndex)].clips;
-            if (clipToDelete.clipIndex >= 0 && clipToDelete.clipIndex < static_cast<int>(clips.size()))
-                clips.erase(clips.begin() + clipToDelete.clipIndex);
-        }
-
-        selectedClip.reset();
-        selectedClips.clear();
-        lastClickedClip.reset();
-        notifyClipSelectionChanged();
-        hoverClip.reset();
-        dragState.reset();
-        repaint();
-        return true;
+        return deleteSelectedClips();
     }
 
     if (! selectedClip.has_value() && selectedTrackIndex.has_value()
@@ -2031,39 +2572,58 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
 
     if (selectedClip.has_value() && key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0))
     {
-        pushUndoSnapshot();
-        auto& tracks = project.getTracks();
-        auto& clips = tracks[static_cast<std::size_t>(selectedClip->trackIndex)].clips;
-        auto duplicateClip = clips[static_cast<std::size_t>(selectedClip->clipIndex)];
-        duplicateClip.startBeat = juce::jlimit(
-            0.0,
-            juce::jmax(0.0, getTimelineEndBeats() - duplicateClip.lengthInBeats),
-            duplicateClip.startBeat + duplicateClip.lengthInBeats);
-        duplicateClip.name += " Copy";
-        clips.push_back(duplicateClip);
-        selectedClip = SelectedClip { selectedClip->trackIndex, static_cast<int>(clips.size()) - 1 };
-        notifyClipSelectionChanged();
-        repaint();
+        return duplicateSelectedClip();
+    }
+
+    // Split selected clips at the focused split marker, or at the playhead as a fallback.
+    if (key == juce::KeyPress('e', juce::ModifierKeys::commandModifier, 0))
+    {
+        splitSelectionAtFocusedBeat();
         return true;
     }
 
-    // Split (knife) at the playhead — 'B' (blade) or 'S'.
-    if (key == juce::KeyPress('b', 0, 0) || key == juce::KeyPress('s', 0, 0))
+    if (selectedClip.has_value() && key == juce::KeyPress('l', juce::ModifierKeys::commandModifier, 0))
     {
-        splitSelectionAtPlayhead();
-        return true;
+        return loopToSelectedClip();
     }
 
-    if (selectedClip.has_value() && (key == juce::KeyPress('l', 0, 0)
-                                     || key == juce::KeyPress('l', juce::ModifierKeys::commandModifier, 0)))
+    const auto setTool = [this](ToolMode tool)
     {
-        const auto& clip = project.getTracks()[static_cast<std::size_t>(selectedClip->trackIndex)]
-                               .clips[static_cast<std::size_t>(selectedClip->clipIndex)];
-        project.setLoopRange(clip.startBeat, clip.startBeat + clip.lengthInBeats);
-        transport.setLoopEnabled(true);
+        currentTool = tool;
+        setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint();
         return true;
-    }
+    };
+
+    if (key == juce::KeyPress('v', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::select);
+
+    if (key == juce::KeyPress('b', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::split);
+
+    if (key == juce::KeyPress('r', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::range);
+
+    if (key == juce::KeyPress('t', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::trim);
+
+    if (key == juce::KeyPress('s', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::stretch);
+
+    if (key == juce::KeyPress('f', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::fade);
+
+    if (key == juce::KeyPress('d', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+        return setTool(ToolMode::draw);
+
+    if (key == juce::KeyPress('m', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::mute);
+
+    if (key == juce::KeyPress('e', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+        return setTool(ToolMode::erase);
+
+    if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier, 0))
+        return setTool(ToolMode::audition);
 
     if (key != juce::KeyPress::returnKey || ! selectedClip.has_value())
         return false;
@@ -2322,6 +2882,7 @@ juce::String ArrangementTimelineComponent::makeUniqueTrackName(const juce::Strin
 juce::Rectangle<int> ArrangementTimelineComponent::getAddTrackButtonBounds() const noexcept
 {
     auto bounds = getTimelineContentBounds(*this);
+    bounds.removeFromTop(editToolbarHeight);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
     auto headerArea = rulerArea.removeFromLeft(trackHeaderWidth);
     return headerArea.removeFromRight(44).withSizeKeepingCentre(30, 30);
@@ -2524,7 +3085,7 @@ void ArrangementTimelineComponent::deleteSelectedTrack()
 void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(timelineRulerHeight);
+    bounds.removeFromTop(timelineTopChromeHeight);
 
     const auto visibleTracksArea = getVisibleTrackAreaBounds(*this);
     auto visibleGridArea = visibleTracksArea;
@@ -2580,7 +3141,7 @@ void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event,
 void ArrangementTimelineComponent::mouseMagnify(const juce::MouseEvent& event, float scaleFactor)
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto tracksArea = bounds.withTrimmedTop(42);
+    auto tracksArea = bounds.withTrimmedTop(timelineTopChromeHeight);
     auto headerArea = tracksArea.removeFromLeft(trackHeaderWidth);
     auto gridArea = tracksArea;
 
@@ -2660,7 +3221,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     if (targetTrackIndex < 0)
     {
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(timelineRulerHeight);
+        tracksBounds.removeFromTop(timelineTopChromeHeight);
         if (tracksBounds.contains(tracksBounds.getX() + 1, dragSourceDetails.localPosition.y))
         {
             targetTrackIndex = static_cast<int>(project.getTracks().size());
@@ -2916,7 +3477,7 @@ void ArrangementTimelineComponent::ensureBeatVisible(double endBeat)
 void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double verticalDelta, std::optional<juce::Point<int>> focusPoint)
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto tracksArea = bounds.withTrimmedTop(42);
+    auto tracksArea = bounds.withTrimmedTop(timelineTopChromeHeight);
     auto gridArea = tracksArea;
     gridArea.removeFromLeft(trackHeaderWidth);
 
@@ -2987,7 +3548,7 @@ float ArrangementTimelineComponent::beatToX(double beat, juce::Rectangle<int> la
 void ArrangementTimelineComponent::clampScrollOffsets()
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerGridArea = bounds.withTrimmedTop(42);
+    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     
     const auto fullWidth = static_cast<double>(rulerGridArea.getWidth());
@@ -3098,7 +3659,7 @@ double ArrangementTimelineComponent::xToBeatDelta(int xDelta) const noexcept
 double ArrangementTimelineComponent::xToBeatPosition(int x) const noexcept
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(timelineRulerHeight);
+    bounds.removeFromTop(timelineTopChromeHeight);
     bounds.removeFromLeft(trackHeaderWidth);
 
     const auto localX = static_cast<double>(x - bounds.getX());
@@ -3121,6 +3682,23 @@ int ArrangementTimelineComponent::trackIndexFromY(int y) const noexcept
 double ArrangementTimelineComponent::snapBeatValue(double beat) const noexcept
 {
     return std::round(beat / snapSizeInBeats) * snapSizeInBeats;
+}
+
+double ArrangementTimelineComponent::snapClipCreationBeat(double beat) const noexcept
+{
+    const auto pixelTolerance = pixelsPerBeat > 0.0 ? 12.0 / pixelsPerBeat : snapSizeInBeats;
+    const auto tolerance = juce::jlimit(beatEpsilon, 0.20, pixelTolerance);
+    const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+
+    const auto nearestBar = std::round(beat / beatsPerBar) * beatsPerBar;
+    if (std::abs(beat - nearestBar) <= tolerance)
+        return juce::jmax(0.0, nearestBar);
+
+    const auto nearestBeat = std::round(beat);
+    if (std::abs(beat - nearestBeat) <= tolerance)
+        return juce::jmax(0.0, nearestBeat);
+
+    return juce::jmax(0.0, snapBeatValue(beat));
 }
 
 bool ArrangementTimelineComponent::canClipLiveOnTrack(const TimelineClip& clip, int trackIndex) const noexcept
@@ -3210,6 +3788,67 @@ bool ArrangementTimelineComponent::splitClipAtBeat(int trackIndex, int clipIndex
     return true;
 }
 
+double ArrangementTimelineComponent::snapSplitBeatToClipEdge(double splitBeat, const TimelineClip& clip) const noexcept
+{
+    const auto clipEnd = clip.startBeat + clip.lengthInBeats;
+    const auto pixelTolerance = pixelsPerBeat > 0.0 ? splitEdgeSnapPixels / pixelsPerBeat : splitEdgeSnapMaxBeats;
+    const auto tolerance = juce::jmax(beatEpsilon, juce::jmin(splitEdgeSnapMaxBeats, pixelTolerance));
+
+    if (std::abs(splitBeat - clip.startBeat) <= tolerance)
+        return clip.startBeat;
+
+    if (std::abs(splitBeat - clipEnd) <= tolerance)
+        return clipEnd;
+
+    return splitBeat;
+}
+
+double ArrangementTimelineComponent::getSplitSnapStepInBeats() const noexcept
+{
+    switch (splitSnapMode)
+    {
+        case SplitSnapMode::bar:         return static_cast<double>(juce::jmax(1, project.getNumerator()));
+        case SplitSnapMode::beat:        return 1.0;
+        case SplitSnapMode::halfBeat:    return 0.5;
+        case SplitSnapMode::quarterBeat: return 0.25;
+        case SplitSnapMode::free:        return 0.0;
+        case SplitSnapMode::smart:
+        default:
+            if (pixelsPerBeat >= 220.0) return 0.25;
+            if (pixelsPerBeat >= 140.0) return 0.5;
+            if (pixelsPerBeat >= 45.0)  return 1.0;
+            return static_cast<double>(juce::jmax(1, project.getNumerator()));
+    }
+}
+
+juce::String ArrangementTimelineComponent::getSplitSnapName() const
+{
+    switch (splitSnapMode)
+    {
+        case SplitSnapMode::smart:       return "Smart";
+        case SplitSnapMode::bar:         return "Bar";
+        case SplitSnapMode::beat:        return "Beat";
+        case SplitSnapMode::halfBeat:    return "1/2";
+        case SplitSnapMode::quarterBeat: return "1/4";
+        case SplitSnapMode::free:        return "Free";
+    }
+
+    return "Smart";
+}
+
+double ArrangementTimelineComponent::snapSplitBeatForClip(double splitBeat, const TimelineClip& clip) const noexcept
+{
+    const auto edgeBeat = snapSplitBeatToClipEdge(splitBeat, clip);
+    if (std::abs(edgeBeat - splitBeat) > beatEpsilon)
+        return edgeBeat;
+
+    const auto step = getSplitSnapStepInBeats();
+    if (step <= beatEpsilon)
+        return splitBeat;
+
+    return std::round(splitBeat / step) * step;
+}
+
 void ArrangementTimelineComponent::splitSelectionAtPlayhead()
 {
     const auto playheadBeat = transport.getPlayheadBeat();
@@ -3272,6 +3911,83 @@ void ArrangementTimelineComponent::splitSelectionAtPlayhead()
     }
 }
 
+void ArrangementTimelineComponent::splitSelectionAtFocusedBeat()
+{
+    if (! focusedSplitBeat.has_value())
+    {
+        splitSelectionAtPlayhead();
+        return;
+    }
+
+    const auto rawSplitBeat = *focusedSplitBeat;
+    auto& tracks = project.getTracks();
+    std::vector<SelectedClip> targets = selectedClips;
+
+    if (targets.empty())
+    {
+        splitSelectionAtPlayhead();
+        return;
+    }
+
+    std::sort(targets.begin(), targets.end(), [](const auto& a, const auto& b)
+    {
+        if (a.trackIndex != b.trackIndex) return a.trackIndex > b.trackIndex;
+        return a.clipIndex > b.clipIndex;
+    });
+
+    bool didSplit = false;
+    bool captured = false;
+    bool snappedToExistingEdge = false;
+    for (const auto& target : targets)
+    {
+        if (target.trackIndex < 0 || target.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        const auto& clips = tracks[static_cast<std::size_t>(target.trackIndex)].clips;
+        if (target.clipIndex < 0 || target.clipIndex >= static_cast<int>(clips.size()))
+            continue;
+
+        const auto& clip = clips[static_cast<std::size_t>(target.clipIndex)];
+        const auto splitBeat = snapSplitBeatForClip(rawSplitBeat, clip);
+        if (splitBeat <= clip.startBeat + beatEpsilon || splitBeat >= clip.startBeat + clip.lengthInBeats - beatEpsilon)
+        {
+            if (std::abs(splitBeat - clip.startBeat) <= beatEpsilon
+                || std::abs(splitBeat - (clip.startBeat + clip.lengthInBeats)) <= beatEpsilon)
+                snappedToExistingEdge = true;
+            continue;
+        }
+
+        if (! captured)
+        {
+            pushUndoSnapshot();
+            captured = true;
+        }
+
+        if (splitClipAtBeat(target.trackIndex, target.clipIndex, splitBeat))
+            didSplit = true;
+    }
+
+    if (! didSplit && ! snappedToExistingEdge)
+    {
+        splitSelectionAtPlayhead();
+        return;
+    }
+
+    if (! didSplit)
+    {
+        focusedSplitBeat.reset();
+        knifePreviewBeat.reset();
+        repaint();
+        return;
+    }
+
+    focusedSplitBeat.reset();
+    knifePreviewBeat.reset();
+    setSingleSelection(std::nullopt);
+    notifyClipSelectionChanged();
+    repaint();
+}
+
 void ArrangementTimelineComponent::pushUndoSnapshot()
 {
     undoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip });
@@ -3286,8 +4002,10 @@ void ArrangementTimelineComponent::restoreSnapshot(const TimelineSnapshot& snaps
     if (selectedClip.has_value())
         selectedClips.push_back(*selectedClip);
     lastClickedClip = selectedClip;
+    focusedSplitBeat.reset();
     notifyClipSelectionChanged();
     hoverClip.reset();
+    knifePreviewBeat.reset();
     dragState.reset();
 }
 
@@ -3371,7 +4089,7 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
     if (targetTrackIndex < 0)
     {
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(timelineRulerHeight);
+        tracksBounds.removeFromTop(timelineTopChromeHeight);
         if (tracksBounds.contains(tracksBounds.getX() + 1, position.y))
         {
             targetTrackIndex = static_cast<int>(project.getTracks().size());
