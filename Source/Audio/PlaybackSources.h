@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -32,7 +33,7 @@
 // no UI dependency, so they live in Audio/ and will host per-track plugins later.
 namespace orion
 {
-constexpr double vstPitchBendRangeSemitones = 12.0;
+constexpr double vstPitchBendRangeSemitones = 48.0;  // wide for MPE glides (set on the synth via RPN)
 
 class BufferPreviewSource final : public juce::PositionableAudioSource
 {
@@ -262,6 +263,12 @@ public:
         : project(state),
           transport(engine),
           audioFormatManager(formatManager),
+          // Sampler warp uses the HIGH-QUALITY (RubberBand) backend — the fast signalsmith
+          // preview thinned out the low end. To keep playback instant despite the heavier
+          // render, the buffer is pre-warped in the background on load (prewarmWarp), so by
+          // the time a note is played it's already a cache hit. A live note that arrives
+          // before the pre-warm finishes waits for that in-flight job (see getWarpedSampleData)
+          // rather than re-rendering — no quality loss, no dry-then-swap.
           samplerEngine(audioFormatManager,
                         [](const juce::AudioBuffer<float>& source, int outputSamples, double sampleRate, const juce::String& sourcePath)
                         {
@@ -357,9 +364,34 @@ public:
         samplerEngine.noteOff(midiNote, playbackMode);
     }
 
+    // Pre-build the warped sampler buffer in the background (called when a sample is loaded /
+    // warp is enabled) so the first note plays warped instantly instead of computing on demand.
+    void prewarmSamplerWarp(const juce::String& sourcePath, double sourceBpm)
+    {
+        samplerEngine.prewarmWarp(sourcePath, sourceBpm, project.getTempoBpm());
+    }
+
     void allSamplerNotesOff()
     {
         samplerEngine.allNotesOff();
+    }
+
+    // Live portamento for the internal sampler. (VST glide is handled separately.)
+    void setSamplerGlide(bool enabled, double glideTimeSeconds)
+    {
+        samplerEngine.setGlide(enabled, glideTimeSeconds);
+    }
+
+    // Live gain for sampler audition voices (heard immediately, not only on next trigger).
+    void setSamplerLiveGainDb(double db)
+    {
+        samplerEngine.setLiveGainDb(db);
+    }
+
+    // Transient slice points for the armed sampler track's live/pad playback.
+    void setSamplerLiveSlicePoints(const std::vector<double>& points)
+    {
+        samplerEngine.setLiveSlicePoints(points);
     }
 
     //==========================================================================
@@ -720,7 +752,7 @@ public:
         const auto loopStartBeat = project.getLoopStartBeat();
         const auto loopEndBeat = project.getLoopEndBeat();
         const auto loopSpanBeats = juce::jmax(1.0, loopEndBeat - loopStartBeat);
-        if (! loopActive && project.getContentEndInBeats() <= 0.0)
+        if (! loopActive && project.getPlaybackEndInBeats() <= 0.0)
         {
             samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
             processInstruments(*info.buffer, info.startSample, info.numSamples,
@@ -745,7 +777,7 @@ public:
             currentTimelineBeat = loopStartBeat + std::fmod(currentTimelineBeat - loopStartBeat, loopSpanBeats);
         if (! loopActive)
         {
-            const auto repeatEndBeat = project.getContentEndInBeats();
+            const auto repeatEndBeat = project.getPlaybackEndInBeats();
             while (repeatEndBeat > 0.0 && currentTimelineBeat >= repeatEndBeat)
                 currentTimelineBeat = std::fmod(currentTimelineBeat, repeatEndBeat);
         }
@@ -851,13 +883,60 @@ public:
         startWarpProducer();
         warpProducerWake.signal();
         warpOfflineWake.signal();
+
+        // Block briefly (capped) until every stream has a playback lead ready, so the
+        // FIRST Play has samples to read instead of silence. Without this wait the
+        // transport starts while producedSamples == 0 and streamWarpData() returns
+        // nullptr for every block — that's why playback used to "warp in" only after a
+        // few presses, each getting a little further as the producer caught up. The
+        // producer runs far faster than real time, so short loops fully fill within a
+        // few ms; long clips fill the lead here and stream the remainder ahead of the
+        // playhead. The deadline guarantees the UI thread never freezes.
+        std::vector<WarpStream*> pending;
+        {
+            const juce::ScopedLock sl(warpStreamLock);
+            pending.reserve(warpStreams.size());
+            for (auto& kv : warpStreams)
+                pending.push_back(kv.second.get());
+        }
+        if (! pending.empty())
+        {
+            const auto deadlineMs = juce::Time::getMillisecondCounter() + 400;
+            for (;;)
+            {
+                bool allReady = true;
+                for (auto* s : pending)
+                {
+                    // ~0.75s lead per stream (or the whole thing if shorter).
+                    const int lead = juce::jmin(s->targetSamples,
+                                                static_cast<int>(s->out.sampleRate * 0.75));
+                    if (s->producedSamples.load(std::memory_order_acquire) < lead)
+                    {
+                        allReady = false;
+                        break;
+                    }
+                }
+                if (allReady || juce::Time::getMillisecondCounter() >= deadlineMs)
+                    break;
+                warpProducerWake.signal();
+                juce::Thread::sleep(2);
+            }
+        }
     }
 
-    // Audio thread: request the producer fill up to `neededOut`, return the (partly-filled)
-    // output. Reads beyond producedSamples hit cleared samples (brief, only if the producer
-    // is momentarily behind at the very start).
-    const AudioFileData* streamWarpData(const juce::String& path, int targetSamples, int semis, int neededOut)
+    // Audio thread: request the producer fill up to `neededOut` and return the output buffer.
+    // `readyOut` receives the producer's high-water mark (samples actually written, acquired
+    // so they pair with the producer's release) — the caller must NOT read at or beyond it,
+    // because those indices may be cleared zeros or being written right now. We hand the
+    // buffer back even when the producer is still catching up (instead of returning nullptr
+    // for the whole block): the caller silences only the not-yet-filled tail per-sample. The
+    // old all-or-nothing nullptr made a hard stretch pump and drop out whenever the producer
+    // briefly fell behind the playhead — every such block went fully silent, and as the
+    // playhead outran the producer the dropouts grew until the clip went silent.
+    const AudioFileData* streamWarpData(const juce::String& path, int targetSamples, int semis,
+                                        int neededOut, int& readyOut)
     {
+        readyOut = 0;
         WarpStream* s = nullptr;
         {
             const juce::ScopedTryLock stl(warpStreamLock);
@@ -873,13 +952,7 @@ public:
             s->requestedSamples.store(neededOut, std::memory_order_relaxed);
             warpProducerWake.signal();
         }
-        // Only hand back the buffer once the producer has actually written past what this
-        // block needs (acquire pairs with the producer's release). If it's still catching up,
-        // return nullptr so the caller falls back / skips — a brief silence beats reading
-        // half-written samples (which is what crackled). With full pre-fill while stopped this
-        // never trips during normal playback.
-        if (s->producedSamples.load(std::memory_order_acquire) < neededOut)
-            return nullptr;
+        readyOut = s->producedSamples.load(std::memory_order_acquire);
         return &s->out;
     }
 
@@ -954,6 +1027,13 @@ public:
     // Background thread: keep every stream's output filled ahead of the playhead.
     void warpProducerLoop()
     {
+       #if JUCE_MAC || JUCE_IOS
+        // This thread feeds the real-time audio callback, so it must NOT be deprioritised
+        // like the offline (RubberBand) thread. USER_INITIATED keeps it scheduled ahead of
+        // ordinary background work so it stays ahead of the playhead even on a hard stretch
+        // under load — otherwise it falls behind and the clip pumps/drops out on first play.
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+       #endif
         while (warpProducerRunning.load(std::memory_order_acquire))
         {
             bool didWork = false;
@@ -1093,7 +1173,7 @@ private:
         const auto loopStartBeat = project.getLoopStartBeat();
         const auto loopEndBeat = project.getLoopEndBeat();
         const auto loopSpanBeats = juce::jmax(1.0, loopEndBeat - loopStartBeat);
-        const auto repeatEndBeat = project.getContentEndInBeats();
+        const auto repeatEndBeat = project.getPlaybackEndInBeats();
         const auto wrapToProject = wrapToProjectEnd && ! wrapToLoop && repeatEndBeat > 0.0;
         const auto beatAdvancePerSample = beatsPerSecond / renderSampleRate;
         const auto& tracks = project.getTracks();
@@ -1138,7 +1218,7 @@ private:
             if (track.muted)
                 continue;
 
-            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
+            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb + track.trackGainDb));
             float panLeftGain = 1.0f, panRightGain = 1.0f;
             panToGains(track.pan, panLeftGain, panRightGain);
             // Per-output-channel gain (left=0, right=1; mono/others unaffected).
@@ -1234,6 +1314,12 @@ private:
                 const auto clipEndBeat = clip.startBeat + clip.lengthInBeats;
                 const auto linearGain = juce::Decibels::decibelsToGain(static_cast<float>(clip.gainDb)) * trackGain;
                 const auto* audioData = originalAudioData;
+                // Highest sample index that is safe to read from `audioData`. For the
+                // streaming warp stand-in this is the producer's high-water mark (the rest
+                // of the buffer isn't filled yet); for fully-resident buffers it's the whole
+                // buffer. Reads at/after this are silenced per-sample so a producer that's
+                // momentarily behind only mutes the unfilled tail, never the whole block.
+                int streamReadyLimit = std::numeric_limits<int>::max();
                 const auto trimStart = juce::jlimit(0.0, 0.999, clip.sampleStartRatio);
                 const auto trimEnd = juce::jlimit(trimStart + 0.001, 1.0, clip.sampleEndRatio);
                 const auto trimSpan = juce::jmax(0.001, trimEnd - trimStart);
@@ -1276,9 +1362,11 @@ private:
                         const auto endProgress = juce::jlimit(0.0, 1.0, (blockEndBeat - clipStartBeat) / clip.lengthInBeats);
                         const auto srcRatioEnd = trimStart + endProgress * trimSpan;
                         const int neededOut = juce::jmin(targetSamples, static_cast<int>(std::ceil(srcRatioEnd * targetSamples)) + 8);
-                        if (const auto* sd = streamWarpData(clip.sourcePath, targetSamples, semis, neededOut))
+                        int ready = 0;
+                        if (const auto* sd = streamWarpData(clip.sourcePath, targetSamples, semis, neededOut, ready))
                         {
                             audioData = sd;
+                            streamReadyLimit = ready;
                             resolved = true;
                         }
                     }
@@ -1325,11 +1413,23 @@ private:
                         if (sourceRatio < previewStartRatio || sourceRatio >= previewEndRatio)
                             continue;
                     }
-                    else
+                    else if (needsPitchRender)
                     {
+                        // Warped buffer is pre-stretched to the clip length → map 1:1.
                         const auto clipBeatOffset = timelineBeat - clipStartBeat;
                         const auto clipProgress = clip.lengthInBeats > 0.0 ? juce::jlimit(0.0, 1.0, clipBeatOffset / clip.lengthInBeats) : 0.0;
                         sourceRatio = trimStart + clipProgress * trimSpan;
+                    }
+                    else
+                    {
+                        // Unwarped clip (one-shot / full track): play at the file's NATURAL
+                        // rate so pitch is original — never stretch the sample to the clip
+                        // length. Past the trimmed end → silent.
+                        const auto elapsedSeconds = (timelineBeat - clipStartBeat) / juce::jmax(1.0e-6, beatsPerSecond);
+                        const auto totalSamples = juce::jmax(1, audioData->buffer.getNumSamples());
+                        sourceRatio = trimStart + (elapsedSeconds * audioData->sampleRate) / static_cast<double>(totalSamples);
+                        if (sourceRatio >= trimEnd)
+                            continue;
                     }
 
                     const auto sourceSamplePosition = juce::jlimit(0.0, 1.0, sourceRatio)
@@ -1338,9 +1438,14 @@ private:
                     const auto sourceIndex = static_cast<int>(sourceSamplePosition);
                     if (sourceIndex < 0 || sourceIndex >= audioData->buffer.getNumSamples())
                         continue;
+                    // Streaming warp: don't read past what the producer has written. The
+                    // unfilled tail stays silent for this block and fills in on the next
+                    // pass — far better than the whole clip pumping/dropping out.
+                    if (sourceIndex >= streamReadyLimit)
+                        continue;
 
                     const auto sourceFraction = static_cast<float>(sourceSamplePosition - static_cast<double>(sourceIndex));
-                    const auto lastSample = audioData->buffer.getNumSamples() - 1;
+                    const auto lastSample = juce::jmin(audioData->buffer.getNumSamples() - 1, streamReadyLimit - 1);
                     const auto i0 = juce::jmax(0, sourceIndex - 1);
                     const auto i1 = sourceIndex;
                     const auto i2 = juce::jmin(sourceIndex + 1, lastSample);
@@ -1716,23 +1821,71 @@ private:
                     if (anySoloActive && ! track.solo && ! clip.solo)
                         continue;
 
-                    for (const auto& note : clip.midiNotes)
+                    // MPE-style glide: give each pitch-slide voice its own MIDI channel
+                    // (2..16) so voices bend independently; plain notes stay on channel 1.
+                    const auto noteCount = static_cast<int>(clip.midiNotes.size());
+                    std::vector<int> noteChannel(static_cast<std::size_t>(juce::jmax(0, noteCount)), 1);
+                    std::vector<int> slideChannel(clip.pitchSlides.size(), 0);
                     {
+                        int nextCh = 2;
+                        for (std::size_t s = 0; s < clip.pitchSlides.size(); ++s)
+                        {
+                            const auto& sl = clip.pitchSlides[s];
+                            if (sl.points.size() < 2)
+                                continue;
+                            int src = -1;
+                            for (int i = 0; i < noteCount; ++i)
+                            {
+                                const auto& n = clip.midiNotes[static_cast<std::size_t>(i)];
+                                if (n.pitch == sl.sourcePitch && std::abs(n.startBeat - sl.sourceNoteStartBeat) < 0.0001) { src = i; break; }
+                            }
+                            if (src < 0)
+                                for (int i = 0; i < noteCount; ++i)
+                                {
+                                    const auto& n = clip.midiNotes[static_cast<std::size_t>(i)];
+                                    const auto ne = n.startBeat + juce::jmax(0.01, n.lengthInBeats);
+                                    if (sl.points.front().beat >= n.startBeat && sl.points.front().beat <= ne) { src = i; break; }
+                                }
+                            if (src >= 0)
+                            {
+                                slideChannel[s] = nextCh;
+                                noteChannel[static_cast<std::size_t>(src)] = nextCh;
+                                nextCh = nextCh >= 16 ? 2 : nextCh + 1;
+                            }
+                        }
+                    }
+
+                    const auto sendBendRange = [&](int ch, int offset)
+                    {
+                        midi.addEvent(juce::MidiMessage::controllerEvent(ch, 101, 0), offset);  // RPN MSB
+                        midi.addEvent(juce::MidiMessage::controllerEvent(ch, 100, 0), offset);  // RPN LSB = pitch-bend sensitivity
+                        midi.addEvent(juce::MidiMessage::controllerEvent(ch, 6, static_cast<int>(vstPitchBendRangeSemitones)), offset);
+                        midi.addEvent(juce::MidiMessage::controllerEvent(ch, 38, 0), offset);
+                    };
+
+                    for (int ni = 0; ni < noteCount; ++ni)
+                    {
+                        const auto& note = clip.midiNotes[static_cast<std::size_t>(ni)];
+                        const auto ch = noteChannel[static_cast<std::size_t>(ni)];
                         const auto onBeat  = clip.startBeat + note.startBeat;
                         const auto offBeat = onBeat + juce::jmax(0.01, note.lengthInBeats);
 
                         if (const auto offset = offsetForBeat(onBeat); offset >= 0)
                         {
-                            midi.addEvent(juce::MidiMessage::pitchWheel(1, 8192), offset);
-                            midi.addEvent(juce::MidiMessage::noteOn(1, note.pitch,
+                            if (ch != 1)
+                                sendBendRange(ch, offset);  // widen the glide voice's bend range
+                            midi.addEvent(juce::MidiMessage::pitchWheel(ch, 8192), offset);
+                            midi.addEvent(juce::MidiMessage::noteOn(ch, note.pitch,
                                 static_cast<juce::uint8>(juce::jlimit(1, 127, note.velocity))), offset);
                         }
                         if (const auto offset = offsetForBeat(offBeat); offset >= 0)
-                            midi.addEvent(juce::MidiMessage::noteOff(1, note.pitch), offset);
+                            midi.addEvent(juce::MidiMessage::noteOff(ch, note.pitch), offset);
                     }
 
-                    for (const auto& slide : clip.pitchSlides)
+                    for (std::size_t si = 0; si < clip.pitchSlides.size(); ++si)
                     {
+                        const auto& slide = clip.pitchSlides[si];
+                        const int ch = slideChannel[si] > 0 ? slideChannel[si] : 1;
                         if (slide.points.size() < 2)
                             continue;
 
@@ -1789,7 +1942,7 @@ private:
 
                                 const auto span = juce::jmax(0.0001, b.beat - a.beat);
                                 const auto t = juce::jlimit(0.0, 1.0, (clipBeat - a.beat) / span);
-                                return a.pitch + (b.pitch - a.pitch) * t;
+                                return pitchSlideSegmentPitch(a, b, clipBeat - a.beat, t);
                             }
 
                             return slide.points.back().pitch;
@@ -1808,7 +1961,7 @@ private:
                                                                  pitchAt(clipBeat) - static_cast<double>(slideSourcePitch));
                             const auto wheel = juce::jlimit(0, 16383,
                                 static_cast<int>(std::round(8192.0 + (semitones / vstPitchBendRangeSemitones) * 8191.0)));
-                            midi.addEvent(juce::MidiMessage::pitchWheel(1, wheel), offset);
+                            midi.addEvent(juce::MidiMessage::pitchWheel(ch, wheel), offset);
                         }
 
                     }
@@ -1826,7 +1979,7 @@ private:
             if (panicActive || ! trackAudible)
                 continue;
 
-            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
+            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb + track.trackGainDb));
             float panL = 1.0f, panR = 1.0f;
             panToGains(track.pan, panL, panR);
 

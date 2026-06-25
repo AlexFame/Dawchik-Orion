@@ -46,7 +46,7 @@ constexpr int transportSectionGap = 12;
 constexpr int transportControlHeight = 46;
 constexpr int transportSectionHeight = 54;
 constexpr int transportContentVerticalNudge = 0;
-constexpr int samplerBottomPanelHeight = 286;
+constexpr int samplerPanelHeight = 350;   // shared by the sampler and clip editor (compact lower panel)
 constexpr const char* sidebarFoldersSettingsKey = "sidebar.customFolders";
 
 enum MenuItemId
@@ -1062,6 +1062,7 @@ MainComponent::MainComponent()
             finalizeRecordingClip();
             finalizeAudioRecordingClip();
         }
+        startMidiRecordingFromRecordButtonIfNeeded();
         recordButton.setToggleState(transportEngine.isRecordArmed(), juce::dontSendNotification);
         updateTransportLabels();
     };
@@ -1073,7 +1074,9 @@ MainComponent::MainComponent()
         menu.addItem(1, "Record with metronome", true, withMetro && ! withPrecount);
         menu.addItem(2, "Record without metronome", true, ! withMetro && ! withPrecount);
         menu.addItem(3, "4-count before recording", true, withPrecount);
-        menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(&transportBar),
+        menu.showMenuAsync(juce::PopupMenu::Options{}
+                                .withTargetComponent(&transportBar)
+                                .withTargetScreenArea(transportBar.localAreaToGlobal(transportBar.getRecordOptionsBounds())),
             [this](int result)
             {
                 if (result == 1)
@@ -1317,6 +1320,22 @@ MainComponent::MainComponent()
             if (! clipEditorPreviewTransportSource.isPlaying())
                 clipEditorPreviewPlayheadRatio = juce::jlimit(start, end, clipEditorPreviewPlayheadRatio);
             clipEditorSelectionRanges[*selectedArrangementClip] = { start, end };
+
+            // Move the PLAYLIST playhead in sync with the START marker (purely visual — the
+            // clip itself isn't touched). The marker's position along the source maps to a
+            // point inside the clip on the timeline.
+            if (! transportEngine.isPlaying())
+            {
+                if (auto* clip = getSelectedTimelineClip(); clip != nullptr)
+                {
+                    const auto beat = clip->startBeat + start * clip->lengthInBeats;
+                    transportEngine.setPlayheadBeat(beat);
+                    if (arrangementPlaybackSource != nullptr)
+                        arrangementPlaybackSource->syncToTransportPosition();
+                    arrangementTimeline.repaint();
+                }
+            }
+
             refreshClipEditor();
         }
     };
@@ -1329,6 +1348,8 @@ MainComponent::MainComponent()
         clipEditorPreviewStartRatio = start;
         clipEditorPreviewEndRatio = end;
         clipEditorSelectionRanges[*selectedArrangementClip] = { start, end };
+        // Don't modify the clip in the playlist (no trim / no length / no tempo change) —
+        // just move the clip-editor's playback line to the new START so it follows the marker.
 
         // AKAI MPC-style: on release, reposition the loop to the final selection. If the
         // START marker was moved, jump playback to the new start so it plays from there.
@@ -1427,6 +1448,11 @@ MainComponent::MainComponent()
         {
             armOrStartBrowserPreview();
         }
+    };
+    browserPanel.onDragStarted = [this]
+    {
+        // Silence the browser preview as soon as the sample is dragged toward the playlist.
+        stopBrowserPreview(true);
     };
     browserPanel.onPreviewBpmSyncToggled = [this]
     {
@@ -1730,6 +1756,11 @@ MainComponent::MainComponent()
             arrangementPlaybackSource->allInstrumentNotesOff();
         }
     };
+    samplerPanel.onSlicePointsChanged = [this](const std::vector<double>& points)
+    {
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->setSamplerLiveSlicePoints(points);
+    };
     midiEditorOverlay.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
     midiEditorOverlay.onTogglePlayback = [this]() { toggleTransportFromUi(); };
     midiEditorOverlay.onStopAndRewindToClipStart = [this]()
@@ -1770,6 +1801,11 @@ MainComponent::MainComponent()
     {
         if (selectedArrangementClip.has_value())
             liveMidiNoteOff(selectedArrangementClip->first, midiNote);
+    };
+    midiEditorOverlay.onGlideChanged = [this](bool on)
+    {
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->setSamplerGlide(on, 0.08);
     };
     midiEditorOverlay.onRequestPlayheadBeat = [this]() { return transportEngine.getPlayheadBeat(); };
     midiEditorOverlay.onRequestPlayingState = [this]() { return transportEngine.isPlaying(); };
@@ -1885,6 +1921,24 @@ MainComponent::MainComponent()
         {
             clipEditorPanel.setVisible(false);
             resized();
+        }
+
+        // Close the sampler panel if its bound track no longer exists or has no sample (e.g.
+        // the clip/track it was opened for was just deleted) — otherwise it lingers showing
+        // "No sample loaded".
+        if (samplerPanel.isVisible())
+        {
+            const auto activeIdx = samplerPanel.getActiveTrackIndex();
+            const auto& currentTracks = projectState.getTracks();
+            const bool stillValid = activeIdx >= 0
+                                    && activeIdx < static_cast<int>(currentTracks.size())
+                                    && currentTracks[static_cast<std::size_t>(activeIdx)].samplerSourcePath.isNotEmpty();
+            if (! stillValid)
+            {
+                samplerPanel.disarmKeyboard();
+                samplerPanel.setVisible(false);
+                resized();
+            }
         }
 
         // NOTE: do NOT re-bake the warp cache here. This handler fires on every clip
@@ -2333,7 +2387,8 @@ void MainComponent::resized()
     const auto bottomPanelOpen = samplerOpen || clipEditorOpen;
     const auto closedArrangementArea = playlistArea;
     auto openArrangementArea = playlistArea;
-    auto lowerPanelArea = openArrangementArea.removeFromBottom(juce::jmin(samplerBottomPanelHeight, openArrangementArea.getHeight()));
+    // Sampler and clip editor share one compact lower-panel height.
+    auto lowerPanelArea = openArrangementArea.removeFromBottom(juce::jmin(samplerPanelHeight, openArrangementArea.getHeight()));
     const auto arrangementArea = bottomPanelOpen ? openArrangementArea : closedArrangementArea;
 
     arrangementTimeline.setBounds(arrangementArea);
@@ -2413,7 +2468,9 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
         menu.addItem(1, "Record with metronome", true, withMetro && ! withPrecount);
         menu.addItem(2, "Record without metronome", true, ! withMetro && ! withPrecount);
         menu.addItem(3, "4-count before recording", true, withPrecount);
-        menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(&recordButton),
+        menu.showMenuAsync(juce::PopupMenu::Options{}
+                                .withTargetComponent(&recordButton)
+                                .withTargetScreenArea(recordButton.localAreaToGlobal(recordButton.getLocalBounds())),
             [this](int result)
             {
                 if (result == 1)
@@ -2510,9 +2567,6 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyPressed(key))
-        return true;
-
     if (key == juce::KeyPress('r', juce::ModifierKeys::commandModifier, 0))
     {
         const auto selectedTrackIndex = arrangementTimeline.getSelectedTrackIndex();
@@ -2541,6 +2595,22 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         updateTransportLabels();
         return true;
     }
+
+    if (key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0))
+        return arrangementTimeline.duplicateSelectedClip();
+
+    if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier, 0))
+        return arrangementTimeline.selectAllClips();
+
+    if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0) && arrangementTimeline.undo())
+        return true;
+
+    if ((key == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)
+         || key == juce::KeyPress('y', juce::ModifierKeys::commandModifier, 0)) && arrangementTimeline.redo())
+        return true;
+
+    if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyPressed(key))
+        return true;
 
     if (key == juce::KeyPress::returnKey)
     {
@@ -2814,6 +2884,15 @@ void MainComponent::timerCallback()
     updateTransportLabels();
     updateTrackMeterLevels();
     maybeStartBackgroundAnalysis();
+
+    // Keep the sampler's live audition gain in sync with the armed track's volume so the
+    // Gain knob (and track fader) are heard during playback, not only after a re-trigger.
+    if (arrangementPlaybackSource != nullptr)
+    {
+        double samplerGainDb = 0.0;
+        if (samplerPanel.getActiveTrackGainDb(samplerGainDb))
+            arrangementPlaybackSource->setSamplerLiveGainDb(samplerGainDb);
+    }
     // While stopped, pre-configure warp streamers + warm the background producer so the
     // next Play is instant and the stretched audio is already filled ahead. Cheap once the
     // streams exist (skips configured ones); the one-time original decode is invisible
@@ -2941,7 +3020,7 @@ void MainComponent::timerCallback()
     else if (! playing && recordingSession.has_value())
     {
         // Playback stopped externally (loop end / user stop / count-in cancel) — finalise.
-        finalizeRecordingClip();
+        finishRecordingAndDisarm();
     }
 
     if (canRecordNow && armedAudioTrack >= 0)
@@ -2977,7 +3056,10 @@ void MainComponent::timerCallback()
     }
     else if ((! playing || ! recordArmed || armedAudioTrack < 0) && audioRecordingSession.has_value())
     {
-        finalizeAudioRecordingClip();
+        if (! playing)
+            finishRecordingAndDisarm();
+        else
+            finalizeAudioRecordingClip();
     }
 }
 
@@ -2995,6 +3077,7 @@ void MainComponent::buttonClicked(juce::Button* button)
             finalizeRecordingClip();
             finalizeAudioRecordingClip();
         }
+        startMidiRecordingFromRecordButtonIfNeeded();
         recordButton.setToggleState(transportEngine.isRecordArmed(), juce::dontSendNotification);
         updateTransportLabels();
     }
@@ -3478,11 +3561,44 @@ void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item)
     if (! track.isMidiTrack)
         return;
 
+    arrangementTimeline.captureUndoSnapshot();   // one checkpoint for the whole load
+
     const auto analysis = analyzeAudioWarpMetadata(item.file, projectState.getTempoBpm(), projectState.getNumerator());
     track.samplerSourcePath = item.file.getFullPathName();
     track.samplerSourceDurationSeconds = analysis.durationSeconds;
     track.samplerSourceBpm = analysis.sourceBpm;
     track.samplerDetectedBars = analysis.detectedBars;
+
+    // Warp ON by default for tempo'd loops, so they sync to the project tempo just like a
+    // dropped playlist clip (the Warp button then toggles it OFF). One-shots stay unwarped.
+    const bool isOneShot = analysis.durationSeconds > 0.0 && analysis.durationSeconds < 1.2
+                           && analysis.detectedBars == 0;
+    track.samplerWarpEnabled = analysis.durationSeconds > 0.0 && analysis.durationSeconds <= 90.0
+                               && ! isOneShot
+                               && (analysis.detectedBars > 0 || analysis.sourceBpm > 0.0);
+
+    // Auto-transpose into the project key (shortest direction, max 6 semitones), mirroring
+    // the playlist clip's key-shift default so the sampler plays in the project's key too.
+    if (projectState.isKeyEnabled() && analysis.sourceKeyRoot >= 0)
+    {
+        int keyDiff = projectState.getKeyRoot() - analysis.sourceKeyRoot;
+        while (keyDiff > 6)  keyDiff -= 12;
+        while (keyDiff < -6) keyDiff += 12;
+        track.samplerTransposeSemitones = keyDiff;
+    }
+    else
+    {
+        track.samplerTransposeSemitones = 0;
+    }
+
+    // Also drop the sample into the playlist on the same (hybrid) track at the start, so the
+    // file is both arrangeable in the timeline and playable chromatically from the sampler.
+    // Audio clips render regardless of track type, so a sampler (MIDI) track can carry one.
+    arrangementTimeline.addAudioClipToTrack(item.file, trackIndex, 0.0);
+
+    // Pre-warp in the background now, so the warped buffer is cached before the first note.
+    if (track.samplerWarpEnabled && arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->prewarmSamplerWarp(track.samplerSourcePath, track.samplerSourceBpm);
 
     samplerPanel.openTrackIndex(trackIndex);
     resized();
@@ -4551,24 +4667,29 @@ void MainComponent::stopGlobalSpacePreview()
 
 void MainComponent::toggleTransportFromUi()
 {
-    if (clipEditorPanel.isVisible() && selectedArrangementClip.has_value())
+    // NB: previously, with the clip editor open, Play hijacked to an isolated local loop of
+    // the selected clip and never started the transport — so the playlist didn't play. Now
+    // Play always drives the arrangement, so the clip plays in context with the rest of the
+    // playlist. (The local preview still re-auditions automatically on transpose changes.)
+
+    // While the clip editor is open, EACH Play should start from the set START marker (not
+    // resume wherever the play/pause toggle last left the playhead) — so auditioning the clip
+    // from its start point is repeatable. Only applies when starting playback, not pausing.
+    if (clipEditorPanel.isVisible()
+        && ! transportEngine.isPlaying()
+        && ! transportEngine.isCountInActive())
     {
         if (auto* clip = getSelectedTimelineClip(); clip != nullptr && clip->type == ClipType::audio)
         {
-            if (clipEditorPreviewTransportSource.isPlaying())
-                stopClipEditorPreview(true);
-            else
-                startClipEditorPreview();
-
-            updateTransportLabels();
-            refreshClipEditor();
-            return;
+            const auto startBeat = clip->startBeat
+                + juce::jlimit(0.0, 1.0, clipEditorPreviewStartRatio) * clip->lengthInBeats;
+            transportEngine.setPlayheadBeat(startBeat);
         }
     }
 
-    // Count-in is hidden behind the REC right-click menu. The metronome button
-    // controls click during playback/recording; this flag only controls pre-roll.
-    const auto useCountIn = countInButton.getToggleState();
+    // Count-in belongs to recording only. Keep normal playback instant even if the
+    // user previously selected "4-count before recording" in the REC options.
+    const auto useCountIn = transportEngine.isRecordArmed() && countInButton.getToggleState();
 
     transportController.togglePlayback(
         useCountIn,
@@ -4598,13 +4719,27 @@ void MainComponent::toggleTransportFromUi()
     updateTransportLabels();
 }
 
+void MainComponent::startMidiRecordingFromRecordButtonIfNeeded()
+{
+    if (! transportEngine.isRecordArmed()
+        || transportEngine.isPlaying()
+        || transportEngine.isCountInActive()
+        || resolveArmedMidiTrack() < 0)
+        return;
+
+    toggleTransportFromUi();
+}
+
 void MainComponent::stopTransportFromUi()
 {
-    finalizeRecordingClip(); // close any in-flight MIDI recording session
-    finalizeAudioRecordingClip();
+    finishRecordingAndDisarm();
     stopClipEditorPreview(true);
+    samplerPanel.stopPreviewPlayback(); // halt the simpler audition + waveform playhead
     if (arrangementPlaybackSource != nullptr)
+    {
         arrangementPlaybackSource->allInstrumentNotesOff(); // flush any hung instrument notes
+        arrangementPlaybackSource->allSamplerNotesOff();    // and any sampler audition voices
+    }
     transportController.stop(
         [this]() { stopBrowserPreview(true); },
         [this]()
@@ -4621,6 +4756,22 @@ void MainComponent::stopTransportFromUi()
     }
     updateTransportLabels();
     arrangementTimeline.repaint();
+}
+
+void MainComponent::finishRecordingAndDisarm()
+{
+    const auto hadRecording = recordingSession.has_value() || audioRecordingSession.has_value();
+
+    finalizeRecordingClip(); // close any in-flight MIDI recording session
+    finalizeAudioRecordingClip();
+
+    if (hadRecording || transportEngine.isRecordArmed())
+    {
+        transportController.setRecordArmed(false);
+        recordButton.setToggleState(false, juce::dontSendNotification);
+    }
+
+    updateTransportLabels();
 }
 
 void MainComponent::recordNoteOn(int pitch, int velocity)
@@ -5011,6 +5162,14 @@ void MainComponent::rewindTransportFromUi()
 
 void MainComponent::toggleLoopFromUi()
 {
+    if (loopButton.getToggleState() && arrangementTimeline.loopToSelectedClip())
+    {
+        loopButton.setToggleState(transportEngine.isLoopEnabled(), juce::dontSendNotification);
+        updateTransportLabels();
+        arrangementTimeline.repaint();
+        return;
+    }
+
     transportController.setLoopEnabled(
         loopButton.getToggleState(),
         getSelectedTimelineClip(),
@@ -5041,6 +5200,15 @@ void MainComponent::toggleClipEditorFromUi()
     const auto shouldOpen = ! clipEditorPanel.isVisible();
     if (shouldOpen)
     {
+        // The clip editor edits the SELECTED audio clip — don't open an empty editor when
+        // there's nothing to edit (e.g. no clips in the playlist / no clip selected).
+        if (auto* clip = getSelectedTimelineClip(); clip == nullptr || clip->type != ClipType::audio)
+        {
+            statusLabel.setText("Select an audio clip to open the Clip Editor", juce::dontSendNotification);
+            updateTransportLabels();   // keep the navbar button reflecting "closed"
+            return;
+        }
+
         samplerPanel.setVisible(false);
         refreshClipEditor();
     }
@@ -5524,6 +5692,19 @@ void MainComponent::refreshClipEditor()
     ClipEditorState editorState;
     const auto* clip = getSelectedTimelineClip();
     editorState.hasSelection = clip != nullptr;
+
+    // Catch-all: never leave the clip editor open with nothing to edit (e.g. the last clip
+    // was deleted). It only makes sense for a selected audio clip.
+    if (clipEditorPanel.isVisible() && (clip == nullptr || clip->type != ClipType::audio))
+    {
+        stopClipEditorPreview(true);
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->clearClipEditorPreviewTrim();
+        clipEditorPanel.setVisible(false);
+        resized();
+        updateTransportLabels();
+        return;
+    }
 
     if (clip != nullptr)
     {

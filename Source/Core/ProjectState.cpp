@@ -117,6 +117,16 @@ double ProjectState::getContentEndInBeats() const noexcept
     return maxBeat;
 }
 
+double ProjectState::getPlaybackEndInBeats() const noexcept
+{
+    const auto contentEnd = getContentEndInBeats();
+    if (contentEnd <= 0.0)
+        return 0.0;
+
+    const auto beatsPerBar = static_cast<double>(juce::jmax(1, timeSigNumerator));
+    return juce::jmax(beatsPerBar, std::ceil(contentEnd / beatsPerBar) * beatsPerBar);
+}
+
 bool ProjectState::hasLoopRange() const noexcept
 {
     return loopRangeActive;

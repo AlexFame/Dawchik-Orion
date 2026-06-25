@@ -63,7 +63,7 @@ double TransportEngine::getPlayheadBeat() const noexcept
         // Recording must run forward freely until the user presses Stop.
         if (! recordArmed)
         {
-            const auto repeatEndBeat = project.getContentEndInBeats();
+            const auto repeatEndBeat = project.getPlaybackEndInBeats();
             if (repeatEndBeat > 0.0)
             {
                 while (currentBeat >= repeatEndBeat)
@@ -94,7 +94,7 @@ void TransportEngine::play(bool withCountIn)
     if (playing || countInActive)
         return;
 
-    const auto projectEndBeat = project.getContentEndInBeats();
+    const auto projectEndBeat = project.getPlaybackEndInBeats();
     if (! (loopEnabled && project.hasLoopRange()) && playheadBeat >= juce::jmax(0.0, projectEndBeat - 0.0001))
         rewindToStart();
 
@@ -213,7 +213,7 @@ void TransportEngine::timerCallback()
     {
         // Same rule as getPlayheadBeat(): no content-end wraparound while record-armed,
         // otherwise an empty project's recording would overwrite itself in a 1-clip loop.
-        const auto repeatEndBeat = project.getContentEndInBeats();
+        const auto repeatEndBeat = project.getPlaybackEndInBeats();
         if (repeatEndBeat > 0.0)
         {
             // There is content — wrap the playhead at the end of the last clip.

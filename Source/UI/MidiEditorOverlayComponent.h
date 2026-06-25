@@ -39,6 +39,8 @@ public:
     // A short space TAP promotes the running preview into normal playback (keeps playing,
     // no rewind); a HOLD stops on release. This commits the tap case.
     std::function<void()> onCommitGlobalSpacePreview;
+    // Live portamento toggle: when on, every note played glides from the previous pitch.
+    std::function<void(bool)> onGlideChanged;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -136,7 +138,8 @@ private:
     {
         move,
         resizeStart,
-        resizeEnd
+        resizeEnd,
+        curve          // drag a segment's midpoint handle to bend it
     };
 
     enum class PianoRollTool
@@ -156,12 +159,14 @@ private:
     {
         int slideIndex { -1 };
         SlideEditMode mode { SlideEditMode::move };
+        int segmentIndex { -1 };   // for curve mode: index of the segment's leading point
     };
 
     struct SlideEditState
     {
         int slideIndex { -1 };
         SlideEditMode mode { SlideEditMode::move };
+        int segmentIndex { -1 };
         juce::Point<int> mouseDownPosition;
         PitchSlide originalSlide;
         bool historyCaptured { false };
@@ -178,6 +183,8 @@ private:
     juce::Rectangle<int> getVelocityBarBounds(int noteIndex) const noexcept;
     double getPixelsPerBeat() const noexcept;
     double getVisibleBeatRange() const noexcept;
+    double getContentBeats() const noexcept;   // clip length + editing headroom (drawable width)
+    void   growClipToFit(double endBeat);       // extend the clip (snapped up to a bar) so notes fit
     std::optional<NoteHit> hitTestNote(juce::Point<int> position) const;
     std::optional<SlideHit> hitTestSlide(juce::Point<int> position) const;
     std::optional<int> hitTestVelocityBar(juce::Point<int> position) const;
@@ -198,6 +205,10 @@ private:
     void selectSingleNote(int noteIndex);
     void duplicateSelectedNotes();
     void deleteSelectedNotes();
+    // MPE-style glide: JOIN merges the selected notes into one voice that glides between
+    // their pitches (drawn as a connected slide line); SPLIT turns a slide back into notes.
+    void joinSelectedNotes();
+    void splitSelectedSlide();
     void deleteSelectedSlide();
     void quantizeSelectedNotes();
     void updateSubtitle();
@@ -291,6 +302,10 @@ private:
     juce::TextButton stepRestButton;
     juce::TextButton stepBackButton;
     juce::TextButton stepTieButton;
+    juce::TextButton joinButton;
+    juce::TextButton splitButton;
+    juce::TextButton modButton;   // cycles the selected glide's LFO/vibrato shape
+    juce::TextButton glideButton;
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;
     juce::Label scaleLockLabel;
@@ -303,12 +318,16 @@ private:
     int scaleRoot { 0 };
     int scalePatternIndex { 0 };
     double snapSizeInBeats { 0.25 };
+    // Default length for a freshly drawn note. Starts at 4 bars (4 beats/bar = 16 beats) and
+    // then remembers whatever length the user last drew/stretched a note to.
+    double lastNoteLengthInBeats { 16.0 };
     double stepWriteCursorBeat { 0.0 };
     double stepWriteStepLengthInBeats { 0.25 };
     bool focusModeEnabled { false };
     bool scaleLockEnabled { true };  // new notes snap to in-scale pitches when true
     bool stepWriteEnabled { false };
     bool slidePenEnabled { false };
+    bool glideEnabled { false };  // live portamento
     SlideVisibilityMode slideVisibilityMode { SlideVisibilityMode::ghost };
     bool hasStoredViewportBeforeFocus { false };
     bool ignoreNextMouseDown { false };

@@ -1317,11 +1317,12 @@ juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce
         // Fall through to the proven path if something went wrong.
     }
 
-    if (inferLoopType(sourcePath, source, sampleRate) == LoopType::drum)
+    // The drum path doesn't pitch-shift, so only take it when NO key-shift is requested.
+    // A tonal clip that needs pitching (texture/phrase, even if percussive) must go through
+    // the melodic path below so the transpose is actually applied.
+    if (std::abs(pitchScale - 1.0) < 1.0e-6
+        && inferLoopType(sourcePath, source, sampleRate) == LoopType::drum)
     {
-        // Drum path doesn't support pitch shift yet (tonal preservation for drums is iffy
-        // anyway). Just stretch via the drum algorithm and ignore pitchScale for now.
-        juce::ignoreUnused(pitchScale);
         return drumBeatsTailfillBuffer(source, outputSamples, sampleRate);
     }
 

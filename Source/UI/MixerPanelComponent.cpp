@@ -1105,7 +1105,9 @@ void MixerPanelComponent::mouseUp(const juce::MouseEvent& event)
         const bool wasDrag = sendDrag.dragging;
         const auto t = sendDrag.track, row = sendDrag.row;
         sendDrag = SendDrag{};
-        if (! wasDrag && onSendClicked)   // plain click → open the send menu
+        // A double-click is handled by mouseDoubleClick (type a %), so don't also pop the
+        // single-click send menu on the first release of that double-click.
+        if (! wasDrag && event.getNumberOfClicks() < 2 && onSendClicked)
             onSendClicked(t, row);
         return;
     }
@@ -1144,7 +1146,65 @@ void MixerPanelComponent::mouseDoubleClick(const juce::MouseEvent& event)
             return;
         }
     if (masterLayout.dbBox.contains(pos))
+    {
         beginDbEdit(-1, masterLayout.dbBox);
+        return;
+    }
+
+    // Double-click a send row's % → type an exact percentage.
+    int st = -1, sr = -1;
+    if (sendSlotAt(pos, st, sr) && sr >= 0)
+    {
+        for (auto& strip : strips)
+            if (strip != nullptr && ! strip->isBus && strip->trackIndex == st)
+            {
+                const auto area = strip->layout.sendsSlot.reduced(3, 3);
+                const auto rowRect = juce::Rectangle<int>(area.getX(), area.getY() + sr * 20, area.getWidth(), 18);
+                beginSendEdit(st, sr, rowRect);
+                break;
+            }
+    }
+}
+
+void MixerPanelComponent::beginSendEdit(int track, int row, juce::Rectangle<int> box)
+{
+    commitSendEdit();   // close any prior editor
+    const auto& tracks = project.getTracks();
+    if (track < 0 || track >= static_cast<int>(tracks.size())
+        || row < 0 || row >= static_cast<int>(tracks[static_cast<std::size_t>(track)].sends.size()))
+        return;
+
+    sendEditTrack = track;
+    sendEditRow = row;
+    const auto curPct = juce::roundToInt(tracks[static_cast<std::size_t>(track)].sends[static_cast<std::size_t>(row)].level * 100.0);
+
+    sendEditor = std::make_unique<juce::TextEditor>();
+    sendEditor->setBounds(box.expanded(2, 2));
+    sendEditor->setJustification(juce::Justification::centred);
+    sendEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff0c0e10));
+    sendEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    sendEditor->setColour(juce::TextEditor::outlineColourId, cyan);
+    sendEditor->setColour(juce::TextEditor::focusedOutlineColourId, cyan);
+    sendEditor->setText(juce::String(curPct), false);
+    sendEditor->setSelectAllWhenFocused(true);
+    sendEditor->onReturnKey = [this] { commitSendEdit(); };
+    sendEditor->onEscapeKey = [this] { sendEditor.reset(); sendEditTrack = sendEditRow = -1; };
+    sendEditor->onFocusLost = [this] { commitSendEdit(); };
+    addAndMakeVisible(sendEditor.get());
+    sendEditor->grabKeyboardFocus();
+}
+
+void MixerPanelComponent::commitSendEdit()
+{
+    if (sendEditor == nullptr) return;
+    const auto pct = juce::jlimit(0, 100, sendEditor->getText().removeCharacters("% ").getIntValue());
+    const auto track = sendEditTrack, row = sendEditRow;
+    sendEditor.reset();
+    sendEditTrack = sendEditRow = -1;
+
+    if (track >= 0 && row >= 0 && onSendLevelChanged)
+        onSendLevelChanged(track, row, static_cast<float>(pct) / 100.0f);
+    repaint();
 }
 
 void MixerPanelComponent::beginDbEdit(int target, juce::Rectangle<int> box)

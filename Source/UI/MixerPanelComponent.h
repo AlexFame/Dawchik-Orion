@@ -172,6 +172,13 @@ private:
     void beginDbEdit(int target, juce::Rectangle<int> box);
     void commitDbEdit();
 
+    // Inline send-level entry (double-click a send row's % to type a percentage).
+    std::unique_ptr<juce::TextEditor> sendEditor;
+    int sendEditTrack { -1 };
+    int sendEditRow { -1 };
+    void beginSendEdit(int track, int row, juce::Rectangle<int> box);
+    void commitSendEdit();
+
     static constexpr int kBusInsertKeyBase = 1000000;
     static constexpr int kMasterInsertKey  = 2000000;   // master strip insert-chain id
     int masterInsertScroll { 0 };

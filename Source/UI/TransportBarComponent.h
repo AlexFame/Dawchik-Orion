@@ -51,6 +51,7 @@ public:
     void setState(const TransportBarState& newState);
     juce::Rectangle<int> getTempoEditorBounds() const noexcept;
     juce::Rectangle<int> getKeyBounds() const noexcept;
+    juce::Rectangle<int> getRecordOptionsBounds() const noexcept;
 
     void paint(juce::Graphics& g) override;
     void resized() override;

@@ -205,6 +205,11 @@ juce::Rectangle<int> TransportBarComponent::getKeyBounds() const noexcept
     return keyCardBounds;
 }
 
+juce::Rectangle<int> TransportBarComponent::getRecordOptionsBounds() const noexcept
+{
+    return recordButton.getBounds();
+}
+
 void TransportBarComponent::paint(juce::Graphics& g)
 {
     g.fillAll(theme::core::deepSpace);

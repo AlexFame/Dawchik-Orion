@@ -33,7 +33,48 @@ struct PitchSlidePoint
 {
     double beat { 0.0 };
     double pitch { 60.0 };
+    // Curvature of the glide segment LEAVING this point toward the next, in [-1, 1].
+    // 0 = straight; >0 bows one way, <0 the other (bezier-like ease).
+    double curve { 0.0 };
+    // Per-segment LFO/vibrato (applied to the segment leaving this point).
+    int    lfoShape { 0 };       // 0 off, 1 sine, 2 triangle, 3 saw, 4 square
+    double lfoDepth { 0.0 };     // semitones
+    double lfoRate  { 3.0 };     // cycles per beat (tempo-synced)
 };
+
+// LFO waveform in [-1, 1] for a given phase (in cycles).
+inline double pitchSlideLfo(int shape, double phase) noexcept
+{
+    const auto frac = phase - std::floor(phase);  // 0..1
+    switch (shape)
+    {
+        case 1: return std::sin(frac * juce::MathConstants<double>::twoPi);
+        case 2: return 1.0 - 4.0 * std::abs(frac - 0.5);             // triangle
+        case 3: return 2.0 * frac - 1.0;                            // saw (rising)
+        case 4: return frac < 0.5 ? 1.0 : -1.0;                     // square
+        default: return 0.0;
+    }
+}
+
+// Shapes a normalised position t (0..1) along a glide segment by its curvature.
+inline double pitchSlideCurveShape(double t, double curve) noexcept
+{
+    t = juce::jlimit(0.0, 1.0, t);
+    if (std::abs(curve) < 1.0e-4)
+        return t;
+    const auto k = std::pow(2.0, juce::jlimit(-1.0, 1.0, curve) * 3.0);  // c:-1..1 → k:1/8..8
+    return std::pow(t, k);
+}
+
+// Combined pitch of a glide segment at normalised position t (curve + LFO).
+inline double pitchSlideSegmentPitch(const PitchSlidePoint& a, const PitchSlidePoint& b,
+                                     double beatInto, double tNorm) noexcept
+{
+    auto pitch = a.pitch + (b.pitch - a.pitch) * pitchSlideCurveShape(tNorm, a.curve);
+    if (a.lfoShape != 0 && a.lfoDepth != 0.0)
+        pitch += a.lfoDepth * pitchSlideLfo(a.lfoShape, beatInto * a.lfoRate);
+    return pitch;
+}
 
 struct PitchSlide
 {
@@ -137,6 +178,10 @@ struct TrackState
     bool solo { false };
     bool recordArmed { false };
     double volumeDb { 0.0 };
+    // Utility/trim gain set from a knob on the track lane (separate from the header
+    // volume fader) — handy for quick level balancing while mixing. Applied on top of
+    // volumeDb in the mix.
+    double trackGainDb { 0.0 };
     // Stereo pan in [-1, 1]: -1 = hard left, 0 = centre, +1 = hard right.
     double pan { 0.0 };
     std::vector<TimelineClip> clips;
@@ -146,6 +191,11 @@ struct TrackState
     int samplerKeyboardOctaveOffset { 0 };
     int samplerTransposeSemitones { 0 };
     int samplerSliceCount { 16 };
+    // Transient/chop slice points as start ratios in [0,1) (sorted, points[0]==0).
+    // Empty = equal divisions by samplerSliceCount; non-empty = one slice per point.
+    std::vector<double> samplerSlicePoints;
+    // Transient-detect sensitivity 0..1 (higher = lower threshold = more slices).
+    double samplerSliceSensitivity { 0.5 };
     bool samplerWarpEnabled { false };
     double samplerSourceBpm { 0.0 };
     double samplerSourceDurationSeconds { 0.0 };
@@ -230,6 +280,7 @@ public:
     void setLoopLengthInBeats(double newLength) noexcept;
     double getProjectLengthInBeats() const noexcept;
     double getContentEndInBeats() const noexcept;
+    double getPlaybackEndInBeats() const noexcept;
     bool hasLoopRange() const noexcept;
     double getLoopStartBeat() const noexcept;
     double getLoopEndBeat() const noexcept;

@@ -18,6 +18,9 @@ const auto pianoGridScaleRow = orion::theme::surface::elevated.withAlpha(0.55f);
 const auto pianoGridBlackRow = orion::theme::core::canvas.withAlpha(0.52f);
 constexpr int resizeHandleWidth = 10;
 constexpr double minimumNoteLengthInBeats = 0.125;
+// Empty space (in beats) shown PAST the clip's end so you can keep writing the melody beyond
+// the current clip length. Drawing a note into this area grows the clip to fit (4 bars).
+constexpr double editingHeadroomBeats = 16.0;
 constexpr int minimumNoteWidthPx = 4;
 constexpr int marqueeThresholdPx = 4;
 constexpr int noteDragThresholdPx = 2;
@@ -210,6 +213,27 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     stepWriteButton.addListener(this);
     addChildComponent(stepWriteButton);
 
+    joinButton.setButtonText("Join");
+    joinButton.setTooltip("Join selected notes into one gliding voice (MPE-style)");
+    joinButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    joinButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    joinButton.addListener(this);
+    addAndMakeVisible(joinButton);
+
+    splitButton.setButtonText("Split");
+    splitButton.setTooltip("Split a selected glide back into separate notes");
+    splitButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    splitButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    splitButton.addListener(this);
+    addAndMakeVisible(splitButton);
+
+    modButton.setButtonText("Mod");
+    modButton.setTooltip("Cycle the selected glide's LFO/vibrato shape (Off → Sine → Tri → Saw → Square)");
+    modButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    modButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    modButton.addListener(this);
+    addAndMakeVisible(modButton);
+
     stepLengthButton.setTooltip("Step Write length");
     stepLengthButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
     stepLengthButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
@@ -236,6 +260,16 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     stepTieButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     stepTieButton.addListener(this);
     addAndMakeVisible(stepTieButton);
+
+    glideButton.setButtonText("Glide");
+    glideButton.setClickingTogglesState(true);
+    glideButton.setTooltip("Glide: every note played slides from the previous pitch (mono portamento)");
+    glideButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    glideButton.setColour(juce::TextButton::buttonOnColourId, theme::accent::brandCyan);
+    glideButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    glideButton.setColour(juce::TextButton::textColourOnId, theme::core::voidBlack);
+    glideButton.addListener(this);
+    addAndMakeVisible(glideButton);
 
     scaleLockLabel.setText("Scale Lock", juce::dontSendNotification);
     scaleLockLabel.setColour(juce::Label::textColourId, theme::text::secondary.withAlpha(0.82f));
@@ -428,7 +462,6 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     g.drawRoundedRectangle(keyboardArea.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(visibleGrid.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(velocityLane.toFloat(), 16.0f, 1.0f);
-    paintEditToolbar(g);
 
     const auto laneHeight = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
     const auto visibleBeatRange = getVisibleBeatRange();
@@ -625,6 +658,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         g.drawText(noteNameForPitch(pitch), keyRow.reduced(9, 0), juce::Justification::centredLeft);
     }
 
+    g.saveState();
     g.reduceClipRegion(visibleGrid);
 
     for (int lane = firstVisibleLane; lane <= lastVisibleLane + 1; ++lane)
@@ -840,21 +874,22 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
             if (slide.points.size() < 2)
                 return;
 
-            juce::Path path;
-            bool started = false;
-            for (const auto& point : slide.points)
-            {
-                const auto x = static_cast<float>(gridArea.getX() + (point.beat * pixelsPerBeat) - scrollX);
-                const auto y = pitchToCentreY(point.pitch);
+            const auto slideX = [&](double beat) { return static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX); };
 
-                if (! started)
+            juce::Path path;
+            path.startNewSubPath(slideX(slide.points.front().beat), pitchToCentreY(slide.points.front().pitch));
+            for (std::size_t i = 1; i < slide.points.size(); ++i)
+            {
+                const auto& a = slide.points[i - 1];
+                const auto& b = slide.points[i];
+                // Sample the segment so curve + LFO wiggle are visible (denser when modulated).
+                const int steps = a.lfoShape != 0 ? 64 : 18;
+                for (int s = 1; s <= steps; ++s)
                 {
-                    path.startNewSubPath(x, y);
-                    started = true;
-                }
-                else
-                {
-                    path.lineTo(x, y);
+                    const auto t = static_cast<double>(s) / steps;
+                    const auto beat = a.beat + (b.beat - a.beat) * t;
+                    const auto pitch = pitchSlideSegmentPitch(a, b, beat - a.beat, t);
+                    path.lineTo(slideX(beat), pitchToCentreY(pitch));
                 }
             }
 
@@ -888,6 +923,25 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
 
                 drawHandle(slide.points.front());
                 drawHandle(slide.points.back());
+
+                // Curve handles: a small grip at each segment's midpoint — drag vertically
+                // to bend that glide segment (bezier-like).
+                for (std::size_t i = 1; i < slide.points.size(); ++i)
+                {
+                    const auto& a = slide.points[i - 1];
+                    const auto& b = slide.points[i];
+                    if (std::abs(b.beat - a.beat) < 1.0e-4)
+                        continue;
+                    const auto midBeat  = (a.beat + b.beat) * 0.5;
+                    const auto midPitch = a.pitch + (b.pitch - a.pitch) * pitchSlideCurveShape(0.5, a.curve);
+                    const auto x = slideX(midBeat);
+                    const auto y = pitchToCentreY(midPitch);
+                    const auto r = slideHandleRadiusPx * 0.7f;
+                    g.setColour(theme::core::canvas.withAlpha(0.5f));
+                    g.fillEllipse(x - r, y - r, r * 2.0f, r * 2.0f);
+                    g.setColour(juce::Colour(0xfffbbf24).withAlpha(0.95f));  // amber grip
+                    g.fillEllipse(x - r + 1.0f, y - r + 1.0f, (r - 1.0f) * 2.0f, (r - 1.0f) * 2.0f);
+                }
             }
         };
 
@@ -958,36 +1012,43 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         g.setColour(theme::cool::cyan.withAlpha(0.62f));
         g.drawRect(clippedMarquee, 1);
     }
+    g.restoreState();
 
-    g.excludeClipRegion(visibleGrid);
-    g.reduceClipRegion(velocityLane);
-
-    for (int step = 0; step <= steps; ++step)
     {
-        const auto beat = static_cast<double>(step) * snapSizeInBeats;
-        const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
-        if (x < static_cast<float>(velocityLane.getX() - 8) || x > static_cast<float>(velocityLane.getRight() + 8))
-            continue;
-        g.setColour(step % 4 == 0 ? theme::line::normal.withAlpha(0.24f) : theme::line::subtle.withAlpha(0.12f));
-        g.drawLine(x, static_cast<float>(velocityLane.getY()), x, static_cast<float>(velocityLane.getBottom()), step % 4 == 0 ? 1.4f : 1.0f);
-    }
+        juce::Graphics::ScopedSaveState saveState(g);
 
-    g.setColour(mutedText);
-    g.setFont(juce::FontOptions(12.0f, juce::Font::plain));
-    g.drawText("Velocity", velocityLane.reduced(12, 8).removeFromTop(18), juce::Justification::centredLeft);
+        g.excludeClipRegion(visibleGrid);
+        g.reduceClipRegion(velocityLane);
 
-    if (activeClip != nullptr)
-    {
-        for (int noteIndex = 0; noteIndex < static_cast<int>(activeClip->midiNotes.size()); ++noteIndex)
+        for (int step = 0; step <= steps; ++step)
         {
-            if (focusModeEnabled && ! isPitchInScale(activeClip->midiNotes[static_cast<std::size_t>(noteIndex)].pitch))
+            const auto beat = static_cast<double>(step) * snapSizeInBeats;
+            const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
+            if (x < static_cast<float>(velocityLane.getX() - 8) || x > static_cast<float>(velocityLane.getRight() + 8))
                 continue;
-            const auto barBounds = getVelocityBarBounds(noteIndex);
-            const auto selected = isNoteSelected(noteIndex);
-            g.setColour(trackColour.withAlpha(selected ? 0.95f : 0.55f));
-            g.fillRoundedRectangle(barBounds.toFloat(), 4.0f);
+            g.setColour(step % 4 == 0 ? theme::line::normal.withAlpha(0.24f) : theme::line::subtle.withAlpha(0.12f));
+            g.drawLine(x, static_cast<float>(velocityLane.getY()), x, static_cast<float>(velocityLane.getBottom()), step % 4 == 0 ? 1.4f : 1.0f);
+        }
+
+        g.setColour(mutedText);
+        g.setFont(juce::FontOptions(12.0f, juce::Font::plain));
+        g.drawText("Velocity", velocityLane.reduced(12, 8).removeFromTop(18), juce::Justification::centredLeft);
+
+        if (activeClip != nullptr)
+        {
+            for (int noteIndex = 0; noteIndex < static_cast<int>(activeClip->midiNotes.size()); ++noteIndex)
+            {
+                if (focusModeEnabled && ! isPitchInScale(activeClip->midiNotes[static_cast<std::size_t>(noteIndex)].pitch))
+                    continue;
+                const auto barBounds = getVelocityBarBounds(noteIndex);
+                const auto selected = isNoteSelected(noteIndex);
+                g.setColour(trackColour.withAlpha(selected ? 0.95f : 0.55f));
+                g.fillRoundedRectangle(barBounds.toFloat(), 4.0f);
+            }
         }
     }
+
+    paintEditToolbar(g);
 }
 
 void MidiEditorOverlayComponent::resized()
@@ -1020,6 +1081,14 @@ void MidiEditorOverlayComponent::resized()
     controlsArea.removeFromLeft(10);
     scaleLockToggle.setBounds(controlsArea.removeFromLeft(28).reduced(0, 3));
     scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 1));
+    controlsArea.removeFromLeft(10);
+    glideButton.setBounds(controlsArea.removeFromLeft(60).reduced(0, 1));
+    controlsArea.removeFromLeft(10);
+    joinButton.setBounds(controlsArea.removeFromLeft(54).reduced(0, 1));
+    controlsArea.removeFromLeft(6);
+    splitButton.setBounds(controlsArea.removeFromLeft(54).reduced(0, 1));
+    controlsArea.removeFromLeft(6);
+    modButton.setBounds(controlsArea.removeFromLeft(64).reduced(0, 1));
     quantizeButton.setBounds({});
     slidePenButton.setBounds({});
     stepWriteButton.setBounds({});
@@ -1375,6 +1444,7 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
         slideEditState = SlideEditState {
             hitSlide->slideIndex,
             hitSlide->mode,
+            hitSlide->segmentIndex,
             event.getPosition(),
             activeClip->pitchSlides[static_cast<std::size_t>(hitSlide->slideIndex)],
             false
@@ -1452,6 +1522,20 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
             const auto laneHeight = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
             const auto beatDelta = static_cast<double>(event.position.x - slideEditState->mouseDownPosition.x) / juce::jmax(1.0, pixelsPerBeat);
             const auto pitchDelta = static_cast<double>(slideEditState->mouseDownPosition.y - event.position.y) / laneHeight;
+
+            if (slideEditState->mode == SlideEditMode::curve)
+            {
+                const auto si = slideEditState->segmentIndex;
+                if (si >= 0 && si + 1 < static_cast<int>(edited.points.size()))
+                {
+                    const auto dyPixels = static_cast<double>(slideEditState->mouseDownPosition.y - event.position.y);
+                    edited.points[static_cast<std::size_t>(si)].curve =
+                        juce::jlimit(-1.0, 1.0, slideEditState->originalSlide.points[static_cast<std::size_t>(si)].curve + dyPixels / 120.0);
+                }
+                activeClip->pitchSlides[static_cast<std::size_t>(slideEditState->slideIndex)] = std::move(edited);
+                repaint();
+                return;
+            }
 
             if (slideEditState->mode == SlideEditMode::move)
             {
@@ -1590,8 +1674,9 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
             const auto& originalNote = noteDragState->originalSelectedNotes[i];
             resizedNote.lengthInBeats = juce::jlimit(
                 minimumNoteLengthInBeats,
-                activeClip->lengthInBeats - resizedNote.startBeat,
+                getContentBeats() - resizedNote.startBeat,   // allow stretching into the headroom
                 originalNote.lengthInBeats + snappedBeatDelta);
+            growClipToFit(resizedNote.startBeat + resizedNote.lengthInBeats);
         }
     }
 
@@ -1632,9 +1717,13 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
         // Scale lock: snap new notes to the closest in-scale pitch when enabled.
         if (scaleLockEnabled && ! isPitchInScale(pitch))
             pitch = snapPitchToScale(pitch);
-        // FL-style: a freshly placed note takes the current grid/snap length.
-        const auto newLength = juce::jmax(minimumNoteLengthInBeats, snapSizeInBeats);
+        // A freshly placed note takes the remembered length (4 bars by default, or whatever
+        // the user last stretched a note to). Notes may be drawn into the headroom past the
+        // clip end; the clip then grows to fit so you can keep writing the melody.
+        const auto maxLen = juce::jmax(minimumNoteLengthInBeats, getContentBeats() - snappedBeat);
+        const auto newLength = juce::jlimit(minimumNoteLengthInBeats, maxLen, lastNoteLengthInBeats);
         activeClip->midiNotes.push_back(MidiNote { pitch, snappedBeat, newLength, 100 });
+        growClipToFit(snappedBeat + newLength);
         selectSingleNote(static_cast<int>(activeClip->midiNotes.size()) - 1);
         auditionPlacedNote(pitch, 100);
     }
@@ -1660,8 +1749,11 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
 
                 auto& resizedNote = activeClip->midiNotes[static_cast<std::size_t>(index)];
                 resizedNote.lengthInBeats = juce::jlimit(minimumNoteLengthInBeats,
-                                                         activeClip->lengthInBeats - resizedNote.startBeat,
+                                                         getContentBeats() - resizedNote.startBeat,
                                                          snapBeatNearest(resizedNote.lengthInBeats));
+                growClipToFit(resizedNote.startBeat + resizedNote.lengthInBeats);
+                // Remember the stretched length so the next drawn note matches it.
+                lastNoteLengthInBeats = resizedNote.lengthInBeats;
             }
         }
 
@@ -1805,6 +1897,40 @@ void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
         selectedSlide.reset();
         clearSelection();
         repaint();
+    }
+    else if (button == &glideButton)
+    {
+        glideEnabled = glideButton.getToggleState();
+        if (onGlideChanged)
+            onGlideChanged(glideEnabled);
+        repaint();
+    }
+    else if (button == &joinButton)
+    {
+        joinSelectedNotes();
+    }
+    else if (button == &splitButton)
+    {
+        splitSelectedSlide();
+    }
+    else if (button == &modButton)
+    {
+        if (activeClip != nullptr && selectedSlide.has_value()
+            && *selectedSlide >= 0 && *selectedSlide < static_cast<int>(activeClip->pitchSlides.size()))
+        {
+            pushUndoSnapshot();
+            auto& sl = activeClip->pitchSlides[static_cast<std::size_t>(*selectedSlide)];
+            const int next = sl.points.empty() ? 0 : (sl.points.front().lfoShape + 1) % 5;
+            for (auto& p : sl.points)
+            {
+                p.lfoShape = next;
+                if (next != 0 && p.lfoDepth == 0.0) p.lfoDepth = 1.0;  // default ±1 st vibrato
+                if (p.lfoRate <= 0.0)               p.lfoRate = 3.0;   // cycles per beat
+            }
+            static const char* names[] = { "Mod", "Sine", "Tri", "Saw", "Sqr" };
+            modButton.setButtonText(names[next]);
+            repaint();
+        }
     }
     else if (button == &slideVisibilityButton)
     {
@@ -2697,8 +2823,7 @@ void MidiEditorOverlayComponent::paintEditToolbar(juce::Graphics& g)
         auto tip = juce::Rectangle<float>(0.0f, 0.0f, textW + 20.0f, 22.0f);
         const auto target = getToolButtonBounds(hoveredIndex);
         const auto topBar = getTopBarBounds().reduced(20, 12);
-        tip.setCentre(static_cast<float>(target.getCentreX()), static_cast<float>(toolbar.getY() - 13));
-        tip.setY(juce::jmax(static_cast<float>(topBar.getY() + 2), tip.getY()));
+        tip.setCentre(static_cast<float>(target.getCentreX()), static_cast<float>(toolbar.getBottom() + 14));
         tip.setX(juce::jlimit(static_cast<float>(topBar.getX()),
                               static_cast<float>(topBar.getRight()) - tip.getWidth(),
                               tip.getX()));
@@ -2898,14 +3023,29 @@ juce::Rectangle<int> MidiEditorOverlayComponent::getGridBounds() const noexcept
 double MidiEditorOverlayComponent::getPixelsPerBeat() const noexcept
 {
     const auto visible = getVisibleGridViewport();
-    const auto clipLength = activeClip != nullptr ? activeClip->lengthInBeats : 8.0;
-    return (static_cast<double>(visible.getWidth()) * horizontalZoom) / juce::jmax(1.0, clipLength);
+    return (static_cast<double>(visible.getWidth()) * horizontalZoom) / juce::jmax(1.0, getContentBeats());
 }
 
 double MidiEditorOverlayComponent::getVisibleBeatRange() const noexcept
 {
+    const auto contentBeats = getContentBeats();
+    return juce::jmax(contentBeats, juce::jmax(1.0, contentBeats) / juce::jmax(minimumHorizontalZoom, horizontalZoom));
+}
+
+double MidiEditorOverlayComponent::getContentBeats() const noexcept
+{
+    // Clip length + headroom so there's always empty grid after the clip to keep writing into.
     const auto clipLength = activeClip != nullptr ? activeClip->lengthInBeats : 8.0;
-    return juce::jmax(clipLength, juce::jmax(1.0, clipLength) / juce::jmax(minimumHorizontalZoom, horizontalZoom));
+    return juce::jmax(1.0, clipLength) + editingHeadroomBeats;
+}
+
+void MidiEditorOverlayComponent::growClipToFit(double endBeat)
+{
+    if (activeClip == nullptr || endBeat <= activeClip->lengthInBeats + beatEpsilon)
+        return;
+    constexpr double barBeats = 4.0;   // visual bar (matches the grid)
+    activeClip->lengthInBeats = std::ceil((endBeat - beatEpsilon) / barBeats) * barBeats;
+    clampScrollOffsets();
 }
 
 juce::Rectangle<int> MidiEditorOverlayComponent::getNoteBounds(const MidiNote& note) const noexcept
@@ -2963,6 +3103,24 @@ std::optional<MidiEditorOverlayComponent::SlideHit> MidiEditorOverlayComponent::
         const auto& slide = activeClip->pitchSlides[static_cast<std::size_t>(slideIndex)];
         if (! shouldDrawSlide(slide, slideIndex, false))
             continue;
+
+        // Curve grips (segment midpoints) — only on the selected slide, take priority.
+        if (selectedSlide == slideIndex || slideTouchesSelectedNotes(slide))
+        {
+            for (std::size_t i = 1; i < slide.points.size(); ++i)
+            {
+                const auto& a = slide.points[i - 1];
+                const auto& b = slide.points[i];
+                if (std::abs(b.beat - a.beat) < 1.0e-4)
+                    continue;
+                const auto midBeat  = (a.beat + b.beat) * 0.5;
+                const auto midPitch = a.pitch + (b.pitch - a.pitch) * pitchSlideCurveShape(0.5, a.curve);
+                const juce::Point<float> h(static_cast<float>(grid.getX() + (midBeat * pixelsPerBeat) - scrollX),
+                                           pitchToCentreY(midPitch));
+                if (h.getDistanceFrom(position.toFloat()) <= slideHandleRadiusPx + 4.0f)
+                    return SlideHit { slideIndex, SlideEditMode::curve, static_cast<int>(i - 1) };
+            }
+        }
 
         if (! slide.points.empty())
         {
@@ -3170,6 +3328,127 @@ void MidiEditorOverlayComponent::duplicateSelectedNotes()
 
     selectedNotes.clear();
     selectedNotes.insert(duplicatedIndices.begin(), duplicatedIndices.end());
+    repaint();
+}
+
+void MidiEditorOverlayComponent::joinSelectedNotes()
+{
+    if (activeClip == nullptr || selectedNotes.size() < 2)
+        return;
+
+    // Selected notes in time order.
+    std::vector<MidiNote> sel;
+    for (const auto idx : selectedNotes)
+        if (idx >= 0 && idx < static_cast<int>(activeClip->midiNotes.size()))
+            sel.push_back(activeClip->midiNotes[static_cast<std::size_t>(idx)]);
+    std::sort(sel.begin(), sel.end(),
+              [](const MidiNote& a, const MidiNote& b) { return a.startBeat < b.startBeat; });
+
+    // Group notes that start together into chords (one trigger position each).
+    constexpr double eps = 0.0001;
+    std::vector<std::vector<MidiNote>> chords;
+    for (const auto& n : sel)
+    {
+        if (chords.empty() || std::abs(n.startBeat - chords.back().front().startBeat) > eps)
+            chords.push_back({ n });
+        else
+            chords.back().push_back(n);
+    }
+    if (chords.size() < 2)
+        return;  // need at least two time positions to glide between
+
+    // Voice-lead: sort each chord low→high and pair by rank across chords.
+    for (auto& c : chords)
+        std::sort(c.begin(), c.end(), [](const MidiNote& a, const MidiNote& b) { return a.pitch < b.pitch; });
+    std::size_t voices = 0;
+    for (const auto& c : chords)
+        voices = juce::jmax(voices, c.size());
+    if (voices == 0)
+        return;
+
+    pushUndoSnapshot();
+
+    // Drop the original selected notes.
+    std::vector<MidiNote> kept;
+    kept.reserve(activeClip->midiNotes.size());
+    for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
+        if (! selectedNotes.contains(i))
+            kept.push_back(activeClip->midiNotes[static_cast<std::size_t>(i)]);
+
+    // One gliding voice (merged note + slide) per voice rank.
+    for (std::size_t v = 0; v < voices; ++v)
+    {
+        std::vector<MidiNote> voiceNotes;
+        for (const auto& c : chords)
+            voiceNotes.push_back(c[juce::jmin(v, c.size() - 1)]);  // extra voices clamp to top
+
+        PitchSlide slide;
+        for (const auto& n : voiceNotes)
+        {
+            const auto end = n.startBeat + juce::jmax(0.01, n.lengthInBeats);
+            slide.points.push_back({ n.startBeat, static_cast<double>(n.pitch) });
+            slide.points.push_back({ end,         static_cast<double>(n.pitch) });
+        }
+        slide.sourcePitch = voiceNotes.front().pitch;
+        slide.sourceNoteStartBeat = voiceNotes.front().startBeat;
+
+        MidiNote merged = voiceNotes.front();
+        merged.lengthInBeats = (voiceNotes.back().startBeat + juce::jmax(0.01, voiceNotes.back().lengthInBeats))
+                               - voiceNotes.front().startBeat;
+        kept.push_back(merged);
+        activeClip->pitchSlides.push_back(slide);
+    }
+
+    activeClip->midiNotes = std::move(kept);
+    clearSelection();
+    selectedSlide = static_cast<int>(activeClip->pitchSlides.size()) - 1;
+    repaint();
+}
+
+void MidiEditorOverlayComponent::splitSelectedSlide()
+{
+    if (activeClip == nullptr || ! selectedSlide.has_value())
+        return;
+    const auto si = *selectedSlide;
+    if (si < 0 || si >= static_cast<int>(activeClip->pitchSlides.size()))
+        return;
+
+    pushUndoSnapshot();
+    const auto slide = activeClip->pitchSlides[static_cast<std::size_t>(si)];
+
+    // Reconstruct notes from the slide's hold/glide point pairs.
+    std::vector<MidiNote> rebuilt;
+    for (std::size_t i = 0; i + 1 < slide.points.size(); i += 2)
+    {
+        MidiNote n;
+        n.startBeat = slide.points[i].beat;
+        n.lengthInBeats = juce::jmax(0.05, slide.points[i + 1].beat - slide.points[i].beat);
+        n.pitch = juce::jlimit(0, 127, static_cast<int>(std::round(slide.points[i].pitch)));
+        n.velocity = 100;
+        rebuilt.push_back(n);
+    }
+
+    // Drop the merged voice that owned this slide.
+    std::vector<MidiNote> kept;
+    bool removedSource = false;
+    for (const auto& n : activeClip->midiNotes)
+    {
+        if (! removedSource && n.pitch == slide.sourcePitch
+            && std::abs(n.startBeat - slide.sourceNoteStartBeat) < 0.0001)
+        {
+            removedSource = true;
+            continue;
+        }
+        kept.push_back(n);
+    }
+    activeClip->midiNotes = std::move(kept);
+    activeClip->pitchSlides.erase(activeClip->pitchSlides.begin() + si);
+
+    for (const auto& n : rebuilt)
+        activeClip->midiNotes.push_back(n);
+
+    selectedSlide.reset();
+    clearSelection();
     repaint();
 }
 

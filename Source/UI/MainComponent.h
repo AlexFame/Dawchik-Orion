@@ -127,6 +127,8 @@ private:
     void commitGlobalSpacePreview();   // space tap → keep playing as normal (no rewind)
     void toggleTransportFromUi();
     void stopTransportFromUi();
+    void finishRecordingAndDisarm();
+    void startMidiRecordingFromRecordButtonIfNeeded();
     void rewindTransportFromUi();
     void toggleLoopFromUi();
     void toggleMixerFromUi();

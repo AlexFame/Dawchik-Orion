@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace orion
@@ -9,6 +12,7 @@ namespace orion
 namespace
 {
 constexpr int kSamplerAttackFadeSamples = 384;
+constexpr int kSamplerSliceAttackFadeSamples = 24;
 constexpr int kSamplerSliceEndFadeSamples = 384;
 constexpr int kSamplerRetriggerFadeSamples = 1536;
 constexpr int kSamplerMaxLiveVoices = 24;
@@ -51,6 +55,31 @@ double pitchRatioForPitch(double midiPitch, int rootMidiNote) noexcept
     return std::pow(2.0, (midiPitch - static_cast<double>(rootMidiNote)) / 12.0);
 }
 
+// [start,end] sample positions for a slice. With explicit slice points (start ratios,
+// size = slice count) the boundaries follow detected transients; otherwise they are
+// equal divisions of the sample by sliceCount.
+std::pair<double, double> sliceBoundsSamples(int sliceIndex, int sliceCount, int totalSamples,
+                                             const std::vector<double>* points) noexcept
+{
+    const auto total = static_cast<double>(juce::jmax(1, totalSamples));
+    if (points != nullptr && points->size() >= 2)
+    {
+        const auto n = static_cast<int>(points->size());
+        const auto i = juce::jlimit(0, n - 1, sliceIndex);
+        const auto startR = juce::jlimit(0.0, 1.0, (*points)[static_cast<std::size_t>(i)]);
+        const auto endR   = i + 1 < n ? juce::jlimit(0.0, 1.0, (*points)[static_cast<std::size_t>(i + 1)]) : 1.0;
+        const auto s = std::floor(startR * total);
+        const auto e = std::floor(endR * total);
+        return { juce::jlimit(0.0, total - 1.0, s), juce::jlimit(s + 1.0, total, e) };
+    }
+
+    const auto sc = juce::jlimit(1, 64, sliceCount);
+    const auto i  = juce::jlimit(0, sc - 1, sliceIndex);
+    const auto s = std::floor(static_cast<double>(i) / static_cast<double>(sc) * total);
+    const auto e = i == sc - 1 ? total : std::floor(static_cast<double>(i + 1) / static_cast<double>(sc) * total);
+    return { juce::jlimit(0.0, total - 1.0, s), juce::jlimit(s + 1.0, total, e) };
+}
+
 double nextTriggerBeatAfter(const std::vector<MidiNote>& notes, const MidiNote& note, double fallbackBeat) noexcept
 {
     auto nextTriggerBeat = fallbackBeat;
@@ -62,6 +91,85 @@ double nextTriggerBeatAfter(const std::vector<MidiNote>& notes, const MidiNote& 
     }
 
     return nextTriggerBeat;
+}
+
+// Glide source pitch for a note (polyphonic portamento). Finds the previous chord
+// (the notes at the most recent earlier trigger beat), pairs voices by pitch rank
+// (low→low, high→high), and returns the paired previous pitch this note glides FROM.
+// Extra top voices in a larger chord clamp to the highest previous voice. Single-note
+// lines fall out of this naturally (a "chord" of one). Returns nullopt for the very
+// first trigger (nothing to glide from).
+std::optional<double> glideSourcePitchForNote(const std::vector<MidiNote>& notes, const MidiNote& note) noexcept
+{
+    bool found = false;
+    double prevBeat = 0.0;
+    for (const auto& other : notes)
+        if (other.startBeat < note.startBeat - 0.0001 && (! found || other.startBeat > prevBeat))
+        {
+            prevBeat = other.startBeat;
+            found = true;
+        }
+    if (! found)
+        return std::nullopt;
+
+    std::vector<int> current, previous;
+    for (const auto& other : notes)
+    {
+        if (std::abs(other.startBeat - note.startBeat) < 0.0001)
+            current.push_back(other.pitch);
+        else if (std::abs(other.startBeat - prevBeat) < 0.0001)
+            previous.push_back(other.pitch);
+    }
+    if (previous.empty())
+        return std::nullopt;
+
+    std::sort(current.begin(), current.end());
+    std::sort(previous.begin(), previous.end());
+
+    const auto it = std::lower_bound(current.begin(), current.end(), note.pitch);
+    auto rank = static_cast<int>(std::distance(current.begin(), it));
+    rank = juce::jlimit(0, static_cast<int>(previous.size()) - 1, rank);
+    return static_cast<double>(previous[static_cast<std::size_t>(rank)]);
+}
+
+// Analytic glide evaluation (no per-sample allocation). Returns the effective pitch and
+// the integrated source-sample offset at beatBeyondStart beats into the note, for a
+// glide that ramps prevPitch→notePitch over glideBeats (linear in semitones) then holds.
+struct GlideEval
+{
+    double pitch { 0.0 };
+    double sourceSamples { 0.0 };
+};
+
+GlideEval evalGlide(double prevPitch, double notePitch, int rootMidiNote, double glideBeats,
+                    double beatBeyondStart, double sourceSampleRate, double beatsPerSecond) noexcept
+{
+    const auto rootD = static_cast<double>(rootMidiNote);
+    const auto k = std::log(2.0) / 12.0;
+    const auto r0 = std::pow(2.0, (prevPitch - rootD) / 12.0);
+    const auto slopePerBeat = (notePitch - prevPitch) / glideBeats;  // semitones per beat
+    const auto expo = k * slopePerBeat;                              // ratio growth rate per beat
+    const auto tau = juce::jmin(beatBeyondStart, glideBeats);
+
+    // ∫ ratio dBeat over the ramp portion [0, tau].
+    const auto rampIntegral = std::abs(expo) < 1.0e-12
+        ? r0 * tau
+        : r0 * (std::exp(expo * tau) - 1.0) / expo;
+
+    GlideEval out;
+    auto sourceBeats = rampIntegral;
+    if (beatBeyondStart <= glideBeats)
+    {
+        out.pitch = prevPitch + slopePerBeat * beatBeyondStart;
+    }
+    else
+    {
+        out.pitch = notePitch;
+        const auto rNote = std::pow(2.0, (notePitch - rootD) / 12.0);
+        sourceBeats += rNote * (beatBeyondStart - glideBeats);
+    }
+    out.sourceSamples = sourceBeats * sourceSampleRate / beatsPerSecond;
+    return out;
 }
 
 const PitchSlide* findSlideForNote(const TimelineClip& clip, const MidiNote& note)
@@ -99,7 +207,7 @@ double pitchForSlideAtBeat(const PitchSlide& slide, double beat)
 
         const auto span = juce::jmax(0.0001, b.beat - a.beat);
         const auto t = juce::jlimit(0.0, 1.0, (beat - a.beat) / span);
-        return a.pitch + (b.pitch - a.pitch) * t;
+        return pitchSlideSegmentPitch(a, b, beat - a.beat, t);
     }
 
     return slide.points.front().pitch;
@@ -204,7 +312,8 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
         if (const auto* warpedSampleData = getWarpedSampleData(track.samplerSourcePath,
                                                                *sampleData,
                                                                track.samplerSourceBpm,
-                                                               projectTempoBpm))
+                                                               projectTempoBpm,
+                                                               /*allowBlocking*/ false))  // audio thread
             sampleData = warpedSampleData;
     }
 
@@ -213,9 +322,29 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
     const auto beatAdvancePerSample = beatsPerSecond / renderSampleRate;
     const auto clipStartBeat = clip.startBeat;
     const auto clipEndBeat = clip.startBeat + clip.lengthInBeats;
-    const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb));
+    const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb + track.trackGainDb));
     const auto clipGain = juce::Decibels::decibelsToGain(static_cast<float>(clip.gainDb));
     const auto safeSliceCount = juce::jlimit(1, 64, track.samplerSliceCount);
+
+    // Global transpose (Simpler "Transpose" knob): raising pitch by N semitones is the
+    // same as lowering the root by N, so all pitched ratios pick it up via effectiveRoot.
+    // Slice-index mapping deliberately keeps the untransposed root.
+    const auto effectiveRoot = track.samplerRootMidiNote - track.samplerTransposeSemitones;
+
+    // Glide (portamento): precompute, once per block, the pitch each note glides FROM
+    // (NaN = no glide). Done here so the per-sample inner loop allocates nothing.
+    const bool glideActive = glideEnabled.load(std::memory_order_relaxed)
+                          && track.samplerMode != SamplerPlaybackMode::slice;
+    const auto glideBeats = juce::jmax(1.0e-4, glideTimeSeconds.load(std::memory_order_relaxed) * beatsPerSecond);
+    std::vector<double> glideSourcePitch;
+    if (glideActive)
+    {
+        glideSourcePitch.assign(clip.midiNotes.size(), std::numeric_limits<double>::quiet_NaN());
+        for (std::size_t i = 0; i < clip.midiNotes.size(); ++i)
+            if (const auto src = glideSourcePitchForNote(clip.midiNotes, clip.midiNotes[i]);
+                src.has_value() && std::abs(*src - static_cast<double>(clip.midiNotes[i].pitch)) > 1.0e-6)
+                glideSourcePitch[i] = *src;
+    }
 
     for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
     {
@@ -256,7 +385,7 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                 else
                 {
                     const auto sourceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
-                        * beatsPerSecond / getPitchRatio(note.pitch, track.samplerRootMidiNote);
+                        * beatsPerSecond / getPitchRatio(note.pitch, effectiveRoot);
                     noteEndBeat = juce::jmin(clip.lengthInBeats, note.startBeat + sourceDurationBeats);
                 }
             }
@@ -269,14 +398,19 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                 else
                 {
                     const auto sourceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
-                        * beatsPerSecond / getPitchRatio(note.pitch, track.samplerRootMidiNote);
+                        * beatsPerSecond / getPitchRatio(note.pitch, effectiveRoot);
                     noteEndBeat = juce::jmin(nextTriggerBeat, note.startBeat + sourceDurationBeats);
                 }
             }
             else if (track.samplerMode == SamplerPlaybackMode::slice)
             {
-                const auto sliceDurationBeats = (static_cast<double>(sampleData->buffer.getNumSamples()) / sampleData->sampleRate)
-                    * beatsPerSecond / static_cast<double>(safeSliceCount);
+                const auto* slicePts = track.samplerSlicePoints.empty() ? nullptr : &track.samplerSlicePoints;
+                const auto bounds = sliceBoundsSamples(note.pitch - track.samplerRootMidiNote,
+                                                       safeSliceCount,
+                                                       sampleData->buffer.getNumSamples(),
+                                                       slicePts);
+                const auto sliceDurationBeats = ((bounds.second - bounds.first) / sampleData->sampleRate)
+                    * beatsPerSecond;
                 noteEndBeat = juce::jmin(nextTriggerBeat, note.startBeat + sliceDurationBeats);
             }
 
@@ -286,29 +420,51 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
             const auto noteSeconds = (clipLocalBeat - note.startBeat) / beatsPerSecond;
             double sourceStartPosition = 0.0;
             double sourceEndPosition = static_cast<double>(sampleData->buffer.getNumSamples());
-            double playbackRatio = pitchRatioForPitch(pitchForNoteAtBeat(noteSlide, note, clipLocalBeat), track.samplerRootMidiNote);
+            // Glide (polyphonic portamento): if this note has a precomputed glide source
+            // and no manual slide, evaluate the analytic glide for both pitch and source
+            // position. The note's natural duration above is left unchanged.
+            const auto noteIndex = static_cast<std::size_t>(&note - clip.midiNotes.data());
+            const bool noteGlides = glideActive
+                                 && noteSlide == nullptr
+                                 && noteIndex < glideSourcePitch.size()
+                                 && ! std::isnan(glideSourcePitch[noteIndex]);
+            GlideEval glideEval;
+            if (noteGlides)
+                glideEval = evalGlide(glideSourcePitch[noteIndex],
+                                      static_cast<double>(note.pitch),
+                                      effectiveRoot,
+                                      glideBeats,
+                                      clipLocalBeat - note.startBeat,
+                                      sampleData->sampleRate,
+                                      beatsPerSecond);
+
+            double playbackRatio = noteGlides
+                ? pitchRatioForPitch(glideEval.pitch, effectiveRoot)
+                : pitchRatioForPitch(pitchForNoteAtBeat(noteSlide, note, clipLocalBeat), effectiveRoot);
 
             if (track.samplerMode == SamplerPlaybackMode::slice)
             {
-                const auto sliceIndex = juce::jlimit(0, safeSliceCount - 1, note.pitch - track.samplerRootMidiNote);
-                sourceStartPosition = std::floor((static_cast<double>(sliceIndex) / static_cast<double>(safeSliceCount))
-                                                 * static_cast<double>(sampleData->buffer.getNumSamples()));
-                sourceEndPosition = sliceIndex == safeSliceCount - 1
-                    ? static_cast<double>(sampleData->buffer.getNumSamples())
-                    : std::floor((static_cast<double>(sliceIndex + 1) / static_cast<double>(safeSliceCount))
-                                 * static_cast<double>(sampleData->buffer.getNumSamples()));
+                const auto* slicePts = track.samplerSlicePoints.empty() ? nullptr : &track.samplerSlicePoints;
+                const auto bounds = sliceBoundsSamples(note.pitch - track.samplerRootMidiNote,
+                                                       safeSliceCount,
+                                                       sampleData->buffer.getNumSamples(),
+                                                       slicePts);
+                sourceStartPosition = bounds.first;
+                sourceEndPosition = bounds.second;
                 playbackRatio = 1.0;
             }
 
             const auto sourceSamplePosition = sourceStartPosition
                 + (track.samplerMode == SamplerPlaybackMode::slice
                        ? noteSeconds * sampleData->sampleRate * playbackRatio
-                       : sourceSamplesForNoteAtBeat(noteSlide,
-                                                    note,
-                                                    clipLocalBeat,
-                                                    track.samplerRootMidiNote,
-                                                    sampleData->sampleRate,
-                                                    beatsPerSecond));
+                       : noteGlides
+                           ? glideEval.sourceSamples
+                           : sourceSamplesForNoteAtBeat(noteSlide,
+                                                        note,
+                                                        clipLocalBeat,
+                                                        effectiveRoot,
+                                                        sampleData->sampleRate,
+                                                        beatsPerSecond));
             const auto sourceIndex = static_cast<int>(sourceSamplePosition);
             if (sourceIndex < 0 || sourceSamplePosition >= sourceEndPosition || sourceIndex >= sampleData->buffer.getNumSamples())
                 continue;
@@ -369,7 +525,8 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
 
     if (warpEnabled)
     {
-        if (const auto* warpedSampleData = getWarpedSampleData(sourcePath, *sampleData, sourceBpm, projectTempoBpm))
+        if (const auto* warpedSampleData = getWarpedSampleData(sourcePath, *sampleData, sourceBpm, projectTempoBpm,
+                                                               /*allowBlocking*/ true))  // live note, message thread
             sampleData = warpedSampleData;
     }
 
@@ -385,9 +542,10 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
     };
 
     // Classic is polyphonic. One-Shot/Slice behave as mono retrigger for 808-style playing.
+    // Glide forces mono regardless of mode (one voice glides like a mono synth).
     for (auto& note : liveNotes)
     {
-        if (playbackMode == SamplerPlaybackMode::classic ? note.midiNote == midiNote : true)
+        if (glideEnabled || (playbackMode == SamplerPlaybackMode::classic ? note.midiNote == midiNote : true))
             startRelease(note);
     }
 
@@ -419,32 +577,42 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
 
     if (playbackMode == SamplerPlaybackMode::slice)
     {
-        const auto safeSliceCount = juce::jlimit(1, 64, sliceCount);
-        const auto safeSliceIndex = juce::jlimit(0, safeSliceCount - 1, sliceIndex);
-        const auto totalSamples = sampleData->buffer.getNumSamples();
-        const auto sliceStartSample = static_cast<int>(std::floor((static_cast<double>(safeSliceIndex) / static_cast<double>(safeSliceCount))
-                                                                  * static_cast<double>(totalSamples)));
-        const auto sliceEndSample = safeSliceIndex == safeSliceCount - 1
-            ? totalSamples
-            : static_cast<int>(std::floor((static_cast<double>(safeSliceIndex + 1) / static_cast<double>(safeSliceCount))
-                                          * static_cast<double>(totalSamples)));
-        sourceStartPosition = static_cast<double>(juce::jlimit(0, totalSamples - 1, sliceStartSample));
-        sourceEndPosition = static_cast<double>(juce::jlimit(sliceStartSample + 1, totalSamples, sliceEndSample));
+        // liveSlicePoints is read under liveNotesMutex (held here) — transient chop.
+        const auto* slicePts = liveSlicePoints.empty() ? nullptr : &liveSlicePoints;
+        const auto bounds = sliceBoundsSamples(sliceIndex, sliceCount,
+                                               sampleData->buffer.getNumSamples(), slicePts);
+        sourceStartPosition = bounds.first;
+        sourceEndPosition = bounds.second;
         playbackRatio = 1.0;
     }
 
-    auto nextNote = LiveNote {
-        sampleData,
-        midiNote,
-        sourceStartPosition,
-        sourceEndPosition,
-        playbackRatio,
-        juce::Decibels::decibelsToGain(static_cast<float>(gainDb)) * (static_cast<float>(juce::jlimit(1, 127, velocity)) / 127.0f),
-        0,
-        0,
-        0,
-        nextLiveVoiceId++
-    };
+    LiveNote nextNote;
+    nextNote.sample            = sampleData;
+    nextNote.midiNote          = midiNote;
+    nextNote.sourcePosition    = sourceStartPosition;
+    nextNote.sourceEndPosition = sourceEndPosition;
+    nextNote.playbackRatio     = playbackRatio;
+    nextNote.attackSamplesTotal = playbackMode == SamplerPlaybackMode::slice
+        ? kSamplerSliceAttackFadeSamples
+        : kSamplerAttackFadeSamples;
+    // Only velocity is baked into the voice. The track/sampler gain is applied LIVE in
+    // renderLiveNotes via liveGainLinear, so turning the Gain knob is heard immediately
+    // (not only on the next trigger). Seed it from this trigger's gain.
+    nextNote.gain              = static_cast<float>(juce::jlimit(1, 127, velocity)) / 127.0f;
+    nextNote.voiceId           = nextLiveVoiceId++;
+    liveGainLinear.store(juce::Decibels::decibelsToGain(static_cast<float>(gainDb)), std::memory_order_relaxed);
+
+    // Arm glide: start at the previous note's pitch ratio and slide to this note's.
+    // Skipped for slice mode (slices ignore pitch) and when there is no previous note.
+    const bool doGlide = glideEnabled
+                      && lastLivePitch >= 0
+                      && lastLivePitch != midiNote
+                      && playbackMode != SamplerPlaybackMode::slice;
+    nextNote.currentRatio     = doGlide ? getPitchRatio(lastLivePitch, rootMidiNote) : playbackRatio;
+    nextNote.glideTimeSeconds = doGlide ? glideTimeSeconds.load() : 0.0;
+
+    if (glideEnabled)
+        lastLivePitch = midiNote;
 
     liveNotes.push_back(nextNote);
 }
@@ -458,6 +626,16 @@ void SamplerEngine::allNotesOff()
 {
     std::scoped_lock lock(liveNotesMutex);
     liveNotes.clear();
+    lastLivePitch = -1;
+}
+
+void SamplerEngine::setGlide(bool enabled, double timeSeconds)
+{
+    std::scoped_lock lock(liveNotesMutex);
+    glideEnabled = enabled;
+    glideTimeSeconds = juce::jlimit(0.0, 2.0, timeSeconds);
+    if (! enabled)
+        lastLivePitch = -1;  // start fresh next time glide is turned on
 }
 
 void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int startSample, int numSamples, double renderSampleRate)
@@ -466,14 +644,38 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
         return;
 
     std::scoped_lock lock(liveNotesMutex);
+    const auto liveGain = liveGainLinear.load(std::memory_order_relaxed);  // applied live (see noteOn)
     for (auto& note : liveNotes)
     {
         if (note.sample == nullptr || note.sample->buffer.getNumSamples() <= 0 || note.sample->sampleRate <= 0.0)
             continue;
 
-        const auto sourceAdvancePerOutputSample = note.playbackRatio * note.sample->sampleRate / renderSampleRate;
+        // Lazily arm the glide step now that we know the render sample rate. Geometric
+        // per-sample multiply on the ratio == linear movement in semitone space.
+        if (note.glideTimeSeconds > 0.0 && ! note.glideInitialised)
+        {
+            note.glideInitialised = true;
+            const auto glideSamples = juce::jmax(1, static_cast<int>(note.glideTimeSeconds * renderSampleRate));
+            if (note.currentRatio > 0.0 && note.playbackRatio > 0.0
+                && std::abs(note.currentRatio - note.playbackRatio) > 1.0e-9)
+            {
+                note.glideSamplesRemaining = glideSamples;
+                note.glideRatioMul = std::pow(note.playbackRatio / note.currentRatio,
+                                              1.0 / static_cast<double>(glideSamples));
+            }
+            else
+            {
+                note.currentRatio = note.playbackRatio;
+            }
+        }
+        else if (note.glideTimeSeconds <= 0.0)
+        {
+            note.currentRatio = note.playbackRatio;
+        }
+
         for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
         {
+            const auto sourceAdvancePerOutputSample = note.currentRatio * note.sample->sampleRate / renderSampleRate;
             const auto sourceIndex = static_cast<int>(note.sourcePosition);
             if (sourceIndex < 0
                 || sourceIndex >= note.sample->buffer.getNumSamples()
@@ -483,10 +685,10 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
             for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
             {
                 const auto sourceChannel = juce::jmin(channel, note.sample->buffer.getNumChannels() - 1);
-                auto noteGain = note.gain;
-                if (note.attackSamplesElapsed < kSamplerAttackFadeSamples)
+                auto noteGain = note.gain * liveGain;
+                if (note.attackSamplesElapsed < note.attackSamplesTotal)
                     noteGain *= smoothRamp(static_cast<float>(note.attackSamplesElapsed + 1)
-                                           / static_cast<float>(kSamplerAttackFadeSamples));
+                                           / static_cast<float>(note.attackSamplesTotal));
 
                 const auto samplesUntilSliceEnd = static_cast<int>(std::floor((note.sourceEndPosition - note.sourcePosition)
                                                                               / juce::jmax(0.000001, sourceAdvancePerOutputSample)));
@@ -503,13 +705,21 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
                                        readCubicSample(note.sample->buffer, sourceChannel, note.sourcePosition) * noteGain);
             }
 
-            if (note.attackSamplesElapsed < kSamplerAttackFadeSamples)
+            if (note.attackSamplesElapsed < note.attackSamplesTotal)
                 ++note.attackSamplesElapsed;
 
             if (note.releaseSamplesRemaining > 0)
                 --note.releaseSamplesRemaining;
 
             note.sourcePosition += sourceAdvancePerOutputSample;
+
+            // Advance the glide toward the target ratio (one step per output sample).
+            if (note.glideSamplesRemaining > 0)
+            {
+                note.currentRatio *= note.glideRatioMul;
+                if (--note.glideSamplesRemaining == 0)
+                    note.currentRatio = note.playbackRatio;
+            }
         }
     }
 
@@ -553,7 +763,8 @@ const SamplerEngine::SampleData* SamplerEngine::getSampleData(const juce::String
 const SamplerEngine::SampleData* SamplerEngine::getWarpedSampleData(const juce::String& path,
                                                                     const SampleData& sourceData,
                                                                     double sourceBpm,
-                                                                    double projectTempoBpm)
+                                                                    double projectTempoBpm,
+                                                                    bool allowBlocking)
 {
     if (stretchBuffer == nullptr
         || sourceData.buffer.getNumSamples() <= 1
@@ -581,14 +792,76 @@ const SamplerEngine::SampleData* SamplerEngine::getWarpedSampleData(const juce::
             return it->second.get();
     }
 
-    auto data = std::make_unique<SampleData>();
-    data->sampleRate = sourceData.sampleRate;
-    data->buffer = stretchBuffer(sourceData.buffer, targetSamples, sourceData.sampleRate, path);
+    if (allowBlocking)
+    {
+        // Live note (message thread). The HQ render is heavy, so we must not double it up
+        // with the pre-warm that load() kicks off: if a build for this key is already in
+        // flight, WAIT for it (poll the cache) instead of rendering a second copy. With
+        // pre-warm-on-load this is usually already a cache hit, so there's no wait at all.
+        const auto deadlineMs = juce::Time::getMillisecondCounter() + 8000;
+        for (;;)
+        {
+            {
+                std::scoped_lock lock(cacheMutex);
+                if (const auto it = warpedSampleCache.find(key); it != warpedSampleCache.end())
+                    return it->second.get();
+                if (! warpInFlight.contains(key))
+                {
+                    warpInFlight.insert(key);   // claim it; we build it ourselves below
+                    break;
+                }
+            }
+            if (juce::Time::getMillisecondCounter() >= deadlineMs)
+                break;                          // in-flight job stalled; build it ourselves
+            juce::Thread::sleep(4);
+        }
 
+        auto data = std::make_unique<SampleData>();
+        data->sampleRate = sourceData.sampleRate;
+        data->buffer = stretchBuffer(sourceData.buffer, targetSamples, sourceData.sampleRate, path);
+
+        std::scoped_lock lock(cacheMutex);
+        const auto [it, inserted] = warpedSampleCache.emplace(key, std::move(data));
+        juce::ignoreUnused(inserted);          // emplace is a no-op if the in-flight job won the race
+        warpInFlight.erase(key);
+        return it->second.get();
+    }
+
+    // Audio thread (renderMidiClip): never block. Queue a background build and return nullptr;
+    // the caller plays the original until the warped buffer is ready. `src` points at a
+    // sampleCache entry, which is never erased, so the pointer stays valid for the job.
     std::scoped_lock lock(cacheMutex);
-    const auto [it, inserted] = warpedSampleCache.emplace(key, std::move(data));
-    juce::ignoreUnused(inserted);
-    return it->second.get();
+    if (! warpInFlight.contains(key))
+    {
+        warpInFlight.insert(key);
+        const auto* src = &sourceData;
+        const auto srcSampleRate = sourceData.sampleRate;
+        warpPool.addJob([this, key, src, srcSampleRate, targetSamples, path]
+        {
+            auto data = std::make_unique<SampleData>();
+            data->sampleRate = srcSampleRate;
+            data->buffer = stretchBuffer(src->buffer, targetSamples, srcSampleRate, path);
+
+            std::scoped_lock jobLock(cacheMutex);
+            warpedSampleCache.emplace(key, std::move(data));
+            warpInFlight.erase(key);
+        });
+    }
+    return nullptr;
+}
+
+void SamplerEngine::prewarmWarp(const juce::String& path, double sourceBpm, double projectTempoBpm)
+{
+    if (path.isEmpty() || sourceBpm <= 0.0 || projectTempoBpm <= 0.0)
+        return;
+
+    // Decode + stretch entirely on the background pool so the load gesture never blocks, but
+    // the warped buffer is cached before the user can trigger a note.
+    warpPool.addJob([this, path, sourceBpm, projectTempoBpm]
+    {
+        if (const auto* sd = getSampleData(path); sd != nullptr)
+            getWarpedSampleData(path, *sd, sourceBpm, projectTempoBpm, /*allowBlocking*/ true);
+    });
 }
 
 double SamplerEngine::getPitchRatio(int midiNote, int rootMidiNote) noexcept

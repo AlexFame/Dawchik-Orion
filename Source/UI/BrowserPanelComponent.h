@@ -34,6 +34,8 @@ public:
     std::function<void()>                   onCloseRequested;
     // Footer transport: fired when the play/stop button in the preview bar is clicked.
     std::function<void()>                   onTogglePreviewPlayback;
+    // Fired when the user starts dragging an item to the playlist — caller stops the preview.
+    std::function<void()>                   onDragStarted;
     // Fired when the SYNC toggle is clicked — caller should reload the preview buffer.
     std::function<void()>                   onPreviewBpmSyncToggled;
     std::function<void(const juce::File&)>  onRootFolderChosen;

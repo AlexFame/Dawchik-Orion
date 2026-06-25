@@ -43,6 +43,10 @@ juce::var pitchSlideToVar(const orion::PitchSlide& slide)
         auto* pointObject = new juce::DynamicObject();
         pointObject->setProperty("beat", point.beat);
         pointObject->setProperty("pitch", point.pitch);
+        pointObject->setProperty("curve", point.curve);
+        pointObject->setProperty("lfoShape", point.lfoShape);
+        pointObject->setProperty("lfoDepth", point.lfoDepth);
+        pointObject->setProperty("lfoRate", point.lfoRate);
         points.add(juce::var(pointObject));
     }
 
@@ -108,6 +112,7 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("solo", track.solo);
     object->setProperty("recordArmed", track.recordArmed);
     object->setProperty("volumeDb", track.volumeDb);
+    object->setProperty("trackGainDb", track.trackGainDb);
     object->setProperty("pan", track.pan);
     object->setProperty("samplerSourcePath", track.samplerSourcePath);
     object->setProperty("samplerRootMidiNote", track.samplerRootMidiNote);
@@ -115,6 +120,13 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("samplerKeyboardOctaveOffset", track.samplerKeyboardOctaveOffset);
     object->setProperty("samplerTransposeSemitones", track.samplerTransposeSemitones);
     object->setProperty("samplerSliceCount", track.samplerSliceCount);
+    {
+        juce::Array<juce::var> pts;
+        for (const auto r : track.samplerSlicePoints)
+            pts.add(r);
+        object->setProperty("samplerSlicePoints", pts);
+    }
+    object->setProperty("samplerSliceSensitivity", track.samplerSliceSensitivity);
     object->setProperty("samplerWarpEnabled", track.samplerWarpEnabled);
     object->setProperty("samplerSourceBpm", track.samplerSourceBpm);
     object->setProperty("samplerSourceDurationSeconds", track.samplerSourceDurationSeconds);
@@ -212,6 +224,37 @@ orion::MidiNote midiNoteFromVar(const juce::var& value)
     return note;
 }
 
+orion::PitchSlide pitchSlideFromVar(const juce::var& value)
+{
+    orion::PitchSlide slide;
+    auto* obj = value.getDynamicObject();
+    if (obj == nullptr)
+        return slide;
+
+    slide.sourcePitch         = getInt(*obj, "sourcePitch", slide.sourcePitch);
+    slide.sourceNoteStartBeat = getDouble(*obj, "sourceNoteStartBeat", slide.sourceNoteStartBeat);
+
+    if (auto* points = obj->getProperty("points").getArray())
+    {
+        for (const auto& pointVar : *points)
+        {
+            if (auto* pointObj = pointVar.getDynamicObject())
+            {
+                orion::PitchSlidePoint point;
+                point.beat     = getDouble(*pointObj, "beat", point.beat);
+                point.pitch    = getDouble(*pointObj, "pitch", point.pitch);
+                point.curve    = getDouble(*pointObj, "curve", point.curve);
+                point.lfoShape = getInt(*pointObj, "lfoShape", point.lfoShape);
+                point.lfoDepth = getDouble(*pointObj, "lfoDepth", point.lfoDepth);
+                point.lfoRate  = getDouble(*pointObj, "lfoRate", point.lfoRate);
+                slide.points.push_back(point);
+            }
+        }
+    }
+
+    return slide;
+}
+
 orion::TimelineClip timelineClipFromVar(const juce::var& value)
 {
     orion::TimelineClip clip;
@@ -251,6 +294,10 @@ orion::TimelineClip timelineClipFromVar(const juce::var& value)
         for (const auto& noteVar : *notes)
             clip.midiNotes.push_back(midiNoteFromVar(noteVar));
 
+    if (auto* slides = obj->getProperty("pitchSlides").getArray())
+        for (const auto& slideVar : *slides)
+            clip.pitchSlides.push_back(pitchSlideFromVar(slideVar));
+
     return clip;
 }
 
@@ -273,6 +320,7 @@ orion::TrackState trackStateFromVar(const juce::var& value)
     track.solo                        = getBool(*obj, "solo", track.solo);
     track.recordArmed                 = getBool(*obj, "recordArmed", track.recordArmed);
     track.volumeDb                    = getDouble(*obj, "volumeDb", track.volumeDb);
+    track.trackGainDb                 = getDouble(*obj, "trackGainDb", track.trackGainDb);
     track.pan                         = juce::jlimit(-1.0, 1.0, getDouble(*obj, "pan", track.pan));
     track.samplerSourcePath           = getString(*obj, "samplerSourcePath");
     track.samplerRootMidiNote         = getInt(*obj, "samplerRootMidiNote", track.samplerRootMidiNote);
@@ -280,6 +328,11 @@ orion::TrackState trackStateFromVar(const juce::var& value)
     track.samplerKeyboardOctaveOffset = getInt(*obj, "samplerKeyboardOctaveOffset", track.samplerKeyboardOctaveOffset);
     track.samplerTransposeSemitones   = getInt(*obj, "samplerTransposeSemitones", track.samplerTransposeSemitones);
     track.samplerSliceCount           = getInt(*obj, "samplerSliceCount", track.samplerSliceCount);
+    track.samplerSlicePoints.clear();
+    if (const auto* pts = obj->getProperty("samplerSlicePoints").getArray())
+        for (const auto& v : *pts)
+            track.samplerSlicePoints.push_back(static_cast<double>(v));
+    track.samplerSliceSensitivity     = juce::jlimit(0.0, 1.0, getDouble(*obj, "samplerSliceSensitivity", track.samplerSliceSensitivity));
     track.samplerWarpEnabled          = getBool(*obj, "samplerWarpEnabled", track.samplerWarpEnabled);
     track.samplerSourceBpm            = getDouble(*obj, "samplerSourceBpm", track.samplerSourceBpm);
     track.samplerSourceDurationSeconds = getDouble(*obj, "samplerSourceDurationSeconds", track.samplerSourceDurationSeconds);

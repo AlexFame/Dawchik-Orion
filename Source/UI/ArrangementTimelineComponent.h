@@ -55,6 +55,7 @@ public:
     void mouseUp(const juce::MouseEvent& event) override;
     void mouseDoubleClick(const juce::MouseEvent& event) override;
     bool keyPressed(const juce::KeyPress& key) override;
+    void modifierKeysChanged(const juce::ModifierKeys& modifiers) override;
     void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
     void mouseMagnify(const juce::MouseEvent& event, float scaleFactor) override;
     bool isInterestedInDragSource(const SourceDetails& dragSourceDetails) override;
@@ -72,6 +73,10 @@ public:
     std::optional<int> getSelectedTrackIndex() const noexcept;
     // Selects a track (used by the mixer when its name is clicked); clears clip selection.
     void selectTrack(int trackIndex);
+    // Adds an audio clip for `file` onto track `trackIndex` at `startBeat`, using the same
+    // analysis / auto-warp logic as a browser drop. Returns the new clip index, or -1.
+    // (Used by double-click-to-sampler so the sample also lands in the playlist.)
+    int addAudioClipToTrack(const juce::File& file, int trackIndex, double startBeat);
     // Records an undo checkpoint of the current timeline state (used by the recorder so
     // a finished take can be removed with Cmd+Z).
     void captureUndoSnapshot();
@@ -82,6 +87,10 @@ public:
     bool canRedo() const noexcept;
     bool undo();
     bool redo();
+    bool selectAllClips();
+    bool duplicateSelectedClip();
+    bool deleteSelectedClips();
+    bool loopToSelectedClip();
     void addAudioTrack();
     void addMidiTrack();
     // --- Group / folder tracks ---
@@ -183,6 +192,13 @@ private:
 
     struct DragState
     {
+        struct ClipItem
+        {
+            SelectedClip clip;
+            double originalStartBeat { 0.0 };
+            double originalLengthInBeats { 0.0 };
+        };
+
         SelectedClip clip;
         DragMode mode { DragMode::move };
         juce::Point<int> mouseDownPosition;
@@ -197,6 +213,9 @@ private:
         double originalFadeOutCurve { 0.0 };
         int originalTrackIndex { -1 };
         bool historyCaptured { false };
+        bool copyOnDrag { false };
+        bool copyCreated { false };
+        std::vector<ClipItem> clipItems;
     };
 
     struct LoopSelectionState
@@ -249,6 +268,31 @@ private:
         juce::Rectangle<int> bounds;
     };
 
+    // Drag state for the per-clip gain handle (a dot at the top-centre of each clip).
+    struct ClipGainDragState
+    {
+        bool active { false };
+        int trackIndex { -1 };
+        int clipIndex { -1 };
+        int startY { 0 };
+        double startGainDb { 0.0 };
+        bool historyCaptured { false };
+    };
+
+    enum class MultiFileDropMode
+    {
+        separateTracks,
+        oneTrack
+    };
+
+    struct FileDropPreview
+    {
+        juce::Rectangle<int> bounds;
+        juce::String label;
+        juce::Colour colour;
+        bool createsNewTrack { false };
+    };
+
     struct TimelineSnapshot
     {
         std::vector<TrackState> tracks;
@@ -279,6 +323,7 @@ private:
     void timerCallback() override;
     float beatToX(double beat, juce::Rectangle<int> laneArea) const noexcept;
     juce::Rectangle<int> getTrackLaneBounds(int trackIndex) const noexcept;
+    juce::Rectangle<int> getClipGainHandleBounds(const TimelineClip& clip, int trackIndex) const noexcept;
     std::optional<SelectedClip> hitTestClip(juce::Point<int> position, bool midiOnly) const;
     std::optional<ClipHit> hitTestClipDetailed(juce::Point<int> position, bool midiOnly) const;
     std::optional<TrackHeaderHit> hitTestTrackHeader(juce::Point<int> position) const;
@@ -309,9 +354,6 @@ private:
     void paintToolPalette(juce::Graphics& g);
     bool handleEditToolbarClick(juce::Point<int> position);
     void showSplitSnapMenu();
-    bool duplicateSelectedClip();
-    bool deleteSelectedClips();
-    bool loopToSelectedClip();
     void pushUndoSnapshot();
     void restoreSnapshot(const TimelineSnapshot& snapshot);
     bool hasTimelineChangedSince(const TimelineSnapshot& snapshot) const noexcept;
@@ -327,15 +369,24 @@ private:
     double xToBeatPosition(int x) const noexcept;
     void clearBrowserDropPreview();
     void updateBrowserDropPreview(const juce::Point<int>& position, const juce::var& description);
+    void clearExternalFileDropPreview();
+    void updateExternalFileDropPreview(const juce::StringArray& files, juce::Point<int> position);
+    void importDroppedAudioFiles(const juce::StringArray& files, juce::Point<int> position, MultiFileDropMode mode);
     // Imports an audio file (from an external drag) as a clip on the track under the
     // cursor, or appends a new audio track. Returns false if the file isn't audio.
-    bool importAudioFileAt(const juce::File& file, juce::Point<int> position);
+    bool importAudioFileAt(const juce::File& file,
+                           juce::Point<int> position,
+                           bool captureHistory = true,
+                           std::optional<int> forcedTrackIndex = std::nullopt,
+                           std::optional<double> forcedStartBeat = std::nullopt,
+                           bool forceCreateNewTrack = false);
     void notifyClipSelectionChanged();
     bool isClipSelected(const SelectedClip& clip) const noexcept;
     void setSingleSelection(std::optional<SelectedClip> clip);
     void selectRangeTo(const SelectedClip& targetClip);
     void updateSelectionBox(const juce::Point<int>& position);
     juce::Rectangle<int> getSelectionBoxBounds() const noexcept;
+    void createDragCopiesIfNeeded();
     juce::String makeUniqueTrackName(const juce::String& baseName) const;
     void showAddTrackMenu();
     void createMidiClipAt(int trackIndex, double startBeat);
@@ -373,6 +424,7 @@ private:
     TrackHeaderWidthResizeState trackHeaderWidthResizeState;
     SelectionBoxState selectionBoxState;
     TrackVolumeDragState trackVolumeDragState;
+    ClipGainDragState clipGainDragState;
     juce::TextEditor trackVolumeInlineEditor;
     std::optional<int> volumeEditorTrackIndex;
     std::optional<ClipHit> hoverClip;
@@ -391,8 +443,10 @@ private:
     bool fitTrackLanesToVisibleArea { false };
     std::map<int, int> customTrackHeights;
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
+    std::optional<double> browserDropSnapBeat;
     juce::Colour browserDropPreviewColour { orion::theme::warm::red };
     bool browserDropCreatesNewTrack { false };
+    std::vector<FileDropPreview> externalFileDropPreviews;
     // When the playlist is full and a browser audio item is dragged in, an empty lane is
     // freed below the LAST track; the new track materialises there on drop. The lane
     // opens/closes smoothly via browserAppendAnim (0..1), driven by the timer.

@@ -705,6 +705,32 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
+    // Right-click (or ctrl-click) a row → context menu.
+    if (event.mods.isPopupMenu())
+    {
+        const auto idx = hitTestRow(event.getPosition());
+        if (! idx.has_value())
+            return;
+        selectedIndex = idx;
+        repaint();
+        const auto& item = items[static_cast<std::size_t>(*idx)];
+        if (item.isParentLink)
+            return;
+
+        juce::PopupMenu menu;
+        menu.addItem(1, "Open in Finder");
+        const auto file = item.file;
+        const auto screenPos = event.getScreenPosition();
+        menu.showMenuAsync(juce::PopupMenu::Options()
+                               .withTargetScreenArea(juce::Rectangle<int>(screenPos.x, screenPos.y, 1, 1)),
+                           [file](int result)
+                           {
+                               if (result == 1 && file.exists())
+                                   file.revealToUser();   // reveal/select the file or folder in Finder
+                           });
+        return;
+    }
+
     dragIndex = hitTestRow(event.getPosition());
     selectedIndex = dragIndex;
     repaint();
@@ -816,6 +842,11 @@ void BrowserPanelComponent::mouseDrag(const juce::MouseEvent& event)
     g.setColour(juce::Colours::white);
     g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
     g.drawText(item.name, dragImage.getBounds().reduced(10, 0), juce::Justification::centredLeft, true);
+
+    // Stop the browser preview the moment a drag begins — the sample shouldn't keep playing
+    // while it's being dragged onto the playlist.
+    if (onDragStarted)
+        onDragStarted();
 
     dragContainer->startDragging(payload, this, juce::ScaledImage(dragImage), true, nullptr, &event.source);
     dragIndex.reset();
