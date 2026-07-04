@@ -128,6 +128,11 @@ juce::var trackStateToVar(const orion::TrackState& track)
     }
     object->setProperty("samplerSliceSensitivity", track.samplerSliceSensitivity);
     object->setProperty("samplerWarpEnabled", track.samplerWarpEnabled);
+    object->setProperty("samplerStepGateBeats", track.samplerStepGateBeats);
+    object->setProperty("samplerAmpAttackSeconds", track.samplerAmpAttackSeconds);
+    object->setProperty("samplerAmpDecaySeconds", track.samplerAmpDecaySeconds);
+    object->setProperty("samplerAmpSustain", track.samplerAmpSustain);
+    object->setProperty("samplerAmpReleaseSeconds", track.samplerAmpReleaseSeconds);
     object->setProperty("samplerSourceBpm", track.samplerSourceBpm);
     object->setProperty("samplerSourceDurationSeconds", track.samplerSourceDurationSeconds);
     object->setProperty("samplerDetectedBars", track.samplerDetectedBars);
@@ -334,6 +339,11 @@ orion::TrackState trackStateFromVar(const juce::var& value)
             track.samplerSlicePoints.push_back(static_cast<double>(v));
     track.samplerSliceSensitivity     = juce::jlimit(0.0, 1.0, getDouble(*obj, "samplerSliceSensitivity", track.samplerSliceSensitivity));
     track.samplerWarpEnabled          = getBool(*obj, "samplerWarpEnabled", track.samplerWarpEnabled);
+    track.samplerStepGateBeats        = juce::jmax(0.0, getDouble(*obj, "samplerStepGateBeats", track.samplerStepGateBeats));
+    track.samplerAmpAttackSeconds     = juce::jmax(0.0, getDouble(*obj, "samplerAmpAttackSeconds", track.samplerAmpAttackSeconds));
+    track.samplerAmpDecaySeconds      = juce::jmax(0.0, getDouble(*obj, "samplerAmpDecaySeconds", track.samplerAmpDecaySeconds));
+    track.samplerAmpSustain           = juce::jlimit(0.0, 1.0, getDouble(*obj, "samplerAmpSustain", track.samplerAmpSustain));
+    track.samplerAmpReleaseSeconds    = juce::jmax(0.0, getDouble(*obj, "samplerAmpReleaseSeconds", track.samplerAmpReleaseSeconds));
     track.samplerSourceBpm            = getDouble(*obj, "samplerSourceBpm", track.samplerSourceBpm);
     track.samplerSourceDurationSeconds = getDouble(*obj, "samplerSourceDurationSeconds", track.samplerSourceDurationSeconds);
     track.samplerDetectedBars         = getInt(*obj, "samplerDetectedBars", track.samplerDetectedBars);
@@ -399,6 +409,7 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
     rootObject->setProperty("keyEnabled", projectState.isKeyEnabled());
     rootObject->setProperty("scaleLockEnabled", projectState.isScaleLockEnabled());
     rootObject->setProperty("recordWithMetronome", projectState.isRecordWithMetronome());
+    rootObject->setProperty("recordWithCountIn", projectState.isRecordWithCountIn());
     rootObject->setProperty("loopLengthInBeats", projectState.getLoopLengthInBeats());
     rootObject->setProperty("loopRangeActive", projectState.hasLoopRange());
     rootObject->setProperty("loopStartBeat", projectState.getLoopStartBeat());
@@ -495,6 +506,7 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
     projectState.setKeyEnabled(getBool(*root, "keyEnabled", projectState.isKeyEnabled()));
     projectState.setScaleLockEnabled(getBool(*root, "scaleLockEnabled", projectState.isScaleLockEnabled()));
     projectState.setRecordWithMetronome(getBool(*root, "recordWithMetronome", projectState.isRecordWithMetronome()));
+    projectState.setRecordWithCountIn(getBool(*root, "recordWithCountIn", projectState.isRecordWithCountIn()));
     projectState.setLoopLengthInBeats(getDouble(*root, "loopLengthInBeats", projectState.getLoopLengthInBeats()));
 
     if (getBool(*root, "loopRangeActive", false))

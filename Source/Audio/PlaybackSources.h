@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -441,6 +442,123 @@ public:
             previous->instance->releaseResources();
     }
 
+    // A track was removed from the project at `removedTrackIndex`. Drop that track's hosted
+    // instrument + insert chain (releasing them so any held voice stops), and shift every
+    // higher-indexed slot down by one so the engine's per-track maps stay aligned with the
+    // project's track vector. Without this, deleting a track left every lower instrument keyed
+    // to the wrong project index — a currently-held note never received its note-off and rang
+    // forever. Surviving instruments keep their LIVE instances (no reinstantiation, no state
+    // loss, no audio flush). The removed track's plugin is kept ALIVE in the instrument stash
+    // (see below) so an undo can re-home the exact same instance instantly.
+    void removeTrackAndReindex(int removedTrackIndex)
+    {
+        std::vector<std::unique_ptr<InsertSlot>> removedInserts;
+        {
+            const juce::ScopedLock sl(instrumentLock);
+
+            std::map<int, std::unique_ptr<InstrumentSlot>> remappedInstruments;
+            for (auto& [idx, slot] : instruments)
+            {
+                if (idx == removedTrackIndex)
+                {
+                    if (slot != nullptr)
+                        instrumentStash.push_back(std::move(slot));   // keep alive for undo
+                }
+                else
+                {
+                    const auto newIdx = idx > removedTrackIndex ? idx - 1 : idx;
+                    remappedInstruments[newIdx] = std::move(slot);
+                }
+            }
+            instruments = std::move(remappedInstruments);
+
+            std::map<int, std::vector<std::unique_ptr<InsertSlot>>> remappedInserts;
+            for (auto& [idx, chain] : trackInserts)
+            {
+                if (idx == kMasterInsertKey)
+                    remappedInserts[idx] = std::move(chain);        // master chain is not per-track
+                else if (idx == removedTrackIndex)
+                    removedInserts = std::move(chain);
+                else
+                {
+                    const auto newIdx = idx > removedTrackIndex ? idx - 1 : idx;
+                    remappedInserts[newIdx] = std::move(chain);
+                }
+            }
+            trackInserts = std::move(remappedInserts);
+        }
+
+        // Release the removed inserts outside the audio lock.
+        for (auto& ins : removedInserts)
+            if (ins != nullptr && ins->instance != nullptr)
+                ins->instance->releaseResources();
+
+        trimInstrumentStash(kInstrumentStashLimit);
+    }
+
+    // ---- Instrument stash: instant, lossless track delete + undo ----------------
+    // Deleting a track parks its (live) plugin here instead of destroying it; undo re-homes
+    // live instances by plugin id. So delete+undo is just pointer moves — instant, with the
+    // exact same instance and state — instead of reinstantiating every plugin (which froze).
+    //
+    // Atomically (under a single lock, so the audio thread never sees a half-empty map) park
+    // every mounted instrument and re-home them onto `wanted` (track index -> plugin id) by
+    // reusing matching LIVE instances from the stash. Returns the wanted entries that had no
+    // live match, so the caller can reinstantiate just those from saved state (rare).
+    std::vector<std::pair<int, juce::String>> rehomeInstrumentsFromStash(
+        const std::vector<std::pair<int, juce::String>>& wanted)
+    {
+        std::vector<std::pair<int, juce::String>> unsatisfied;
+        const juce::ScopedLock sl(instrumentLock);
+
+        for (auto& [idx, slot] : instruments)
+        {
+            juce::ignoreUnused(idx);
+            if (slot != nullptr)
+                instrumentStash.push_back(std::move(slot));
+        }
+        instruments.clear();
+
+        for (const auto& [index, pluginId] : wanted)
+        {
+            bool found = false;
+            for (auto it = instrumentStash.begin(); it != instrumentStash.end(); ++it)
+            {
+                auto& s = *it;
+                if (s != nullptr && s->instance != nullptr
+                    && s->instance->getPluginDescription().createIdentifierString() == pluginId)
+                {
+                    instruments[index] = std::move(s);
+                    instrumentStash.erase(it);
+                    found = true;
+                    break;
+                }
+            }
+            if (! found)
+                unsatisfied.push_back({ index, pluginId });
+        }
+        return unsatisfied;
+    }
+
+    // Bound the stash's memory: release all but the `keep` most-recent parked plugins.
+    void trimInstrumentStash(std::size_t keep)
+    {
+        std::vector<std::unique_ptr<InstrumentSlot>> toRelease;
+        {
+            const juce::ScopedLock sl(instrumentLock);
+            while (instrumentStash.size() > keep)
+            {
+                toRelease.push_back(std::move(instrumentStash.front()));
+                instrumentStash.erase(instrumentStash.begin());
+            }
+        }
+        for (auto& s : toRelease)
+            if (s != nullptr && s->instance != nullptr)
+                s->instance->releaseResources();
+    }
+
+    static constexpr std::size_t kInstrumentStashLimit = 24;
+
     // Message-thread accessor for editor windows / state save & restore.
     juce::AudioPluginInstance* getTrackInstrument(int trackIndex) noexcept
     {
@@ -766,6 +884,9 @@ public:
             // playback starts. Re-reading the transport here can be a few ms
             // late and skip note-ons placed exactly at the clip start.
             wasPlaying = true;
+            // First playing block: chase notes sitting under the start playhead so the
+            // very first note (e.g. one exactly at the part start) is always articulated.
+            chaseNotesAtStart = true;
         }
 
         const auto beatAdvancePerSample = beatsPerSecond / outputSampleRate;
@@ -826,7 +947,15 @@ public:
 
     // Message thread: configure (cheap) a streaming stretcher per warp/pitch clip, capture
     // the decoded original, and ensure the producer thread is running. No stretching here.
-    void prepareWarpStreams()
+    // blockForLead: briefly wait for a playback lead before returning (used at Play start so the
+    // first block has audio). Pass false to re-prep WHILE PLAYING (e.g. live time-stretch drag) —
+    // the new-length stream builds in the background and the render swaps to it when ready, so a
+    // drag changes speed on the fly without stopping/replaying and without stalling the UI thread.
+    // allowSyncDecode: if a source isn't decoded yet, decode it synchronously HERE (message thread
+    // only) so Play is guaranteed to have audio — a strict fallback that preserves the old
+    // "plays immediately" behaviour. Off elsewhere (timer / live drag), which stay freeze-free via
+    // the background prewarm.
+    void prepareWarpStreams(bool blockForLead = true, bool allowSyncDecode = false)
     {
         const auto beatsPerSecond = project.getTempoBpm() / 60.0;
         if (beatsPerSecond <= 0.0)
@@ -840,7 +969,16 @@ public:
                 const auto semis = computeKeyShiftSemitones(clip);
                 if (! clip.warpEnabled && semis == 0)
                     continue;
-                const auto* original = getAudioFileData(clip.sourcePath);
+                const auto* original = getAudioFileDataCached(clip.sourcePath);
+                if (original == nullptr)
+                {
+                    prewarmAudioFile(clip.sourcePath);   // always kick a background decode
+                    // Fallback (Play only): decode synchronously on this message thread so the
+                    // stream is ready immediately — never regress "plays right away". This never
+                    // runs on the audio thread and is skipped for the timer / live-drag paths.
+                    if (allowSyncDecode)
+                        original = getAudioFileData(clip.sourcePath);
+                }
                 if (original == nullptr || original->sampleRate <= 0.0 || original->buffer.getNumSamples() <= 0)
                     continue;
                 const auto warpLengthInBeats = clip.warpTargetLengthInBeats > 0.0 ? clip.warpTargetLengthInBeats : clip.lengthInBeats;
@@ -899,7 +1037,7 @@ public:
             for (auto& kv : warpStreams)
                 pending.push_back(kv.second.get());
         }
-        if (! pending.empty())
+        if (blockForLead && ! pending.empty())
         {
             const auto deadlineMs = juce::Time::getMillisecondCounter() + 400;
             for (;;)
@@ -938,22 +1076,68 @@ public:
     {
         readyOut = 0;
         WarpStream* s = nullptr;
+        WarpStream* fallback = nullptr;   // most-complete sibling of a different length
+        int fallbackReady = 0;
+        int fallbackLenDist = std::numeric_limits<int>::max();
         {
             const juce::ScopedTryLock stl(warpStreamLock);
             if (! stl.isLocked())
                 return nullptr;
+
             const auto it = warpStreams.find(warpStreamKey(path, targetSamples, semis).toStdString());
-            if (it == warpStreams.end())
-                return nullptr;
-            s = it->second.get();
+            if (it != warpStreams.end())
+            {
+                s = it->second.get();
+                if (neededOut > s->requestedSamples.load(std::memory_order_relaxed))
+                {
+                    s->requestedSamples.store(neededOut, std::memory_order_relaxed);
+                    warpProducerWake.signal();
+                }
+                const int ready = s->producedSamples.load(std::memory_order_acquire);
+                // Primary stream already covers what this block needs → use the exact new length.
+                if (ready >= neededOut)
+                {
+                    readyOut = ready;
+                    return &s->out;
+                }
+            }
+
+            // Primary isn't filled up to the playhead yet (a freshly-created live-stretch stream
+            // whose producer is still catching up from sample 0). Rather than emit SILENCE for the
+            // gap, keep the PREVIOUS stretch of the same source/pitch audible — identical pitch, only
+            // a hair of tempo drift — until the new length catches up, then we swap to it seamlessly.
+            // Streams are never erased, so this fallback pointer stays valid after the lock is released.
+            for (auto& kv : warpStreams)
+            {
+                auto* c = kv.second.get();
+                if (c == s || c->semis != semis || c->sourcePath != path)
+                    continue;
+                if (c->producedSamples.load(std::memory_order_acquire) < c->targetSamples)
+                    continue;   // only fully-produced siblings are safe to read end-to-end
+                const int dist = std::abs(c->targetSamples - targetSamples);
+                if (dist < fallbackLenDist)
+                {
+                    fallbackLenDist = dist;
+                    fallback = c;
+                    fallbackReady = c->producedSamples.load(std::memory_order_acquire);
+                }
+            }
         }
-        if (neededOut > s->requestedSamples.load(std::memory_order_relaxed))
+
+        if (fallback != nullptr)
         {
-            s->requestedSamples.store(neededOut, std::memory_order_relaxed);
-            warpProducerWake.signal();
+            readyOut = fallbackReady;
+            return &fallback->out;
         }
-        readyOut = s->producedSamples.load(std::memory_order_acquire);
-        return &s->out;
+
+        // No continuity fallback available: hand back the primary with whatever it has produced so
+        // far (its filled head plays; the unfilled tail stays silent per-sample, as before).
+        if (s != nullptr)
+        {
+            readyOut = s->producedSamples.load(std::memory_order_acquire);
+            return &s->out;
+        }
+        return nullptr;
     }
 
     void startWarpProducer()
@@ -991,31 +1175,34 @@ public:
        #endif
         while (warpProducerRunning.load(std::memory_order_acquire))
         {
-            // The RubberBand render is CPU-heavy. Only run it while the transport is
-            // STOPPED — during playback every cycle must go to the real-time stream
-            // fill, otherwise a long loop's offline render starves the producer and
-            // the audio drops out repeatedly. When stopped, we pre-render ahead so the
-            // next Play uses the exact high-quality buffer.
-            if (transport.isPlaying() || transport.isCountInActive())
-            {
-                warpOfflineWake.wait(100);
-                continue;
-            }
+            // The RubberBand render is CPU-heavy. While STOPPED we pre-render any pending stream so
+            // the next Play is instantly high-quality. While PLAYING we still build the HQ buffer —
+            // but ONLY for a stream whose real-time (signalsmith) stand-in is ALREADY fully produced,
+            // so we never compete with the producer (that contention was the dropout risk). This lets
+            // the HQ low-end swap in a couple seconds after a live time-stretch WITHOUT a stop/play —
+            // previously the degraded stand-in's low end played until you stopped long enough.
+            const bool playing = transport.isPlaying() || transport.isCountInActive();
 
             WarpStream* pending = nullptr;
             {
                 const juce::ScopedLock sl(warpStreamLock);
                 for (auto& kv : warpStreams)
-                    if (! kv.second->offlineBuilt.load(std::memory_order_acquire) && kv.second->original != nullptr)
-                    {
-                        pending = kv.second.get();
-                        break;
-                    }
+                {
+                    auto* s = kv.second.get();
+                    if (s->offlineBuilt.load(std::memory_order_acquire) || s->original == nullptr)
+                        continue;
+                    // While playing, wait until the producer has fully filled this stream's stand-in
+                    // (no CPU contention) before spending cycles on its offline render.
+                    if (playing && s->producedSamples.load(std::memory_order_acquire) < s->targetSamples)
+                        continue;
+                    pending = s;
+                    break;
+                }
             }
 
             if (pending == nullptr)
             {
-                warpOfflineWake.wait(50);
+                warpOfflineWake.wait(playing ? 60 : 50);
                 continue;
             }
 
@@ -1306,9 +1493,17 @@ private:
                 if (clip.type != ClipType::audio || clip.sourcePath.isEmpty())
                     continue;
 
-                const auto* originalAudioData = getAudioFileData(clip.sourcePath);
+                // Realtime (audio thread): never decode here — a big file would stall the callback.
+                // Use the cache only and prewarm off-thread. Offline render (export) must have the
+                // data, so it decodes synchronously.
+                const auto* originalAudioData = isRealtime ? getAudioFileDataCached(clip.sourcePath)
+                                                           : getAudioFileData(clip.sourcePath);
                 if (originalAudioData == nullptr || originalAudioData->buffer.getNumSamples() <= 0 || originalAudioData->sampleRate <= 0.0)
+                {
+                    if (isRealtime)
+                        prewarmAudioFile(clip.sourcePath);
                     continue;
+                }
 
                 const auto clipStartBeat = clip.startBeat;
                 const auto clipEndBeat = clip.startBeat + clip.lengthInBeats;
@@ -1647,6 +1842,40 @@ private:
         return dataPtr;
     }
 
+    // Cache-only lookup — safe to call from the audio thread (never decodes). Returns nullptr if
+    // the file hasn't been decoded yet; pair with prewarmAudioFile() to trigger a background load.
+    const AudioFileData* getAudioFileDataCached(const juce::String& path)
+    {
+        const juce::ScopedLock sl(audioCacheLock);
+        const auto it = audioCache.find(path.toStdString());
+        return it != audioCache.end() ? it->second.get() : nullptr;
+    }
+
+public:
+    // Decode + cache a file in the background (message-thread callers), so nothing blocks on a
+    // large decode. No-op if already cached or a decode is already queued for it.
+    void prewarmAudioFile(const juce::String& path)
+    {
+        if (path.isEmpty())
+            return;
+        const auto key = path.toStdString();
+        {
+            const juce::ScopedLock sl(audioCacheLock);
+            if (audioCache.find(key) != audioCache.end())
+                return;
+            if (! audioDecodePending.insert(key).second)
+                return;   // a decode is already in flight
+        }
+        audioDecodePool.addJob([this, path, key]
+        {
+            getAudioFileData(path);   // heavy decode, off the audio/message thread
+            const juce::ScopedLock sl(audioCacheLock);
+            audioDecodePending.erase(key);
+        });
+    }
+
+private:
+
     // Semitone offset to transpose the clip from its detected source key into the
     // current project key. Picks the shortest direction (max 6 semitones either way).
     int computeKeyShiftSemitones(const TimelineClip& clip) const noexcept
@@ -1776,6 +2005,13 @@ private:
             return -1;
         };
 
+        // First block after Play: re-articulate (at offset 0) any clip note whose span already
+        // contains the start playhead. This covers a note sitting exactly at the part start,
+        // which float jitter in blockStartBeat can otherwise push just past offsetForBeat().
+        const bool chaseAtStart = chaseNotesAtStart && includeClipNotes;
+        if (includeClipNotes)
+            chaseNotesAtStart = false;
+
         for (auto& [trackIndex, slot] : instruments)
         {
             if (slot == nullptr || slot->instance == nullptr)
@@ -1870,7 +2106,12 @@ private:
                         const auto onBeat  = clip.startBeat + note.startBeat;
                         const auto offBeat = onBeat + juce::jmax(0.01, note.lengthInBeats);
 
-                        if (const auto offset = offsetForBeat(onBeat); offset >= 0)
+                        auto offset = offsetForBeat(onBeat);
+                        // Chase: if the note didn't start in this block but is already sounding
+                        // under the start playhead, articulate it at offset 0 on the first block.
+                        if (offset < 0 && chaseAtStart && onBeat < blockStartBeat && offBeat > blockStartBeat)
+                            offset = 0;
+                        if (offset >= 0)
                         {
                             if (ch != 1)
                                 sendBendRange(ch, offset);  // widen the glide voice's bend range
@@ -1878,8 +2119,8 @@ private:
                             midi.addEvent(juce::MidiMessage::noteOn(ch, note.pitch,
                                 static_cast<juce::uint8>(juce::jlimit(1, 127, note.velocity))), offset);
                         }
-                        if (const auto offset = offsetForBeat(offBeat); offset >= 0)
-                            midi.addEvent(juce::MidiMessage::noteOff(ch, note.pitch), offset);
+                        if (const auto offOffset = offsetForBeat(offBeat); offOffset >= 0)
+                            midi.addEvent(juce::MidiMessage::noteOff(ch, note.pitch), offOffset);
                     }
 
                     for (std::size_t si = 0; si < clip.pitchSlides.size(); ++si)
@@ -2030,6 +2271,11 @@ private:
     int preparedBlockSize { 512 };
     double currentTimelineBeat { 0.0 };
     bool wasPlaying { false };
+    // Set on the first block after playback starts: re-articulate any clip note whose span
+    // contains the start playhead, so the note you press Play on top of (or exactly at the
+    // part start, where float jitter can otherwise drop the note-on) is heard. Consumed by
+    // processInstruments / renderMidiClip on that first block.
+    bool chaseNotesAtStart { false };
     // Short fade-out tail rendered when playback stops, so the arrangement doesn't click.
     int declickRemaining { 0 };
     int declickTotal { 1 };
@@ -2037,6 +2283,10 @@ private:
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
     juce::CriticalSection warpCacheLock;   // guards warpedAudioCache (audio vs message thread)
     juce::CriticalSection audioCacheLock;  // guards audioCache (audio vs producer/message threads)
+    // Background file decode so a big source (a 90 s clip decodes in ~1.5 s) never blocks the
+    // audio or message thread — that block was why a long warped clip started late / silent.
+    juce::ThreadPool audioDecodePool { 1 };
+    std::set<std::string> audioDecodePending;   // files with a decode job queued (guarded by audioCacheLock)
 
     // Real-time streaming warp: streams + background producer thread.
     std::map<std::string, std::unique_ptr<WarpStream>> warpStreams;
@@ -2051,6 +2301,9 @@ private:
 
     juce::CriticalSection instrumentLock;
     std::map<int, std::unique_ptr<InstrumentSlot>> instruments;
+    // Parked (still-alive) instruments from deleted tracks, kept so undo can re-home the exact
+    // same instance instantly instead of reinstantiating. Bounded by trimInstrumentStash().
+    std::vector<std::unique_ptr<InstrumentSlot>> instrumentStash;
 
     static constexpr int maxMeterTracks = 512;
     std::array<std::atomic<float>, maxMeterTracks> trackPeaksL {};

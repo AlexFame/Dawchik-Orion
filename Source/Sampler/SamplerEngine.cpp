@@ -331,6 +331,24 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
     // Slice-index mapping deliberately keeps the untransposed root.
     const auto effectiveRoot = track.samplerRootMidiNote - track.samplerTransposeSemitones;
 
+    // Per-channel amp envelope (ADSR). Tiny floors on attack/release keep edges click-free even
+    // at zero (this also reproduces the previous fixed anti-click ramps for default settings).
+    const double envAttack  = juce::jmax(0.002, track.samplerAmpAttackSeconds);
+    const double envDecay   = juce::jmax(0.0,   track.samplerAmpDecaySeconds);
+    const double envSustain = juce::jlimit(0.0, 1.0, track.samplerAmpSustain);
+    const double envRelease = juce::jmax(0.004, track.samplerAmpReleaseSeconds);
+    const double envReleaseBeats = envRelease * beatsPerSecond;
+    // Level during the held phase (attack → decay → sustain) at time t seconds since trigger.
+    const auto envHeldLevel = [envAttack, envDecay, envSustain](double t) -> double
+    {
+        if (t < envAttack)
+            return t / envAttack;
+        const auto td = t - envAttack;
+        if (envDecay > 0.0 && td < envDecay)
+            return 1.0 - (1.0 - envSustain) * (td / envDecay);
+        return envSustain;
+    };
+
     // Glide (portamento): precompute, once per block, the pitch each note glides FROM
     // (NaN = no glide). Done here so the per-sample inner loop allocates nothing.
     const bool glideActive = glideEnabled.load(std::memory_order_relaxed)
@@ -414,10 +432,27 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                 noteEndBeat = juce::jmin(nextTriggerBeat, note.startBeat + sliceDurationBeats);
             }
 
-            if (clipLocalBeat < note.startBeat || clipLocalBeat >= noteEndBeat)
+            // Per-channel step gate: shorten the note so a long sample (e.g. an 808) can be
+            // cut to a fixed length. 0 = play the full sample (default). The existing release
+            // ramp below smooths the cut so there's no click.
+            if (track.samplerStepGateBeats > 0.0)
+                noteEndBeat = juce::jmin(noteEndBeat, note.startBeat + track.samplerStepGateBeats);
+
+            // Amp-envelope note-off point. Classic is a sustaining/melodic voice, so the env is
+            // gated by the MIDI NOTE LENGTH (note ends → release) — Release and step length both
+            // matter. One-Shot/Slice play the whole sample (note-off ignored, drum-style), so the
+            // env is gated by the playback end instead; there A/D/S shape it and Decay→Sustain
+            // shortens an 808.
+            const auto envHoldEnd = (track.samplerMode == SamplerPlaybackMode::classic)
+                ? note.startBeat + juce::jmax(0.01, note.lengthInBeats)
+                : noteEndBeat;
+
+            // Render through the hold AND the release tail, so the release is audible past note-off.
+            if (clipLocalBeat < note.startBeat || clipLocalBeat >= envHoldEnd + envReleaseBeats)
                 continue;
 
             const auto noteSeconds = (clipLocalBeat - note.startBeat) / beatsPerSecond;
+            const auto heldSeconds = juce::jmax(0.0, (envHoldEnd - note.startBeat) / beatsPerSecond);
             double sourceStartPosition = 0.0;
             double sourceEndPosition = static_cast<double>(sampleData->buffer.getNumSamples());
             // Glide (polyphonic portamento): if this note has a precomputed glide source
@@ -472,22 +507,28 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
             const auto velocityGain = static_cast<float>(juce::jlimit(1, 127, note.velocity)) / 127.0f;
             auto edgeGain = 1.0f;
 
+            // Amp envelope (ADSR): attack → decay → sustain while held, then release.
+            double envLevel;
+            if (noteSeconds < heldSeconds)
+            {
+                envLevel = envHeldLevel(noteSeconds);
+            }
+            else
+            {
+                const auto offLevel = envHeldLevel(heldSeconds);
+                const auto rt = noteSeconds - heldSeconds;
+                envLevel = rt < envRelease ? offLevel * (1.0 - rt / envRelease) : 0.0;
+            }
+            edgeGain *= static_cast<float>(juce::jlimit(0.0, 1.0, envLevel));
+
+            // Independent of the envelope: fade out when the SAMPLE DATA itself runs out, so a
+            // sample shorter than the note doesn't click at its end.
             const auto sourceAdvancePerOutputSample = (sampleData->sampleRate * playbackRatio) / renderSampleRate;
-            const auto outputSamplesFromTrigger = noteSeconds * renderSampleRate;
-            const auto outputSamplesToNoteEnd = ((noteEndBeat - clipLocalBeat) / beatsPerSecond) * renderSampleRate;
             const auto outputSamplesToSourceEnd = (sourceEndPosition - sourceSamplePosition)
                 / juce::jmax(0.000001, sourceAdvancePerOutputSample);
-            const auto outputSamplesToEnd = juce::jmax(0.0, juce::jmin(outputSamplesToNoteEnd, outputSamplesToSourceEnd));
-
-            if (outputSamplesFromTrigger < static_cast<double>(kSamplerMidiTriggerAttackSamples))
+            if (outputSamplesToSourceEnd < static_cast<double>(kSamplerMidiTriggerReleaseSamples))
             {
-                edgeGain *= smoothRamp(static_cast<float>(outputSamplesFromTrigger + 1.0)
-                                       / static_cast<float>(kSamplerMidiTriggerAttackSamples));
-            }
-
-            if (outputSamplesToEnd < static_cast<double>(kSamplerMidiTriggerReleaseSamples))
-            {
-                edgeGain *= smoothRamp(static_cast<float>(outputSamplesToEnd)
+                edgeGain *= smoothRamp(static_cast<float>(outputSamplesToSourceEnd)
                                        / static_cast<float>(kSamplerMidiTriggerReleaseSamples));
             }
 

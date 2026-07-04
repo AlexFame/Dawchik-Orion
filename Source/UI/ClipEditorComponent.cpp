@@ -167,6 +167,44 @@ void ClipEditorComponent::resized()
     gainSlider.setBounds(controls.removeFromLeft(180).withHeight(28).withY(controls.getY() + 6));
 }
 
+void ClipEditorComponent::mouseDoubleClick(const juce::MouseEvent& event)
+{
+    if (state.hasSelection && state.isAudioClip && pitchValueBounds.contains(event.getPosition()))
+        beginPitchTextEntry();
+}
+
+void ClipEditorComponent::beginPitchTextEntry()
+{
+    pitchEditor = std::make_unique<juce::TextEditor>();
+    pitchEditor->setBounds(pitchValueBounds.withTrimmedTop(16).reduced(4, 2));
+    pitchEditor->setJustification(juce::Justification::centred);
+    pitchEditor->setFont(juce::FontOptions(15.0f, juce::Font::bold));
+    pitchEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
+    pitchEditor->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    pitchEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    pitchEditor->setInputRestrictions(4, "-0123456789");
+    pitchEditor->setText(juce::String(state.transposeSemitones), juce::dontSendNotification);
+    pitchEditor->selectAll();
+    pitchEditor->onReturnKey = [this] { commitPitchTextEntry(); };
+    pitchEditor->onEscapeKey = [this] { pitchEditor.reset(); repaint(); };
+    pitchEditor->onFocusLost = [this] { commitPitchTextEntry(); };
+    addAndMakeVisible(*pitchEditor);
+    pitchEditor->grabKeyboardFocus();
+    repaint();
+}
+
+void ClipEditorComponent::commitPitchTextEntry()
+{
+    if (pitchEditor == nullptr)
+        return;
+    const auto text = pitchEditor->getText().trim();
+    pitchEditor.reset();   // remove before applying so the focus-lost callback can't re-enter
+    if (text.isNotEmpty())
+        setTransposeSemitones(juce::jlimit(-24, 24, text.getIntValue()));
+    grabKeyboardFocus();
+    repaint();
+}
+
 void ClipEditorComponent::mouseDown(const juce::MouseEvent& event)
 {
     if (state.hasSelection && state.isAudioClip && pitchValueBounds.contains(event.getPosition()))
@@ -495,11 +533,14 @@ void ClipEditorComponent::drawControlCard(juce::Graphics& g, juce::Rectangle<int
     g.setColour(theme::text::muted);
     g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
     g.drawText("PITCH", pitchText.removeFromTop(13), juce::Justification::centred);
-    g.setColour(theme::text::primary);
-    g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText(juce::String(state.transposeSemitones >= 0 ? "+" : "") + juce::String(state.transposeSemitones) + " st",
-               pitchText,
-               juce::Justification::centred);
+    if (pitchEditor == nullptr)   // hidden while the inline numeric editor is shown
+    {
+        g.setColour(theme::text::primary);
+        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText(juce::String(state.transposeSemitones >= 0 ? "+" : "") + juce::String(state.transposeSemitones) + " st",
+                   pitchText,
+                   juce::Justification::centred);
+    }
     gainLabel.removeFromLeft(18);
     gainLabel.removeFromTop(34);
     g.setColour(theme::text::secondary);

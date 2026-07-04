@@ -83,6 +83,7 @@ target_sources(
         Source/UI/PluginPickerComponent.cpp
         Source/UI/SelectionInspectorComponent.cpp
         Source/UI/SidebarNavComponent.cpp
+        Source/UI/StepSequencerComponent.cpp
         Source/UI/TransportBarComponent.cpp
 )
 

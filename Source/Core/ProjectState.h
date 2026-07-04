@@ -197,6 +197,15 @@ struct TrackState
     // Transient-detect sensitivity 0..1 (higher = lower threshold = more slices).
     double samplerSliceSensitivity { 0.5 };
     bool samplerWarpEnabled { false };
+    // Step-sequencer note gate: how long each pattern note sounds, in beats. 0 = play the full
+    // sample (default). >0 clamps note length so e.g. a long 808 can be shortened per channel.
+    double samplerStepGateBeats { 0.0 };
+    // Per-channel amp envelope (ADSR), applied to clip/step notes. Defaults reproduce the raw
+    // sample (instant attack, no decay, full sustain, instant release + tiny anti-click).
+    double samplerAmpAttackSeconds  { 0.0 };
+    double samplerAmpDecaySeconds   { 0.0 };
+    double samplerAmpSustain        { 1.0 };   // 0..1 level held after decay
+    double samplerAmpReleaseSeconds { 0.0 };
     double samplerSourceBpm { 0.0 };
     double samplerSourceDurationSeconds { 0.0 };
     int samplerDetectedBars { 0 };
@@ -271,6 +280,9 @@ public:
     // Whether the metronome ticks (count-in + during playback) when recording.
     bool isRecordWithMetronome() const noexcept;
     void setRecordWithMetronome(bool enabled) noexcept;
+    // Whether recording starts with a one-bar count-in (4 clicks in 4/4) before capture begins.
+    bool isRecordWithCountIn() const noexcept;
+    void setRecordWithCountIn(bool enabled) noexcept;
 
     int getNumerator() const noexcept;
     int getDenominator() const noexcept;
@@ -311,7 +323,8 @@ private:
     bool projectKeyIsMinor { true }; // A minor / C minor are common in production
     bool projectKeyEnabled { true }; // tonality on/off
     bool scaleLockEnabled { true };
-    bool recordWithMetronome { true };
+    bool recordWithMetronome { false };
+    bool recordWithCountIn { true };
     std::vector<TrackState> tracks;
     std::vector<BusState> buses;
     std::vector<TrackState::InsertFx> masterInserts;

@@ -10,6 +10,7 @@ struct TransportBarState
 {
     double tempoBpm { 126.0 };
     juce::String keyText { "Cm" };
+    juce::String timeSignature { "4/4" };
     juce::String positionText { "0:00.0" };
     juce::String projectName { "Untitled" };
     bool playing { false };
@@ -26,6 +27,7 @@ struct TransportBarState
     float masterLevelDb { -100.0f };
     bool mixerOpen { false };
     bool clipEditorOpen { false };
+    bool stepSequencerOpen { false };
 };
 
 class TransportBarComponent final : public juce::Component,
@@ -39,6 +41,7 @@ public:
 
     std::function<void()> onPlay;
     std::function<void()> onStop;
+    std::function<void()> onSkipToStart;   // prev / return-to-start button
     std::function<void(bool)> onRecordChanged;
     std::function<void()> onRecordOptions;
     std::function<void(bool)> onMetronomeChanged;
@@ -47,6 +50,7 @@ public:
     std::function<void()> onKeySelect;
     std::function<void()> onMixer;
     std::function<void()> onClipEditor;
+    std::function<void()> onStepSequencer;
 
     void setState(const TransportBarState& newState);
     juce::Rectangle<int> getTempoEditorBounds() const noexcept;
@@ -65,7 +69,8 @@ private:
     {
         none,
         mixer,
-        clipEditor
+        clipEditor,
+        stepSequencer
     };
 
     void buttonClicked(juce::Button* button) override;
@@ -83,6 +88,7 @@ private:
     bool syncingButtons { false };
     UtilityItem hoveredUtilityItem { UtilityItem::none };
 
+    juce::TextButton prevButton { "|<" };
     juce::TextButton playButton { ">" };
     juce::TextButton stopButton { "■" };
     juce::TextButton recordButton { "●" };
@@ -90,6 +96,7 @@ private:
     juce::TextButton loopButton { "↻" };
     juce::Rectangle<int> tempoCardBounds;
     juce::Rectangle<int> keyCardBounds;
+    juce::Rectangle<int> timeSigCardBounds;
     juce::Rectangle<int> positionCardBounds;
     juce::Rectangle<int> brandClusterBounds;
     juce::Rectangle<int> utilityClusterBounds;

@@ -51,56 +51,52 @@ int getContentHeight(int itemCount) noexcept
 
 double parseBpmFromFileName(const juce::File& file)
 {
-    auto text = file.getFileNameWithoutExtension().toLowerCase();
-    const auto bpmIndex = text.indexOf("bpm");
-    if (bpmIndex < 0)
+    const auto text = file.getFileNameWithoutExtension().toLowerCase();
+
+    // Several sources, in priority order — a source only wins if the earlier ones didn't answer.
+
+    // Source 1 (most reliable): an explicit "… 120 bpm" marker.
+    if (const auto bpmIndex = text.indexOf("bpm"); bpmIndex >= 0)
     {
-        if (! (text.contains("loop") || text.contains("break") || text.contains("drum") || text.contains("beat")))
-            return 0.0;
-
-        double bestBpm = 0.0;
-        int bestDigitCount = 0;
-        juce::String currentNumber;
-
-        const auto textWithDelimiter = text + " ";
-        for (int i = 0; i < textWithDelimiter.length(); ++i)
+        const auto beforeBpm = text.substring(0, bpmIndex).trimEnd();
+        juce::String number;
+        for (int i = beforeBpm.length() - 1; i >= 0; --i)
         {
-            const auto character = textWithDelimiter[i];
-            if (juce::CharacterFunctions::isDigit(character))
-            {
-                currentNumber += juce::String::charToString(character);
-                continue;
-            }
-
-            if (currentNumber.isNotEmpty())
-            {
-                const auto candidateBpm = currentNumber.getDoubleValue();
-                if (candidateBpm >= 40.0 && candidateBpm <= 260.0 && currentNumber.length() >= bestDigitCount)
-                {
-                    bestBpm = candidateBpm;
-                    bestDigitCount = currentNumber.length();
-                }
-
-                currentNumber.clear();
-            }
+            const auto c = beforeBpm[i];
+            if (juce::CharacterFunctions::isDigit(c) || c == '.')
+                number = juce::String::charToString(c) + number;
+            else if (number.isNotEmpty())
+                break;
         }
-
-        return bestBpm;
+        const auto bpm = number.getDoubleValue();
+        if (bpm >= 40.0 && bpm <= 260.0)
+            return bpm;
+        // else: no valid number by the marker — fall through to the next source.
     }
 
-    juce::String beforeBpm = text.substring(0, bpmIndex).trimEnd();
-    juce::String number;
-    for (int i = beforeBpm.length() - 1; i >= 0; --i)
+    // Source 2 (fallback): the most plausible bare number (40–260) anywhere in the name, so files
+    // like "Warp 86" / "Track 128" read as tempo. Prefers the longest number (e.g. "128" over a
+    // stray "2"); out-of-range numbers (e.g. "808", "2024") are ignored.
+    double bestBpm = 0.0;
+    int bestDigitCount = 0;
+    juce::String currentNumber;
+    const auto scan = text + " ";
+    for (int i = 0; i < scan.length(); ++i)
     {
-        const auto character = beforeBpm[i];
-        if (juce::CharacterFunctions::isDigit(character) || character == '.')
-            number = juce::String::charToString(character) + number;
-        else if (number.isNotEmpty())
-            break;
+        const auto c = scan[i];
+        if (juce::CharacterFunctions::isDigit(c)) { currentNumber += juce::String::charToString(c); continue; }
+        if (currentNumber.isNotEmpty())
+        {
+            const auto candidate = currentNumber.getDoubleValue();
+            if (candidate >= 40.0 && candidate <= 260.0 && currentNumber.length() >= bestDigitCount)
+            {
+                bestBpm = candidate;
+                bestDigitCount = currentNumber.length();
+            }
+            currentNumber.clear();
+        }
     }
-
-    const auto bpm = number.getDoubleValue();
-    return bpm >= 40.0 && bpm <= 260.0 ? bpm : 0.0;
+    return bestBpm;
 }
 
 std::optional<juce::String> parseKeyFromFileName(const juce::File& file)
@@ -481,6 +477,11 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         auto row = getRowBounds(index);
         if (row.isEmpty())
             continue;
+        // Cull rows outside the visible list area. Without this every row (incl. hundreds of
+        // off-screen ones in a big folder) ran filename parsing + text layout on every repaint,
+        // which froze the UI briefly on each selection/scroll.
+        if (row.getBottom() <= listViewport.getY() || row.getY() >= listViewport.getBottom())
+            continue;
 
         const auto selected = selectedIndex.has_value() && *selectedIndex == index;
         const auto hovered = hoverIndex.has_value() && *hoverIndex == index;
@@ -541,6 +542,14 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 
 void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
 {
+    // A clear border line right above the preview: the list clips just above it, so a scrolled
+    // sample row ends on this line instead of appearing to slide under the preview card.
+    {
+        auto border = getLocalBounds().removeFromBottom(previewBarHeight + previewSyncRowHeight + 3);
+        g.setColour(th::line::normal);
+        g.fillRect(border.removeFromTop(2));
+    }
+
     const auto bar = getPreviewBarBounds();
     const auto accent = th::cool::turquoise;
 
@@ -718,15 +727,21 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
             return;
 
         juce::PopupMenu menu;
+        if (! item.isDirectory)
+            menu.addItem(2, "Open in sampler");
         menu.addItem(1, "Open in Finder");
         const auto file = item.file;
+        const auto activated = item;
         const auto screenPos = event.getScreenPosition();
+        juce::Component::SafePointer<BrowserPanelComponent> safeThis(this);
         menu.showMenuAsync(juce::PopupMenu::Options()
                                .withTargetScreenArea(juce::Rectangle<int>(screenPos.x, screenPos.y, 1, 1)),
-                           [file](int result)
+                           [safeThis, file, activated](int result)
                            {
                                if (result == 1 && file.exists())
                                    file.revealToUser();   // reveal/select the file or folder in Finder
+                               else if (result == 2 && safeThis != nullptr && safeThis->onOpenInSampler)
+                                   safeThis->onOpenInSampler(activated);   // sampler track only, no playlist clip
                            });
         return;
     }
@@ -914,11 +929,14 @@ void BrowserPanelComponent::mouseWheelMove(const juce::MouseEvent& event, const 
         horizontalWheelAccumulator = 0.0f;
     }
 
-    const auto dominantDelta = std::abs(wheel.deltaY) >= std::abs(wheel.deltaX) ? wheel.deltaY : wheel.deltaX;
-    if (std::abs(dominantDelta) < 0.0001f)
+    if (std::abs(wheel.deltaY) < 0.0001f)
         return;
 
-    scrollOffsetY -= static_cast<int>(std::round(dominantDelta * 120.0f));
+    const auto pixelsPerWheelUnit = wheel.isSmooth ? 620.0 : 150.0;
+    const auto speedGain = wheel.isSmooth
+        ? juce::jlimit(1.0, 2.4, 1.0 + static_cast<double>(std::abs(wheel.deltaY)) * 0.55)
+        : 1.0;
+    scrollOffsetY -= static_cast<double>(wheel.deltaY) * pixelsPerWheelUnit * speedGain;
     clampScrollOffset();
     hoverIndex = hitTestRow(event.getPosition());
     repaint();
@@ -991,6 +1009,13 @@ bool BrowserPanelComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    // Enter replaces the selected track's sample (host decides; falls back to creating a track).
+    if (onReplaceSelectedTrackSample)
+    {
+        onReplaceSelectedTrackSample(item);
+        return true;
+    }
+
     if (onActivateItem)
     {
         onActivateItem(item);
@@ -1022,12 +1047,16 @@ void BrowserPanelComponent::timerCallback()
 
     const auto currentTimestamp = getWatchedLocationTimestamp();
     if (currentTimestamp != watchedLocationTimestamp)
+    {
+        recursiveScanValid = false;   // folder changed on disk → rebuild the recursive cache
         refreshEntries();
+    }
 }
 
 void BrowserPanelComponent::refreshEntries()
 {
     std::vector<BrowserItem> refreshedItems;
+    const bool searching = searchQuery.trim().isNotEmpty();
 
     if (showingLocationRoots)
     {
@@ -1207,60 +1236,87 @@ void BrowserPanelComponent::refreshEntries()
             });
         }
 
-        juce::Array<juce::File> childDirectories;
-        currentDirectory.findChildFiles(childDirectories, juce::File::findDirectories, false);
-        std::sort(childDirectories.begin(), childDirectories.end(),
-                  [](const juce::File& a, const juce::File& b)
-                  {
-                      return a.getFileName().compareNatural(b.getFileName()) < 0;
-                  });
-
-        for (const auto& directory : childDirectories)
+        // With an active search query, scan the WHOLE subtree (recursively) so "loops",
+        // "one shots" or a name match files at any depth under the current folder — not just
+        // the current level. Without a query, show the normal folder listing (subdirs + files).
+        if (searching)
         {
-            if (! shouldShowDirectory(directory))
-                continue;
-
-            refreshedItems.push_back(BrowserItem {
-                directory.getFileName(),
-                "Folder",
-                "Open folder",
-                colourForEntry(directory, true),
-                4.0,
-                directory,
-                true,
-                false
-            });
+            // Use the cached recursive scan if it's ready for this folder; otherwise kick off a
+            // BACKGROUND scan (so the UI never freezes) and show the cached results for now —
+            // a "Searching…" row is appended below while the scan runs.
+            if (recursiveScanValid && recursiveScanDir == currentDirectory)
+                for (const auto& cached : recursiveScanItems)
+                    refreshedItems.push_back(cached);
+            else
+                beginRecursiveScan(currentDirectory);
         }
-
-        juce::Array<juce::File> childFiles;
-        currentDirectory.findChildFiles(childFiles, juce::File::findFiles, false);
-        std::sort(childFiles.begin(), childFiles.end(),
-                  [](const juce::File& a, const juce::File& b)
-                  {
-                      return a.getFileName().compareNatural(b.getFileName()) < 0;
-                  });
-
-        for (const auto& file : childFiles)
+        else
         {
-            if (! isAudioFile(file))
-                continue;
+            juce::Array<juce::File> childDirectories;
+            currentDirectory.findChildFiles(childDirectories, juce::File::findDirectories, false);
+            std::sort(childDirectories.begin(), childDirectories.end(),
+                      [](const juce::File& a, const juce::File& b)
+                      {
+                          return a.getFileName().compareNatural(b.getFileName()) < 0;
+                      });
 
-            refreshedItems.push_back(BrowserItem {
-                file.getFileName(),
-                file.getParentDirectory().getFileName(),
-                subtitleForFile(file),
-                colourForEntry(file, false),
-                defaultLengthForFile(file),
-                file,
-                false,
-                false
-            });
+            for (const auto& directory : childDirectories)
+            {
+                if (! shouldShowDirectory(directory))
+                    continue;
+
+                refreshedItems.push_back(BrowserItem {
+                    directory.getFileName(),
+                    "Folder",
+                    "Open folder",
+                    colourForEntry(directory, true),
+                    4.0,
+                    directory,
+                    true,
+                    false
+                });
+            }
+
+            juce::Array<juce::File> childFiles;
+            currentDirectory.findChildFiles(childFiles, juce::File::findFiles, false);
+            std::sort(childFiles.begin(), childFiles.end(),
+                      [](const juce::File& a, const juce::File& b)
+                      {
+                          return a.getFileName().compareNatural(b.getFileName()) < 0;
+                      });
+
+            for (const auto& file : childFiles)
+            {
+                if (! isAudioFile(file))
+                    continue;
+
+                refreshedItems.push_back(BrowserItem {
+                    file.getFileName(),
+                    file.getParentDirectory().getFileName(),
+                    subtitleForFile(file),
+                    colourForEntry(file, false),
+                    defaultLengthForFile(file),
+                    file,
+                    false,
+                    false
+                });
+            }
         }
     }
 
     juce::String newSignature;
-    for (const auto& item : refreshedItems)
-        newSignature << item.name << "|" << item.subtitle << "|" << item.file.getFullPathName() << "\n";
+    if (searching)
+    {
+        // Cheap signature while searching — the source list is the (cached) recursive scan,
+        // so concatenating thousands of paths on every keystroke is what dragged it down.
+        newSignature << "@dir=" << currentDirectory.getFullPathName()
+                     << "|n=" << static_cast<int>(refreshedItems.size());
+    }
+    else
+    {
+        for (const auto& item : refreshedItems)
+            newSignature << item.name << "|" << item.subtitle << "|" << item.file.getFullPathName() << "\n";
+    }
     // Include the search query in the signature — typing in the search box doesn't
     // change the directory listing but it MUST trigger a refresh of `items`.
     newSignature << "@q=" << searchQuery;
@@ -1297,12 +1353,74 @@ void BrowserPanelComponent::refreshEntries()
         items.push_back(item);
     }
 
+    // While the background recursive scan is still running, show a placeholder so the user
+    // knows results are coming (instead of an empty list that looks like "nothing found").
+    if (searching && recursiveScanPending)
+        items.push_back(BrowserItem { "Searching\xe2\x80\xa6", "", "", juce::Colour(0xff7a8ba0), 4.0, juce::File(), true, true });
+
     selectedIndex.reset();
     hoverIndex.reset();
     dragIndex.reset();
     clampScrollOffset();
     watchedLocationTimestamp = getWatchedLocationTimestamp();
     repaint();
+}
+
+void BrowserPanelComponent::beginRecursiveScan(const juce::File& directory)
+{
+    if (recursiveScanPending && scanPendingDir == directory)
+        return;   // a scan for this folder is already running
+
+    recursiveScanPending = true;
+    scanPendingDir = directory;
+    const int generation = ++scanGeneration;
+    juce::Component::SafePointer<BrowserPanelComponent> safeThis(this);
+
+    scanPool.addJob([safeThis, directory, generation]()
+    {
+        // Heavy disk traversal — off the message thread so the UI never freezes.
+        juce::Array<juce::File> found;
+        int scanned = 0;
+        for (const auto& entry : juce::RangedDirectoryIterator(directory, true, "*", juce::File::findFiles))
+        {
+            const auto file = entry.getFile();
+            if (file.hasFileExtension("wav;wave;aif;aiff;mp3;flac;ogg;m4a"))
+                found.add(file);
+            if (++scanned >= 40000 || found.size() >= 4000)   // safety caps
+                break;
+        }
+        std::sort(found.begin(), found.end(),
+                  [](const juce::File& a, const juce::File& b)
+                  {
+                      return a.getFileName().compareNatural(b.getFileName()) < 0;
+                  });
+
+        juce::MessageManager::callAsync([safeThis, directory, generation, found]()
+        {
+            auto* self = safeThis.getComponent();
+            if (self == nullptr || generation != self->scanGeneration.load())
+                return;   // component gone or superseded by a newer scan
+
+            self->recursiveScanItems.clear();
+            self->recursiveScanItems.reserve(static_cast<std::size_t>(found.size()));
+            for (const auto& file : found)
+                self->recursiveScanItems.push_back(BrowserItem {
+                    file.getFileName(),
+                    file.getParentDirectory().getFileName(),
+                    self->subtitleForFile(file),
+                    self->colourForEntry(file, false),
+                    self->defaultLengthForFile(file),
+                    file,
+                    false,
+                    false
+                });
+
+            self->recursiveScanDir = directory;
+            self->recursiveScanValid = true;
+            self->recursiveScanPending = false;
+            self->refreshEntries();   // rebuild now that the cache is ready
+        });
+    });
 }
 
 void BrowserPanelComponent::navigateTo(const juce::File& directory, bool addToHistory)
@@ -1429,7 +1547,7 @@ void BrowserPanelComponent::unlockHorizontalSwipeGesture() noexcept
 juce::Rectangle<int> BrowserPanelComponent::getRowBounds(int index) const noexcept
 {
     auto listViewport = getListViewportBounds();
-    const auto y = listViewport.getY() + index * (rowHeight + rowGap) - scrollOffsetY;
+    const auto y = juce::roundToInt(static_cast<double>(listViewport.getY() + index * (rowHeight + rowGap)) - scrollOffsetY);
     return { listViewport.getX(), y, listViewport.getWidth(), rowHeight };
 }
 
@@ -1437,7 +1555,7 @@ juce::Rectangle<int> BrowserPanelComponent::getListViewportBounds() const noexce
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
     bounds.removeFromTop(headerHeight);
-    bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 8);   // card + sync row
+    bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 3);   // card + sync + border
     return bounds;
 }
 
@@ -1509,8 +1627,8 @@ void BrowserPanelComponent::clampScrollOffset() noexcept
 {
     const auto listViewport = getListViewportBounds();
     const auto contentHeight = getContentHeight(static_cast<int>(items.size()));
-    const auto maxScroll = juce::jmax(0, contentHeight - listViewport.getHeight());
-    scrollOffsetY = juce::jlimit(0, maxScroll, scrollOffsetY);
+    const auto maxScroll = static_cast<double>(juce::jmax(0, contentHeight - listViewport.getHeight()));
+    scrollOffsetY = juce::jlimit(0.0, maxScroll, scrollOffsetY);
 }
 
 std::optional<int> BrowserPanelComponent::hitTestRow(juce::Point<int> position) const noexcept

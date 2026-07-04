@@ -27,6 +27,7 @@
 #include "MixerPanelComponent.h"
 #include "PluginPickerComponent.h"
 #include "SelectionInspectorComponent.h"
+#include "StepSequencerComponent.h"
 #include "SidebarNavComponent.h"
 #include "TransportBarComponent.h"
 
@@ -88,7 +89,7 @@ private:
     void refreshMidiInputDevices();
     void updateTransportLabels();
     void playBrowserPreview(const BrowserItem& item);
-    void loadBrowserItemIntoSampler(const BrowserItem& item);
+    void loadBrowserItemIntoSampler(const BrowserItem& item, bool addClipToPlaylist = true);
     int findOrCreateSamplerTargetTrack();
     bool openSamplerForTrackIfAvailable(int trackIndex);
 
@@ -103,6 +104,10 @@ private:
     void closeAllInstrumentEditors();
     void captureAllInstrumentStates();
     void restoreInstrumentsFromProject();
+    // Re-home hosted instruments onto the current (post undo/redo) track layout by reusing the
+    // live instances kept in the engine's stash — instant and lossless. Only reinstantiates a
+    // plugin when no matching live instance exists (e.g. stash overflowed).
+    void resyncInstrumentsAfterHistory();
     // Insert FX chain. The "id" is a track index, or a bus key (ArrangementPlaybackSource
     // ::busInsertKey(busIndex)) so buses reuse the same chain code. insertIndex < 0 = add.
     std::vector<TrackState::InsertFx>* insertChainForId(int id);
@@ -133,6 +138,7 @@ private:
     void toggleLoopFromUi();
     void toggleMixerFromUi();
     void toggleClipEditorFromUi();
+    void toggleStepSequencerFromUi();
     void saveProjectInteractively();
     void openProjectInteractively();
     void loadProjectFromFile(const juce::File& file);
@@ -184,6 +190,7 @@ private:
     MidiEditorOverlayComponent midiEditorOverlay;
     ClipEditorComponent clipEditorPanel;
     SamplerPanelComponent samplerPanel;
+    StepSequencerComponent stepSequencer { projectState, transportEngine };
     MixerPanelComponent mixerPanel;
     AddTrackDialogComponent addTrackDialog;
     PluginPickerComponent pluginPicker;
@@ -393,6 +400,7 @@ private:
     };
     std::optional<AudioRecordingSession> audioRecordingSession;
 
+    void ensureMidiRecordingSession(int armedTrack);   // open the record clip/session if needed
     void recordNoteOn(int pitch, int velocity);
     void recordNoteOff(int pitch);
     void finalizeRecordingClip();
@@ -414,6 +422,9 @@ private:
     int exportSampleRate { 44100 };
     // When false the browser panel is hidden and the playlist expands to fill the window.
     bool browserPanelVisible { true };
+    // True when the sampler panel was opened by clicking a channel in the step sequencer, so
+    // closing it returns to the step rack (instead of just the playlist).
+    bool samplerOpenedFromStep { false };
     // Smooth slide-open animation: linear progress 0..1 eased toward browserPanelVisible.
     float browserAnim { 1.0f };
     int currentBrowserWidth() const noexcept;   // animated effective width (0 when fully closed)

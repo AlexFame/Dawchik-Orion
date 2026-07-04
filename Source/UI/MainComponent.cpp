@@ -1024,7 +1024,7 @@ MainComponent::MainComponent()
     recordButton.setClickingTogglesState(true);
     metronomeButton.setToggleState(false, juce::dontSendNotification);
     loopButton.setToggleState(false, juce::dontSendNotification);
-    countInButton.setToggleState(false, juce::dontSendNotification);
+    countInButton.setToggleState(projectState.isRecordWithCountIn(), juce::dontSendNotification);
 
     recordButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xfff7e5e5));
     recordButton.setColour(juce::TextButton::textColourOffId, recordAccent.darker(0.2f));
@@ -1053,6 +1053,14 @@ MainComponent::MainComponent()
 
     transportBar.onPlay = [this]() { toggleTransportFromUi(); };
     transportBar.onStop = [this]() { stopTransportFromUi(); };
+    transportBar.onSkipToStart = [this]()
+    {
+        transportEngine.setPlayheadBeat(0.0);
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->syncToTransportPosition();
+        updateTransportLabels();
+        arrangementTimeline.repaint();
+    };
     transportBar.onRecordChanged = [this](bool shouldRecord)
     {
         recordButton.setToggleState(shouldRecord, juce::dontSendNotification);
@@ -1070,7 +1078,7 @@ MainComponent::MainComponent()
     {
         juce::PopupMenu menu;
         const auto withMetro = projectState.isRecordWithMetronome();
-        const auto withPrecount = countInButton.getToggleState();
+        const auto withPrecount = projectState.isRecordWithCountIn();
         menu.addItem(1, "Record with metronome", true, withMetro && ! withPrecount);
         menu.addItem(2, "Record without metronome", true, ! withMetro && ! withPrecount);
         menu.addItem(3, "4-count before recording", true, withPrecount);
@@ -1082,18 +1090,21 @@ MainComponent::MainComponent()
                 if (result == 1)
                 {
                     projectState.setRecordWithMetronome(true);
+                    projectState.setRecordWithCountIn(false);
                     metronomeButton.setToggleState(true, juce::dontSendNotification);
                     countInButton.setToggleState(false, juce::dontSendNotification);
                 }
                 else if (result == 2)
                 {
                     projectState.setRecordWithMetronome(false);
+                    projectState.setRecordWithCountIn(false);
                     metronomeButton.setToggleState(false, juce::dontSendNotification);
                     countInButton.setToggleState(false, juce::dontSendNotification);
                 }
                 else if (result == 3)
                 {
                     projectState.setRecordWithMetronome(false);
+                    projectState.setRecordWithCountIn(true);
                     metronomeButton.setToggleState(false, juce::dontSendNotification);
                     countInButton.setToggleState(true, juce::dontSendNotification);
                 }
@@ -1106,7 +1117,12 @@ MainComponent::MainComponent()
         if (enabled)
         {
             projectState.setRecordWithMetronome(true);
+            projectState.setRecordWithCountIn(false);
             countInButton.setToggleState(false, juce::dontSendNotification);
+        }
+        else
+        {
+            projectState.setRecordWithMetronome(false);
         }
         updateTransportLabels();
     };
@@ -1119,7 +1135,71 @@ MainComponent::MainComponent()
     transportBar.onKeySelect = [this]() { showKeySelectionMenu(); };
     transportBar.onMixer = [this]() { toggleMixerFromUi(); };
     transportBar.onClipEditor = [this]() { toggleClipEditorFromUi(); };
+    transportBar.onStepSequencer = [this]() { toggleStepSequencerFromUi(); };
     addAndMakeVisible(transportBar);
+
+    stepSequencer.onOpenPianoRoll = [this](int trackIndex, int clipIndex)
+    {
+        auto& tracks = projectState.getTracks();
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+            return;
+        auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        if (clipIndex < 0 || clipIndex >= static_cast<int>(track.clips.size()))
+            return;
+        midiEditorOverlay.openClip(track, track.clips[static_cast<std::size_t>(clipIndex)],
+                                   projectState.getKeyRoot(),
+                                   projectState.isKeyMinor(),
+                                   projectState.isKeyEnabled() && projectState.isScaleLockEnabled());
+    };
+    stepSequencer.onPatternEdited = [this]() { arrangementTimeline.repaint(); };
+    stepSequencer.onOpenSampler = [this](int trackIndex)
+    {
+        // Click a channel/sample in the rack → open its manipulators (the sampler panel).
+        // Remember we came from the step rack so closing the sampler returns there.
+        if (openSamplerForTrackIfAvailable(trackIndex))
+            samplerOpenedFromStep = true;
+    };
+    // Helper: load a sample into a track as a step-sequencer channel (one-shot, no clip / no
+    // sampler panel — we stay in the rack).
+    auto loadSamplerChannel = [this](int trackIndex, const juce::File& file)
+    {
+        auto& tracks = projectState.getTracks();
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || ! file.existsAsFile())
+            return;
+        auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        const auto analysis = analyzeAudioWarpMetadata(file, projectState.getTempoBpm(), projectState.getNumerator());
+        track.samplerSourcePath = file.getFullPathName();
+        track.samplerSourceDurationSeconds = analysis.durationSeconds;
+        track.samplerSourceBpm = analysis.sourceBpm;
+        track.samplerDetectedBars = analysis.detectedBars;
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->prewarmSamplerWarp(track.samplerSourcePath, track.samplerSourceBpm);
+    };
+    stepSequencer.onAddChannelFromSample = [this, loadSamplerChannel](juce::File file)
+    {
+        if (! file.existsAsFile())
+            return;
+        auto& tracks = projectState.getTracks();
+        TrackState t;
+        t.name = file.getFileNameWithoutExtension();
+        t.isMidiTrack = true;
+        t.samplerMode = SamplerPlaybackMode::oneShot;   // drum-style one-shot per step
+        t.colour = theme::tracks::colourForIndex(static_cast<int>(tracks.size()));   // distinct per channel
+        tracks.push_back(std::move(t));
+        loadSamplerChannel(static_cast<int>(tracks.size()) - 1, file);
+        arrangementTimeline.repaint();
+        stepSequencer.repaint();
+        resized();
+    };
+    stepSequencer.onAssignSampleToChannel = [this, loadSamplerChannel](int trackIndex, juce::File file)
+    {
+        loadSamplerChannel(trackIndex, file);
+        arrangementTimeline.repaint();
+        stepSequencer.repaint();
+    };
+    // NB: selecting a channel in the rack does NOT touch the playlist selection — the rack has
+    // its own highlight, and Enter-replace reads the rack's selected channel (see below).
+    addChildComponent(stepSequencer);
 
     juce::MenuBarModel::setMacMainMenu(this);
 
@@ -1427,6 +1507,53 @@ MainComponent::MainComponent()
     {
         loadBrowserItemIntoSampler(item);
     };
+    browserPanel.onOpenInSampler = [this](const BrowserItem& item)
+    {
+        loadBrowserItemIntoSampler(item, /*addClipToPlaylist*/ false);   // sampler track only
+    };
+    browserPanel.onReplaceSelectedTrackSample = [this](const BrowserItem& item)
+    {
+        if (item.isDirectory || ! item.file.existsAsFile())
+            return;
+
+        // If audio clips are selected in the playlist, replace just those clips' sample.
+        if (const int replaced = arrangementTimeline.replaceSelectedAudioClipsSource(item.file); replaced > 0)
+        {
+            statusLabel.setText("Replaced sample in " + juce::String(replaced)
+                                + (replaced == 1 ? " clip" : " clips"), juce::dontSendNotification);
+            return;
+        }
+
+        auto& tracks = projectState.getTracks();
+        // Prefer the channel selected in the step sequencer (when it's open); otherwise the
+        // track selected in the playlist.
+        int target = -1;
+        if (stepSequencer.isVisible() && stepSequencer.selectedChannelTrackIndex() >= 0)
+            target = stepSequencer.selectedChannelTrackIndex();
+        else if (const auto sel = arrangementTimeline.getSelectedTrackIndex(); sel.has_value())
+            target = *sel;
+
+        if (target >= 0 && target < static_cast<int>(tracks.size())
+            && tracks[static_cast<std::size_t>(target)].isMidiTrack)
+        {
+            // Replace the selected sampler/instrument track's sound in place.
+            auto& track = tracks[static_cast<std::size_t>(target)];
+            const auto analysis = analyzeAudioWarpMetadata(item.file, projectState.getTempoBpm(), projectState.getNumerator());
+            track.samplerSourcePath = item.file.getFullPathName();
+            track.samplerSourceDurationSeconds = analysis.durationSeconds;
+            track.samplerSourceBpm = analysis.sourceBpm;
+            track.samplerDetectedBars = analysis.detectedBars;
+            if (arrangementPlaybackSource != nullptr)
+                arrangementPlaybackSource->prewarmSamplerWarp(track.samplerSourcePath, track.samplerSourceBpm);
+            statusLabel.setText("Replaced sample: " + track.name, juce::dontSendNotification);
+            stepSequencer.repaint();
+            arrangementTimeline.repaint();
+        }
+        else
+        {
+            loadBrowserItemIntoSampler(item);   // no sampler track selected → load as a new one
+        }
+    };
     browserPanel.onCloseRequested = [this]
     {
         // Wired to the × button inside the browser header — collapses the panel and
@@ -1691,6 +1818,12 @@ MainComponent::MainComponent()
 
     samplerPanel.onClose = [this]()
     {
+        // If we opened the sampler from the step rack, closing it returns there.
+        if (samplerOpenedFromStep)
+        {
+            samplerOpenedFromStep = false;
+            stepSequencer.setVisible(true);
+        }
         resized();
         arrangementTimeline.grabKeyboardFocus();
     };
@@ -1825,6 +1958,7 @@ MainComponent::MainComponent()
     {
         selectedArrangementClip = std::pair { trackIndex, clipIndex };
         samplerPanel.setVisible(false);
+        stepSequencer.setVisible(false);
         clipEditorPanel.setVisible(true);
         refreshClipInspector();
         refreshClipEditor();
@@ -1849,6 +1983,18 @@ MainComponent::MainComponent()
     {
         projectState.setScaleLockEnabled(enabled);
     };
+    arrangementTimeline.onClipWarpEdited = [this]()
+    {
+        if (arrangementPlaybackSource == nullptr)
+            return;
+        // Live time-stretch: re-prep warp so the new speed is heard immediately. While playing,
+        // use the non-blocking path (background producer builds the new-length stream and the
+        // render swaps to it) so nothing stalls — no stop/replay needed.
+        if (transportEngine.isPlaying() && arrangementPlaybackSource->isRealtimeWarpEnabled())
+            arrangementPlaybackSource->prepareWarpStreams(false);
+        else
+            rebuildArrangementWarpNonBlocking();
+    };
     arrangementTimeline.onClipSelectionChanged = [this](int trackIndex, int clipIndex)
     {
         if (trackIndex >= 0)
@@ -1869,31 +2015,18 @@ MainComponent::MainComponent()
                 const bool hasInstrument = track.instrumentPluginId.isNotEmpty();
                 if (track.isMidiTrack && (hasSampler || hasInstrument))
                 {
-                    // Only pop the visible sampler panel for sampler tracks when a clip
-                    // was clicked. Instrument-only tracks arm silently (no sampler UI).
-                    if (clipIndex >= 0 && hasSampler)
-                    {
-                        samplerPanel.openTrackIndex(trackIndex);
-                        resized();
-                    }
-                    else
-                    {
-                        // Header click — arm silently (don't pop the panel).
-                        if (! samplerPanel.isArmed() || ! samplerPanel.isVisible())
-                        {
-                            // Need to bind the active track for keyboard polling without
-                            // forcing the visible panel; openTrackIndex does the binding,
-                            // then we hide the panel again if it wasn't open before.
-                            const bool wasVisible = samplerPanel.isVisible();
-                            samplerPanel.openTrackIndex(trackIndex);
-                            if (! wasVisible)
-                                samplerPanel.setVisible(false);
-                        }
-                        else
-                        {
-                            samplerPanel.openTrackIndex(trackIndex);
-                        }
-                    }
+                    // Arm the (sampler or instrument) keyboard for this track WITHOUT
+                    // popping the sampler panel. A single click only selects/arms; the
+                    // piano roll opens on double-click and the sampler via its button or a
+                    // header double-click. (Popping the panel here also re-laid out the
+                    // lanes mid-gesture, which teleported the clip being dragged onto
+                    // whatever track ended up under the cursor in the new layout.)
+                    const bool wasVisible = samplerPanel.isVisible();
+                    samplerPanel.openTrackIndex(trackIndex);
+                    if (! wasVisible)
+                        samplerPanel.setVisible(false);
+                    else if (hasSampler)
+                        resized();   // keep an already-open sampler following the selection
                 }
                 else if (samplerPanel.isArmed())
                 {
@@ -1915,6 +2048,22 @@ MainComponent::MainComponent()
         else
         {
             selectedArrangementClip.reset();
+            // Clicking empty playlist space clears the selection — also close any open lower
+            // panel (step sequencer / sampler) so it gets out of the way.
+            bool closedPanel = false;
+            if (stepSequencer.isVisible())
+            {
+                stepSequencer.setVisible(false);
+                closedPanel = true;
+            }
+            if (samplerPanel.isVisible())
+            {
+                samplerOpenedFromStep = false;   // close straight to the playlist, don't bounce to step
+                samplerPanel.setVisible(false);
+                closedPanel = true;
+            }
+            if (closedPanel)
+                resized();
         }
 
         if (! selectedArrangementClip.has_value() && clipEditorPanel.isVisible())
@@ -1958,6 +2107,32 @@ MainComponent::MainComponent()
             openInstrumentEditor(trackIndex);
         else
             openSamplerForTrackIfAvailable(trackIndex);
+    };
+    arrangementTimeline.onTrackDeleted = [this](int trackIndex)
+    {
+        // Realign the engine's per-track instrument/insert slots with the project's new
+        // track order so a deleted track can't leave a hosted instrument keyed wrong (which
+        // left a held note ringing). Also drop any now-stale per-track UI references.
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->removeTrackAndReindex(trackIndex);
+
+        if (samplerPanel.getActiveTrackIndex() == trackIndex)
+        {
+            samplerPanel.disarmKeyboard();
+            samplerPanel.setVisible(false);
+        }
+        if (recordingSession.has_value() && recordingSession->trackIndex == trackIndex)
+            recordingSession.reset();
+        resized();
+    };
+    arrangementTimeline.onInstrumentLayoutChangedByHistory = [this]()
+    {
+        // Undo/redo restored a different track layout (e.g. a deleted track came back). Re-home
+        // the LIVE instrument instances onto the restored layout (instant, lossless) so each
+        // plugin is keyed to the right track again — a VST can't stay bound to what is now a
+        // sampler track, and nothing is reinstantiated (no freeze).
+        resyncInstrumentsAfterHistory();
+        resized();
     };
     arrangementTimeline.onTrackHeaderRightClick = [this](int trackIndex)
     {
@@ -2384,7 +2559,8 @@ void MainComponent::resized()
 
     const auto samplerOpen = samplerPanel.isVisible();
     const auto clipEditorOpen = clipEditorPanel.isVisible();
-    const auto bottomPanelOpen = samplerOpen || clipEditorOpen;
+    const auto stepSequencerOpen = stepSequencer.isVisible();
+    const auto bottomPanelOpen = samplerOpen || clipEditorOpen || stepSequencerOpen;
     const auto closedArrangementArea = playlistArea;
     auto openArrangementArea = playlistArea;
     // Sampler and clip editor share one compact lower-panel height.
@@ -2392,7 +2568,9 @@ void MainComponent::resized()
     const auto arrangementArea = bottomPanelOpen ? openArrangementArea : closedArrangementArea;
 
     arrangementTimeline.setBounds(arrangementArea);
-    arrangementTimeline.setFitTrackLanesToVisibleArea(samplerOpen);
+    // Any open lower panel (sampler / clip editor / step sequencer) compresses the track lanes
+    // so every track stays visible instead of being covered by the panel.
+    arrangementTimeline.setFitTrackLanesToVisibleArea(bottomPanelOpen);
 
     if (browserPanelShown())
     {
@@ -2427,6 +2605,8 @@ void MainComponent::resized()
     clipEditorPanel.setVisible(clipEditorOpen);
     samplerPanel.setBounds(samplerOpen ? lowerPanelArea : juce::Rectangle<int>());
     samplerPanel.setVisible(samplerOpen);
+    stepSequencer.setBounds(stepSequencerOpen ? lowerPanelArea : juce::Rectangle<int>());
+    stepSequencer.setVisible(stepSequencerOpen);
 
     // The sidebar / transport were just raised with toFront above; if the mixer overlay
     // is open it must stay on top of them, otherwise they overlap and clip it.
@@ -2464,7 +2644,7 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
     {
         juce::PopupMenu menu;
         const auto withMetro = projectState.isRecordWithMetronome();
-        const auto withPrecount = countInButton.getToggleState();
+        const auto withPrecount = projectState.isRecordWithCountIn();
         menu.addItem(1, "Record with metronome", true, withMetro && ! withPrecount);
         menu.addItem(2, "Record without metronome", true, ! withMetro && ! withPrecount);
         menu.addItem(3, "4-count before recording", true, withPrecount);
@@ -2476,18 +2656,21 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
                 if (result == 1)
                 {
                     projectState.setRecordWithMetronome(true);
+                    projectState.setRecordWithCountIn(false);
                     metronomeButton.setToggleState(true, juce::dontSendNotification);
                     countInButton.setToggleState(false, juce::dontSendNotification);
                 }
                 else if (result == 2)
                 {
                     projectState.setRecordWithMetronome(false);
+                    projectState.setRecordWithCountIn(false);
                     metronomeButton.setToggleState(false, juce::dontSendNotification);
                     countInButton.setToggleState(false, juce::dontSendNotification);
                 }
                 else if (result == 3)
                 {
                     projectState.setRecordWithMetronome(false);
+                    projectState.setRecordWithCountIn(true);
                     metronomeButton.setToggleState(false, juce::dontSendNotification);
                     countInButton.setToggleState(true, juce::dontSendNotification);
                 }
@@ -2591,6 +2774,7 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
             finalizeRecordingClip();
             finalizeAudioRecordingClip();
         }
+        startMidiRecordingFromRecordButtonIfNeeded();
         recordButton.setToggleState(transportEngine.isRecordArmed(), juce::dontSendNotification);
         updateTransportLabels();
         return true;
@@ -2945,56 +3129,7 @@ void MainComponent::timerCallback()
     {
         // (a) Open a recording clip the instant real playback starts (after count-in),
         // even before any note is played, so the user immediately sees "recording" feedback.
-        if (! recordingSession.has_value() || recordingSession->trackIndex != armedTrack)
-        {
-            finalizeRecordingClip();
-            const auto playheadBeat = transportEngine.getPlayheadBeat();
-            auto& track = tracks[static_cast<std::size_t>(armedTrack)];
-            arrangementTimeline.captureUndoSnapshot();
-
-            // Overdub: if the playhead is inside an existing MIDI clip on this track, record
-            // INTO it (merge the new notes) instead of stacking a separate overlapping clip.
-            int targetClip = -1;
-            for (int i = 0; i < static_cast<int>(track.clips.size()); ++i)
-            {
-                const auto& c = track.clips[i];
-                if (c.type == ClipType::midi
-                    && playheadBeat >= c.startBeat - 1.0e-6
-                    && playheadBeat < c.startBeat + c.lengthInBeats - 1.0e-6)
-                {
-                    targetClip = i;
-                    break;
-                }
-            }
-
-            RecordingSession session;
-            session.trackIndex = armedTrack;
-            if (targetClip >= 0)
-            {
-                track.clips[static_cast<std::size_t>(targetClip)].recording = true;
-                session.clipIndex     = targetClip;
-                session.clipStartBeat = track.clips[static_cast<std::size_t>(targetClip)].startBeat;
-            }
-            else
-            {
-                const auto clipStart = std::floor(playheadBeat);
-                track.clips.push_back(TimelineClip {
-                    "Recording",
-                    ClipType::midi,
-                    clipStart,
-                    juce::jmax(0.25, playheadBeat - clipStart),
-                    track.colour.brighter(0.1f),
-                    {}, {}, "", 0.0, false, false,
-                    0.0, 0.0, 0,
-                    false, false, 0.0,
-                    -1, false, true
-                });
-                track.clips.back().recording = true;
-                session.clipIndex     = static_cast<int>(track.clips.size()) - 1;
-                session.clipStartBeat = clipStart;
-            }
-            recordingSession = std::move(session);
-        }
+        ensureMidiRecordingSession(armedTrack);
 
         // (b) Live-grow the clip so it sweeps with the playhead — but snap the visible
         // length UP to the next bar boundary instead of crawling beat-by-beat. The clip
@@ -3097,6 +3232,26 @@ void MainComponent::buttonClicked(juce::Button* button)
         toggleLoopFromUi();
     else if (button == &metronomeButton || button == &countInButton)
     {
+        if (button == &metronomeButton)
+        {
+            const auto enabled = metronomeButton.getToggleState();
+            projectState.setRecordWithMetronome(enabled);
+            if (enabled)
+            {
+                projectState.setRecordWithCountIn(false);
+                countInButton.setToggleState(false, juce::dontSendNotification);
+            }
+        }
+        else
+        {
+            const auto enabled = countInButton.getToggleState();
+            projectState.setRecordWithCountIn(enabled);
+            if (enabled)
+            {
+                projectState.setRecordWithMetronome(false);
+                metronomeButton.setToggleState(false, juce::dontSendNotification);
+            }
+        }
         updateTransportLabels();
     }
     else if (button == &browserButton || button == &browserCollapseArrow)
@@ -3374,6 +3529,8 @@ void MainComponent::updateTransportLabels()
                               juce::dontSendNotification);
     recordButton.setToggleState(transportEngine.isRecordArmed(), juce::dontSendNotification);
     loopButton.setToggleState(transportEngine.isLoopEnabled(), juce::dontSendNotification);
+    metronomeButton.setToggleState(projectState.isRecordWithMetronome(), juce::dontSendNotification);
+    countInButton.setToggleState(projectState.isRecordWithCountIn(), juce::dontSendNotification);
     undoButton.setEnabled(arrangementTimeline.canUndo());
     redoButton.setEnabled(arrangementTimeline.canRedo());
     tempoLabel.setText("Tempo: " + juce::String(projectState.getTempoBpm(), 0) + " BPM", juce::dontSendNotification);
@@ -3388,12 +3545,13 @@ void MainComponent::updateTransportLabels()
     transportState.keyText = projectState.isKeyEnabled()
         ? formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor())
         : juce::String("Off");
+    transportState.timeSignature = juce::String(projectState.getNumerator()) + "/" + juce::String(projectState.getDenominator());
     transportState.positionText = formatTransportTime(transportEngine.getPlayheadBeat(), projectState.getTempoBpm());
     transportState.playing = transportEngine.isPlaying() || transportEngine.isCountInActive();
     transportState.recording = transportEngine.isRecordArmed();
     transportState.loop = transportEngine.isLoopEnabled();
-    transportState.metronome = metronomeButton.getToggleState();
-    transportState.countIn = countInButton.getToggleState();
+    transportState.metronome = projectState.isRecordWithMetronome();
+    transportState.countIn = projectState.isRecordWithCountIn();
     transportState.scanVisible = pluginScanVisible;
     transportState.scanProgress = pluginScanProgress;
     transportState.scanName = pluginScanNameLabel.getText();
@@ -3403,6 +3561,7 @@ void MainComponent::updateTransportLabels()
     transportState.masterLevelDb = masterMeterDb;
     transportState.mixerOpen = mixerPanel.isVisible();
     transportState.clipEditorOpen = clipEditorPanel.isVisible();
+    transportState.stepSequencerOpen = stepSequencer.isVisible();
     transportBar.setState(transportState);
 
     menuItemsChanged();
@@ -3547,7 +3706,7 @@ void MainComponent::startPreviewPlayback(juce::AudioBuffer<float> previewBuffer,
     armOrStartBrowserPreview();
 }
 
-void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item)
+void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item, bool addClipToPlaylist)
 {
     if (item.isDirectory || ! item.file.existsAsFile())
         return;
@@ -3591,15 +3750,16 @@ void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item)
         track.samplerTransposeSemitones = 0;
     }
 
-    // Also drop the sample into the playlist on the same (hybrid) track at the start, so the
-    // file is both arrangeable in the timeline and playable chromatically from the sampler.
-    // Audio clips render regardless of track type, so a sampler (MIDI) track can carry one.
-    arrangementTimeline.addAudioClipToTrack(item.file, trackIndex, 0.0);
+    // Optionally drop the sample into the playlist on the same (hybrid) track at the start
+    // (double-click does this; the "Open in sampler" menu item loads the sampler only).
+    if (addClipToPlaylist)
+        arrangementTimeline.addAudioClipToTrack(item.file, trackIndex, 0.0);
 
     // Pre-warp in the background now, so the warped buffer is cached before the first note.
     if (track.samplerWarpEnabled && arrangementPlaybackSource != nullptr)
         arrangementPlaybackSource->prewarmSamplerWarp(track.samplerSourcePath, track.samplerSourceBpm);
 
+    stepSequencer.setVisible(false);   // only one lower panel at a time
     samplerPanel.openTrackIndex(trackIndex);
     resized();
     statusLabel.setText("Sampler loaded: " + item.file.getFileName(), juce::dontSendNotification);
@@ -3647,6 +3807,8 @@ bool MainComponent::openSamplerForTrackIfAvailable(int trackIndex)
     if (! track.isMidiTrack || track.samplerSourcePath.isEmpty())
         return false;
 
+    stepSequencer.setVisible(false);   // only one lower panel at a time
+    samplerOpenedFromStep = false;     // default; the step-rack path re-sets this to true
     samplerPanel.openTrackIndex(trackIndex);
     resized();
     return true;
@@ -3836,6 +3998,7 @@ void MainComponent::loadInstrumentOnTrack(int trackIndex, const juce::PluginDesc
     closeInstrumentEditor(trackIndex);
     arrangementPlaybackSource->setTrackInstrument(trackIndex, std::move(instance));
 
+    stepSequencer.setVisible(false);   // only one lower panel at a time
     samplerPanel.openTrackIndex(trackIndex);
     samplerPanel.setVisible(false);
     statusLabel.setText("Instrument loaded: " + description.name, juce::dontSendNotification);
@@ -4408,6 +4571,56 @@ void MainComponent::restoreInstrumentsFromProject()
     arrangementTimeline.repaint();
 }
 
+void MainComponent::resyncInstrumentsAfterHistory()
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+
+    // Editor windows are keyed by the old track index — they'd point at the wrong slot now.
+    closeAllInstrumentEditors();
+
+    auto& tracks = projectState.getTracks();
+
+    // Re-home every live instrument onto the restored layout by plugin id, in one atomic step.
+    // Reused instances keep their exact state and need no reinstantiation (instant).
+    std::vector<std::pair<int, juce::String>> wanted;
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        if (tracks[static_cast<std::size_t>(i)].instrumentPluginId.isNotEmpty())
+            wanted.push_back({ i, tracks[static_cast<std::size_t>(i)].instrumentPluginId });
+
+    const auto unsatisfied = arrangementPlaybackSource->rehomeInstrumentsFromStash(wanted);
+
+    // Rare fallback: a wanted plugin had no live instance available (stash overflowed) —
+    // reinstantiate just those from their saved state.
+    for (const auto& [i, id] : unsatisfied)
+    {
+        const auto desc = pluginManager.findDescription(id);
+        if (! desc.has_value() || ! desc->isInstrument)
+            continue;
+
+        juce::String error;
+        auto instance = pluginManager.createInstance(*desc,
+                                                     getCurrentPluginSampleRate(),
+                                                     getCurrentPluginBlockSize(),
+                                                     error);
+        if (instance == nullptr)
+            continue;
+
+        const auto& base64 = tracks[static_cast<std::size_t>(i)].instrumentStateBase64;
+        if (base64.isNotEmpty())
+        {
+            juce::MemoryBlock block;
+            if (block.fromBase64Encoding(base64) && block.getSize() > 0)
+                instance->setStateInformation(block.getData(), static_cast<int>(block.getSize()));
+        }
+
+        arrangementPlaybackSource->setTrackInstrument(i, std::move(instance));
+    }
+
+    arrangementPlaybackSource->trimInstrumentStash(ArrangementPlaybackSource::kInstrumentStashLimit);
+    arrangementTimeline.repaint();
+}
+
 void MainComponent::stopBrowserPreview(bool resetPosition)
 {
     previewTransportSource.stop();
@@ -4419,6 +4632,12 @@ void MainComponent::rebuildArrangementWarpNonBlocking()
 {
     if (arrangementPlaybackSource == nullptr)
         return;
+    // Kick a background decode for every audio clip so the heavy file read (a 90 s clip is ~1.5 s)
+    // never blocks Play or the audio thread — that block was why a long warped clip started late.
+    for (const auto& track : projectState.getTracks())
+        for (const auto& clip : track.clips)
+            if (clip.type == ClipType::audio && clip.sourcePath.isNotEmpty())
+                arrangementPlaybackSource->prewarmAudioFile(clip.sourcePath);
     // Realtime warp configures streamers (cheap) and kicks the background producer, so the
     // heavy RubberBand stretch never runs on the message thread — pitch/warp toggles stay
     // instant instead of freezing the UI for seconds.
@@ -4620,7 +4839,7 @@ void MainComponent::startGlobalSpacePreview(double startBeat)
     if (arrangementPlaybackSource != nullptr)
     {
         if (arrangementPlaybackSource->isRealtimeWarpEnabled())
-            arrangementPlaybackSource->prepareWarpStreams();
+            arrangementPlaybackSource->prepareWarpStreams(/*blockForLead*/ true, /*allowSyncDecode*/ true);
         else
             arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
 
@@ -4689,7 +4908,7 @@ void MainComponent::toggleTransportFromUi()
 
     // Count-in belongs to recording only. Keep normal playback instant even if the
     // user previously selected "4-count before recording" in the REC options.
-    const auto useCountIn = transportEngine.isRecordArmed() && countInButton.getToggleState();
+    const auto useCountIn = transportEngine.isRecordArmed() && projectState.isRecordWithCountIn();
 
     transportController.togglePlayback(
         useCountIn,
@@ -4706,8 +4925,10 @@ void MainComponent::toggleTransportFromUi()
                 return;
             // Real-time warp: configure streamers (cheap) + start the background producer.
             // The heavy stretching happens off-thread, so Play is instant and glitch-free.
+            // allowSyncDecode: if a source somehow isn't decoded yet (played the instant after a
+            // drop), decode it here so Play always has audio — never regress "plays right away".
             if (arrangementPlaybackSource->isRealtimeWarpEnabled())
-                arrangementPlaybackSource->prepareWarpStreams();
+                arrangementPlaybackSource->prepareWarpStreams(/*blockForLead*/ true, /*allowSyncDecode*/ true);
             else
                 arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
         },
@@ -4723,9 +4944,39 @@ void MainComponent::startMidiRecordingFromRecordButtonIfNeeded()
 {
     if (! transportEngine.isRecordArmed()
         || transportEngine.isPlaying()
-        || transportEngine.isCountInActive()
-        || resolveArmedMidiTrack() < 0)
+        || transportEngine.isCountInActive())
         return;
+
+    auto& tracks = projectState.getTracks();
+    auto targetTrack = resolveArmedMidiTrack();
+    if (targetTrack < 0)
+    {
+        const auto audioArmed = std::any_of(tracks.begin(), tracks.end(), [](const TrackState& track)
+        {
+            return ! track.isMidiTrack && track.recordArmed;
+        });
+        if (audioArmed)
+            return;
+
+        for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        {
+            if (tracks[static_cast<std::size_t>(i)].isMidiTrack)
+            {
+                targetTrack = i;
+                break;
+            }
+        }
+    }
+
+    if (targetTrack < 0)
+        return;
+
+    if (targetTrack < static_cast<int>(tracks.size()))
+    {
+        tracks[static_cast<std::size_t>(targetTrack)].recordArmed = true;
+        arrangementTimeline.repaint();
+        mixerPanel.repaint();
+    }
 
     toggleTransportFromUi();
 }
@@ -4774,13 +5025,74 @@ void MainComponent::finishRecordingAndDisarm()
     updateTransportLabels();
 }
 
+void MainComponent::ensureMidiRecordingSession(int armedTrack)
+{
+    auto& tracks = projectState.getTracks();
+    if (armedTrack < 0 || armedTrack >= static_cast<int>(tracks.size()))
+        return;
+    if (recordingSession.has_value() && recordingSession->trackIndex == armedTrack)
+        return;   // already recording this track
+
+    finalizeRecordingClip();
+    const auto playheadBeat = transportEngine.getPlayheadBeat();
+    auto& track = tracks[static_cast<std::size_t>(armedTrack)];
+    arrangementTimeline.captureUndoSnapshot();
+
+    // Overdub: if the playhead is inside an existing MIDI clip on this track, record INTO it
+    // (merge the new notes) instead of stacking a separate overlapping clip.
+    int targetClip = -1;
+    for (int i = 0; i < static_cast<int>(track.clips.size()); ++i)
+    {
+        const auto& c = track.clips[i];
+        if (c.type == ClipType::midi
+            && playheadBeat >= c.startBeat - 1.0e-6
+            && playheadBeat < c.startBeat + c.lengthInBeats - 1.0e-6)
+        {
+            targetClip = i;
+            break;
+        }
+    }
+
+    RecordingSession session;
+    session.trackIndex = armedTrack;
+    if (targetClip >= 0)
+    {
+        track.clips[static_cast<std::size_t>(targetClip)].recording = true;
+        session.clipIndex     = targetClip;
+        session.clipStartBeat = track.clips[static_cast<std::size_t>(targetClip)].startBeat;
+    }
+    else
+    {
+        const auto clipStart = std::floor(playheadBeat);
+        track.clips.push_back(TimelineClip {
+            "Recording",
+            ClipType::midi,
+            clipStart,
+            juce::jmax(0.25, playheadBeat - clipStart),
+            track.colour.brighter(0.1f),
+            {}, {}, "", 0.0, false, false,
+            0.0, 0.0, 0,
+            false, false, 0.0,
+            -1, false, true
+        });
+        track.clips.back().recording = true;
+        session.clipIndex     = static_cast<int>(track.clips.size()) - 1;
+        session.clipStartBeat = clipStart;
+    }
+    recordingSession = std::move(session);
+}
+
 void MainComponent::recordNoteOn(int pitch, int velocity)
 {
     // Don't capture notes while count-in is still ticking — only after real playback starts.
     if (! transportEngine.isPlaying() || transportEngine.isCountInActive() || ! transportEngine.isRecordArmed())
         return;
+    // Open the session on the spot if the timer hasn't yet — otherwise the very first note
+    // (played in the gap between count-in ending and the next timer tick) was dropped.
     if (! recordingSession.has_value())
-        return; // timerCallback opens the session on the first tick after count-in
+        ensureMidiRecordingSession(resolveArmedMidiTrack());
+    if (! recordingSession.has_value())
+        return;
 
     const auto playheadBeat = transportEngine.getPlayheadBeat();
     const auto beatInClip   = juce::jmax(0.0, playheadBeat - recordingSession->clipStartBeat);
@@ -5210,6 +5522,7 @@ void MainComponent::toggleClipEditorFromUi()
         }
 
         samplerPanel.setVisible(false);
+        stepSequencer.setVisible(false);
         refreshClipEditor();
     }
     else
@@ -5218,6 +5531,28 @@ void MainComponent::toggleClipEditorFromUi()
     }
 
     clipEditorPanel.setVisible(shouldOpen);
+    resized();
+    updateTransportLabels();
+}
+
+void MainComponent::toggleStepSequencerFromUi()
+{
+    const auto shouldOpen = ! stepSequencer.isVisible();
+    if (shouldOpen)
+    {
+        // Only one lower panel at a time.
+        samplerPanel.setVisible(false);
+        clipEditorPanel.setVisible(false);
+        stopClipEditorPreview(true);
+
+        // Give any still-default (grey) sampler channels distinct colours.
+        auto& tracks = projectState.getTracks();
+        for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+            if (tracks[static_cast<std::size_t>(i)].colour == juce::Colour(0xff9db0c4))
+                tracks[static_cast<std::size_t>(i)].colour = theme::tracks::colourForIndex(i);
+    }
+
+    stepSequencer.setVisible(shouldOpen);
     resized();
     updateTransportLabels();
 }
@@ -5382,7 +5717,21 @@ void MainComponent::loadProjectFromFile(const juce::File& file)
     updateTransportLabels();
 
     if (arrangementPlaybackSource != nullptr)
+    {
         arrangementPlaybackSource->syncToTransportPosition();
+
+        // Warm the warp engine right after loading so the FIRST Play is instant — previously
+        // warp streams / sampler buffers were only prepared on the first press, so opening a
+        // project and hitting play had an audible delay before sound.
+        if (arrangementPlaybackSource->isRealtimeWarpEnabled())
+            arrangementPlaybackSource->prepareWarpStreams();
+        else
+            arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+
+        for (const auto& track : projectState.getTracks())
+            if (track.isMidiTrack && track.samplerSourcePath.isNotEmpty() && track.samplerWarpEnabled)
+                arrangementPlaybackSource->prewarmSamplerWarp(track.samplerSourcePath, track.samplerSourceBpm);
+    }
 
     rewindTransportFromUi();
     resetToPlaylistView();

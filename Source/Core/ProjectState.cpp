@@ -65,6 +65,16 @@ void ProjectState::setRecordWithMetronome(bool enabled) noexcept
     recordWithMetronome = enabled;
 }
 
+bool ProjectState::isRecordWithCountIn() const noexcept
+{
+    return recordWithCountIn;
+}
+
+void ProjectState::setRecordWithCountIn(bool enabled) noexcept
+{
+    recordWithCountIn = enabled;
+}
+
 int ProjectState::getNumerator() const noexcept
 {
     return timeSigNumerator;

@@ -13,9 +13,9 @@ const auto panelStroke = orion::theme::line::normal;
 const auto mutedText = orion::theme::text::tertiary.withAlpha(0.88f);
 const auto playheadColour = orion::theme::warm::red;
 const auto velocityLaneBackground = orion::theme::core::deepSpace;
-const auto pianoGridBase = orion::theme::core::deepSpace;
-const auto pianoGridScaleRow = orion::theme::surface::elevated.withAlpha(0.55f);
-const auto pianoGridBlackRow = orion::theme::core::canvas.withAlpha(0.52f);
+const auto pianoGridBase = orion::theme::surface::primary.darker(0.58f);
+const auto pianoGridScaleRow = orion::theme::surface::elevated.brighter(0.10f).withAlpha(0.34f);
+const auto pianoGridBlackRow = orion::theme::core::voidBlack.withAlpha(0.46f);
 constexpr int resizeHandleWidth = 10;
 constexpr double minimumNoteLengthInBeats = 0.125;
 // Empty space (in beats) shown PAST the clip's end so you can keep writing the melody beyond
@@ -131,10 +131,13 @@ PianoRollToolInfo getPianoRollToolInfo(int index) noexcept
 	    return juce::String(noteNames[pitchClass]) + juce::String(octave);
 	}
 
-    juce::Colour midiAccentForTrack(juce::Colour trackColour, bool selected = false)
+    juce::Colour midiAccentForTrack(juce::Colour sourceColour, bool selected = false)
     {
-        return trackColour.withSaturation(selected ? 0.94f : 0.88f)
-                          .brighter(selected ? 0.08f : 0.02f);
+        const auto saturation = juce::jmin(sourceColour.getSaturation(), selected ? 0.74f : 0.66f);
+        const auto brightness = juce::jlimit(selected ? 0.58f : 0.52f,
+                                             selected ? 0.92f : 0.82f,
+                                             sourceColour.getBrightness() + (selected ? 0.14f : 0.08f));
+        return sourceColour.withSaturation(saturation).withBrightness(brightness);
     }
 }  // namespace
 
@@ -234,6 +237,13 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     modButton.addListener(this);
     addAndMakeVisible(modButton);
 
+    presetsButton.setButtonText("Presets");
+    presetsButton.setTooltip("Apply a pitch-curve preset (scoop / fall / slide / vibrato) to the selected note(s)");
+    presetsButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    presetsButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    presetsButton.addListener(this);
+    addAndMakeVisible(presetsButton);
+
     stepLengthButton.setTooltip("Step Write length");
     stepLengthButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
     stepLengthButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
@@ -307,6 +317,7 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     trackName = trackState.name;
     clipName = clipState.name;
     trackColour = trackState.colour;
+    clipColour = clipState.colour;
     clearSelection();
     releaseLiveKeyboardPitches();
     releaseMousePreviewPitch();
@@ -555,7 +566,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
             continue;
 
         const auto mousePressed = mousePreviewPitch.has_value() && *mousePreviewPitch == pitch;
-        const auto keyAccent = midiAccentForTrack(trackColour, true);
+        const auto keyAccent = midiAccentForTrack(clipColour, true);
         const auto shadow = keyRect.translated(mousePressed ? 2.4f : 1.4f, mousePressed ? 1.2f : 0.6f)
                                    .withTrimmedRight(mousePressed ? 2.4f : 1.2f)
                                    .reduced(1.0f, 1.0f);
@@ -606,7 +617,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
 
         const bool isActive = activePlaybackPitches.contains(pitch);
         const bool mousePressed = mousePreviewPitch.has_value() && *mousePreviewPitch == pitch;
-        const auto keyAccent = midiAccentForTrack(trackColour, true);
+        const auto keyAccent = midiAccentForTrack(clipColour, true);
         if (isActive)
             bk = bk.translated(mousePressed ? 2.8f : 1.6f, mousePressed ? 1.4f : 0.8f)
                    .withTrimmedRight(mousePressed ? 2.8f : 1.4f)
@@ -725,7 +736,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         if (activePlaybackPitches.contains(pitch))
         {
             auto laneGlow = row.reduced(0.0f, 1.0f);
-            const auto keyAccent = midiAccentForTrack(trackColour, true);
+            const auto keyAccent = midiAccentForTrack(clipColour, true);
             juce::ColourGradient glow(keyAccent.brighter(0.22f).withAlpha(0.30f),
                                       laneGlow.getX(), laneGlow.getCentreY(),
                                       keyAccent.darker(0.42f).withAlpha(0.015f),
@@ -856,7 +867,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
             const auto noteBounds = getNoteBounds(note);
             const auto isSelected = isNoteSelected(noteIndex);
 
-            const auto noteColour = midiAccentForTrack(trackColour, isSelected);
+            const auto noteColour = midiAccentForTrack(clipColour, isSelected);
             g.setColour(noteColour);
             g.fillRoundedRectangle(noteBounds.toFloat(), 6.0f);
             g.setColour(noteColour.darker(0.45f).withAlpha(0.68f));
@@ -1042,7 +1053,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
                     continue;
                 const auto barBounds = getVelocityBarBounds(noteIndex);
                 const auto selected = isNoteSelected(noteIndex);
-                g.setColour(trackColour.withAlpha(selected ? 0.95f : 0.55f));
+                g.setColour(midiAccentForTrack(clipColour, selected).withAlpha(selected ? 0.95f : 0.58f));
                 g.fillRoundedRectangle(barBounds.toFloat(), 4.0f);
             }
         }
@@ -1089,6 +1100,8 @@ void MidiEditorOverlayComponent::resized()
     splitButton.setBounds(controlsArea.removeFromLeft(54).reduced(0, 1));
     controlsArea.removeFromLeft(6);
     modButton.setBounds(controlsArea.removeFromLeft(64).reduced(0, 1));
+    controlsArea.removeFromLeft(6);
+    presetsButton.setBounds(controlsArea.removeFromLeft(72).reduced(0, 1));
     quantizeButton.setBounds({});
     slidePenButton.setBounds({});
     stepWriteButton.setBounds({});
@@ -1931,6 +1944,10 @@ void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
             modButton.setButtonText(names[next]);
             repaint();
         }
+    }
+    else if (button == &presetsButton)
+    {
+        showSlidePresetMenu();
     }
     else if (button == &slideVisibilityButton)
     {
@@ -3048,6 +3065,24 @@ void MidiEditorOverlayComponent::growClipToFit(double endBeat)
     clampScrollOffsets();
 }
 
+void MidiEditorOverlayComponent::shrinkClipToFitNotes()
+{
+    if (activeClip == nullptr)
+        return;
+    constexpr double barBeats = 4.0;   // one visual bar = minimum pattern length
+    double maxEnd = 0.0;
+    for (const auto& n : activeClip->midiNotes)
+        maxEnd = juce::jmax(maxEnd, n.startBeat + juce::jmax(0.01, n.lengthInBeats));
+    // Snap up to the next bar; never below one bar. Only shrink (growth stays with growClipToFit),
+    // so deleting a stray long note pulls the clip — and the loop — back to the real content.
+    const auto fitted = juce::jmax(barBeats, std::ceil((maxEnd - beatEpsilon) / barBeats) * barBeats);
+    if (fitted < activeClip->lengthInBeats - beatEpsilon)
+    {
+        activeClip->lengthInBeats = fitted;
+        clampScrollOffsets();
+    }
+}
+
 juce::Rectangle<int> MidiEditorOverlayComponent::getNoteBounds(const MidiNote& note) const noexcept
 {
     const auto grid = getGridBounds();
@@ -3469,6 +3504,7 @@ void MidiEditorOverlayComponent::deleteSelectedNotes()
     }
 
     activeClip->midiNotes = std::move(keptNotes);
+    shrinkClipToFitNotes();   // deleting a long note pulls the clip/loop back to the real content
     clearSelection();
     hoverNote.reset();
     noteDragState.reset();
@@ -3487,6 +3523,147 @@ void MidiEditorOverlayComponent::deleteSelectedSlide()
     pushUndoSnapshot();
     activeClip->pitchSlides.erase(activeClip->pitchSlides.begin() + index);
     selectedSlide.reset();
+    repaint();
+}
+
+void MidiEditorOverlayComponent::showSlidePresetMenu()
+{
+    const bool haveNotes = activeClip != nullptr && ! selectedNotes.empty();
+    const bool haveSlide = activeClip != nullptr && selectedSlide.has_value();
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader("Pitch curve (on selected notes)");
+    menu.addItem(1, "Scoop up into note", haveNotes);
+    menu.addItem(2, "Slide down into note", haveNotes);
+    menu.addItem(3, "Fall (drop at end)", haveNotes);
+    menu.addItem(4, "Bend up", haveNotes);
+    menu.addItem(5, "Dip & recover", haveNotes);
+    menu.addItem(6, "Vibrato (whole note)", haveNotes);
+
+    juce::PopupMenu depth;
+    depth.addItem(20, "Subtle (±0.3 st)", haveSlide);
+    depth.addItem(21, "Medium (±0.7 st)", haveSlide);
+    depth.addItem(22, "Wide (±1.5 st)", haveSlide);
+    menu.addSubMenu("Vibrato depth", depth, haveSlide);
+
+    juce::PopupMenu rate;
+    rate.addItem(30, "Slow (2 / beat)", haveSlide);
+    rate.addItem(31, "Medium (4 / beat)", haveSlide);
+    rate.addItem(32, "Fast (6 / beat)", haveSlide);
+    rate.addItem(33, "Very fast (8 / beat)", haveSlide);
+    menu.addSubMenu("Vibrato rate", rate, haveSlide);
+
+    menu.addSeparator();
+    menu.addItem(9, "Clear slide", haveSlide);
+
+    juce::Component::SafePointer<MidiEditorOverlayComponent> safeThis(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&presetsButton),
+        [safeThis](int result)
+        {
+            if (safeThis == nullptr || result == 0)
+                return;
+            if (result >= 1 && result <= 6)       safeThis->applySlidePreset(result);
+            else if (result == 20)                safeThis->setSelectedSlideVibrato(0.3, -1.0, 1);
+            else if (result == 21)                safeThis->setSelectedSlideVibrato(0.7, -1.0, 1);
+            else if (result == 22)                safeThis->setSelectedSlideVibrato(1.5, -1.0, 1);
+            else if (result == 30)                safeThis->setSelectedSlideVibrato(-1.0, 2.0, 1);
+            else if (result == 31)                safeThis->setSelectedSlideVibrato(-1.0, 4.0, 1);
+            else if (result == 32)                safeThis->setSelectedSlideVibrato(-1.0, 6.0, 1);
+            else if (result == 33)                safeThis->setSelectedSlideVibrato(-1.0, 8.0, 1);
+            else if (result == 9)                 safeThis->deleteSelectedSlide();
+        });
+}
+
+void MidiEditorOverlayComponent::applySlidePreset(int presetId)
+{
+    if (activeClip == nullptr || selectedNotes.empty())
+        return;
+
+    pushUndoSnapshot();
+
+    struct NoteRef { int pitch; double start; double len; };
+    std::vector<NoteRef> notes;
+    for (int i = 0; i < static_cast<int>(activeClip->midiNotes.size()); ++i)
+        if (selectedNotes.count(i) > 0)
+        {
+            const auto& n = activeClip->midiNotes[static_cast<std::size_t>(i)];
+            notes.push_back({ n.pitch, n.startBeat, juce::jmax(0.01, n.lengthInBeats) });
+        }
+
+    const auto pt = [](double b, double pitch) { return PitchSlidePoint { b, pitch }; };
+
+    for (const auto& nt : notes)
+    {
+        // Replace any existing slide for this note so re-applying a preset doesn't stack.
+        auto& slides = activeClip->pitchSlides;
+        slides.erase(std::remove_if(slides.begin(), slides.end(), [&](const PitchSlide& s) {
+            return s.sourcePitch == nt.pitch && std::abs(s.sourceNoteStartBeat - nt.start) < 1.0e-4;
+        }), slides.end());
+
+        const double p = nt.pitch, s = nt.start, L = nt.len, e = s + L;
+        PitchSlide sl;
+        sl.sourcePitch = nt.pitch;
+        sl.sourceNoteStartBeat = s;
+
+        switch (presetId)
+        {
+            case 1: // scoop up into note
+                sl.points = { pt(s, p - 2.0), pt(s + L * 0.30, p), pt(e, p) };
+                sl.points[0].curve = 0.5;
+                break;
+            case 2: // slide down into note
+                sl.points = { pt(s, p + 2.0), pt(s + L * 0.30, p), pt(e, p) };
+                sl.points[0].curve = 0.5;
+                break;
+            case 3: // fall: hold then drop a fifth at the end
+                sl.points = { pt(s, p), pt(s + L * 0.6, p), pt(e, p - 7.0) };
+                sl.points[1].curve = -0.4;
+                break;
+            case 4: // bend up across the note
+                sl.points = { pt(s, p), pt(e, p + 2.0) };
+                break;
+            case 5: // dip & recover
+                sl.points = { pt(s, p), pt(s + L * 0.20, p - 1.5), pt(s + L * 0.45, p), pt(e, p) };
+                break;
+            case 6: // vibrato across the whole note
+                sl.points = { pt(s, p), pt(e, p) };
+                for (auto& q : sl.points) { q.lfoShape = 1; q.lfoDepth = 0.7; q.lfoRate = 5.0; }
+                break;
+            default:
+                continue;
+        }
+
+        slides.push_back(std::move(sl));
+    }
+
+    clearSelection();
+    if (! activeClip->pitchSlides.empty())
+        selectedSlide = static_cast<int>(activeClip->pitchSlides.size()) - 1;
+    repaint();
+}
+
+void MidiEditorOverlayComponent::setSelectedSlideVibrato(double depthSemitones, double rateCyclesPerBeat, int shape)
+{
+    if (activeClip == nullptr || ! selectedSlide.has_value())
+        return;
+    const auto si = *selectedSlide;
+    if (si < 0 || si >= static_cast<int>(activeClip->pitchSlides.size()))
+        return;
+
+    pushUndoSnapshot();
+    auto& sl = activeClip->pitchSlides[static_cast<std::size_t>(si)];
+    for (auto& q : sl.points)
+    {
+        if (q.lfoShape == 0)                       q.lfoShape = shape > 0 ? shape : 1;   // turn vibrato on
+        if (depthSemitones >= 0.0)                 q.lfoDepth = depthSemitones;
+        else if (q.lfoDepth == 0.0)                q.lfoDepth = 0.7;                      // sensible default
+        if (rateCyclesPerBeat > 0.0)               q.lfoRate = rateCyclesPerBeat;
+        else if (q.lfoRate <= 0.0)                 q.lfoRate = 4.0;
+    }
+
+    static const char* names[] = { "Mod", "Sine", "Tri", "Saw", "Sqr" };
+    const auto shapeIdx = juce::jlimit(0, 4, sl.points.empty() ? 0 : sl.points.front().lfoShape);
+    modButton.setButtonText(names[shapeIdx]);
     repaint();
 }
 
@@ -3667,6 +3844,7 @@ void MidiEditorOverlayComponent::focusViewportAroundClipNotes()
         scrollY = (static_cast<double>(pitchToLane(defaultCenterPitch)) * laneHeight)
                 - (static_cast<double>(visible.getHeight()) * 0.5);
         scrollX = 0.0;
+        clampScrollOffsets();
         return;
     }
 
@@ -3698,13 +3876,16 @@ void MidiEditorOverlayComponent::focusViewportAroundClipNotes()
 
     const auto beatSpan = juce::jmax(snapSizeInBeats, maxBeat - minBeat);
     const auto paddedBeatSpan = beatSpan + juce::jmax(2.0 * snapSizeInBeats, beatSpan * 0.18);
+    // Frame relative to the SAME beat basis the renderer uses (clip length + editing headroom,
+    // via getContentBeats/getPixelsPerBeat) — otherwise the computed scroll used a different
+    // pixels-per-beat than the drawing code and the notes landed off-screen.
     horizontalZoom = juce::jlimit(
         minimumHorizontalZoom,
         maximumHorizontalZoom,
-        static_cast<double>(activeClip->lengthInBeats) / paddedBeatSpan);
+        getContentBeats() / paddedBeatSpan);
 
     const auto laneHeight = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
-    const auto pixelsPerBeat = (static_cast<double>(visible.getWidth()) * horizontalZoom) / juce::jmax(1.0, activeClip->lengthInBeats);
+    const auto pixelsPerBeat = getPixelsPerBeat();   // consistent with rendering / hit-testing
     const auto displayedLaneCount = getDisplayedLaneCount();
     const auto paddedTopLane = juce::jmax(0, pitchToLane(maxPitch) - 3);
     const auto paddedBottomLane = juce::jmin(displayedLaneCount - 1, pitchToLane(minPitch) + 3);
@@ -3713,6 +3894,8 @@ void MidiEditorOverlayComponent::focusViewportAroundClipNotes()
 
     const auto beatCenter = (minBeat + maxBeat) * 0.5;
     scrollX = (beatCenter * pixelsPerBeat) - (static_cast<double>(visible.getWidth()) * 0.5);
+
+    clampScrollOffsets();   // keep the framed view within the valid scroll range
 }
 
 bool MidiEditorOverlayComponent::shouldConsumeFocusClick() const noexcept

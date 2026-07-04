@@ -12,11 +12,18 @@ constexpr int kPanelHeight = 80;
 constexpr int kReadoutRowHeight = 36;   // remainder of the panel is the button row
 constexpr int kUtilityHeight = 56;
 constexpr int kBrandWidth = 272;
-constexpr int kSideGroupWidth = 260;
+constexpr int kSideGroupWidth = 330;   // holds three nav items: MIXER · CLIP EDITOR · STEPS
 constexpr int kCpuWidth = 92;            // CPU readout (label + bars + %)
 constexpr int kMasterMeterWidth = 230;   // master meter is fixed-width, not edge-to-edge
 constexpr int kOuterPadding = 24;
 constexpr int kGroupGap = 24;
+
+// Shared two-row layout so every cluster (readouts, MIXER/CLIP, MASTER OUT, CPU) puts its
+// label on the same line and its content on the same line, all the same size.
+constexpr int kContentBand = 36;   // total height of the label+content block, centred
+constexpr int kLabelRowH = 14;
+constexpr int kLabelGap = 3;
+constexpr float kLabelFontSize = 10.5f;
 
 juce::String formatDb(double db)
 {
@@ -40,19 +47,17 @@ public:
                               bool shouldDrawButtonAsHighlighted,
                               bool shouldDrawButtonAsDown) override
     {
-        auto bounds = button.getLocalBounds().toFloat();
-        const auto active = button.getToggleState();
-        auto fill = active ? button.findColour(juce::TextButton::buttonOnColourId) : buttonBackgroundColour;
-        if (shouldDrawButtonAsDown)
-            fill = fill.darker(0.16f);
-        else if (shouldDrawButtonAsHighlighted)
-            fill = fill.brighter(0.06f);
-
-        g.setColour(juce::Colours::black.withAlpha(0.30f));
-        g.fillRoundedRectangle(bounds.translated(0.0f, 2.0f), 6.0f);
-        g.setColour(fill);
-        g.fillRoundedRectangle(bounds, 6.0f);
-
+        juce::ignoreUnused(buttonBackgroundColour);
+        // Flat transport (per the new design): no button frame, just the icon on the bar.
+        // A faint rounded highlight on hover/press gives click affordance.
+        if (shouldDrawButtonAsDown || shouldDrawButtonAsHighlighted)
+        {
+            const auto full = button.getLocalBounds().toFloat();
+            const float side = juce::jmin(full.getWidth(), full.getHeight());
+            const auto area = juce::Rectangle<float>(side, side).withCentre(full.getCentre());
+            g.setColour(juce::Colours::white.withAlpha(shouldDrawButtonAsDown ? 0.10f : 0.06f));
+            g.fillRoundedRectangle(area, side * 0.5f);
+        }
     }
 
     void drawButtonText(juce::Graphics& g,
@@ -62,14 +67,13 @@ public:
     {
         const auto role = button.getComponentID();
         const auto active = button.getToggleState();
-        // Neutral icons by default; toggles light up cyan when active. Record stays red.
-        auto colour = active ? theme::text::inverse : theme::text::secondary;
+        // prev/play read bright; stop/loop/metronome are muted until toggled on; record is red.
+        auto colour = (role == "play" || role == "prev") ? theme::text::primary
+                                                         : theme::text::secondary.withAlpha(0.55f);
+        if (active)
+            colour = theme::text::primary;
         if (role == "record")
             colour = theme::accent::recordRed;
-        else if (role == "play")
-            colour = theme::text::primary;
-        else if (role == "loop" && active)
-            colour = theme::text::inverse;
 
         // Icons are drawn inside a CENTERED SQUARE, independent of the button's
         // (wide) rectangle, so shapes stay proportional and never stretch.
@@ -88,14 +92,29 @@ public:
                              area.getX() + w * 0.16f, area.getBottom() - h * 0.06f);
             g.fillPath(path);
         }
+        else if (role == "prev")
+        {
+            // Skip-to-start: vertical bar + left-pointing triangle.
+            const auto cy = area.getCentreY();
+            g.fillRoundedRectangle(juce::Rectangle<float>(area.getX() + w * 0.10f, area.getY() + h * 0.12f,
+                                                          w * 0.12f, h * 0.76f), 1.5f);
+            juce::Path tri;
+            tri.addTriangle(area.getRight() - w * 0.04f, area.getY() + h * 0.10f,
+                            area.getRight() - w * 0.04f, area.getBottom() - h * 0.10f,
+                            area.getX() + w * 0.34f, cy);
+            g.fillPath(tri);
+        }
         else if (role == "stop")
         {
-            g.fillRect(area.withSizeKeepingCentre(w * 0.62f, h * 0.62f));
+            g.fillRect(area.withSizeKeepingCentre(w * 0.58f, h * 0.58f));
         }
         else if (role == "record")
         {
+            // Filled red circle inside a thin red ring (per the new design).
             g.setColour(theme::accent::recordRed);
-            g.fillEllipse(area.withSizeKeepingCentre(w * 0.58f, h * 0.58f));
+            const auto ring = area.withSizeKeepingCentre(w * 0.86f, h * 0.86f);
+            g.drawEllipse(ring, 1.3f);
+            g.fillEllipse(area.withSizeKeepingCentre(w * 0.62f, h * 0.62f));
         }
         else if (role == "loop")
         {
@@ -155,17 +174,21 @@ IconButtonLookAndFeel iconButtonLookAndFeel;
 
 TransportBarComponent::TransportBarComponent()
 {
+    prevButton.setComponentID("prev");
     playButton.setComponentID("play");
     stopButton.setComponentID("stop");
     recordButton.setComponentID("record");
     metronomeButton.setComponentID("metronome");
     loopButton.setComponentID("loop");
 
-    for (auto* button : { &playButton, &stopButton, &recordButton, &metronomeButton, &loopButton })
+    for (auto* button : { &prevButton, &playButton, &stopButton, &recordButton, &metronomeButton, &loopButton })
     {
         styleButton(*button);
         button->setLookAndFeel(&iconButtonLookAndFeel);
         button->addListener(this);
+        // Don't let transport buttons keep keyboard focus — otherwise after clicking one (e.g.
+        // skip-to-start) it stayed focused and every Return re-triggered it, hijacking Enter.
+        button->setWantsKeyboardFocus(false);
         addAndMakeVisible(*button);
     }
 
@@ -173,12 +196,13 @@ TransportBarComponent::TransportBarComponent()
         button->setClickingTogglesState(true);
 
     playButton.setClickingTogglesState(false);
+    prevButton.setClickingTogglesState(false);
     recordButton.addMouseListener(this, false);
 }
 
 TransportBarComponent::~TransportBarComponent()
 {
-    for (auto* button : { &playButton, &stopButton, &recordButton, &metronomeButton, &loopButton })
+    for (auto* button : { &prevButton, &playButton, &stopButton, &recordButton, &metronomeButton, &loopButton })
     {
         button->removeListener(this);
         button->setLookAndFeel(nullptr);
@@ -194,10 +218,11 @@ void TransportBarComponent::setState(const TransportBarState& newState)
 
 juce::Rectangle<int> TransportBarComponent::getTempoEditorBounds() const noexcept
 {
-    // A compact field over the value row (top of the column), sized to the number —
-    // not the full column — so clicking to edit doesn't blow the field up wide.
-    auto column = tempoCardBounds;
-    return column.removeFromTop(22).withSizeKeepingCentre(86, 22);
+    // A compact field over the tempo VALUE (which now sits below the label), sized to the
+    // number and left-aligned with it — so clicking to edit doesn't blow the field up wide.
+    auto column = tempoCardBounds.reduced(2, 0);
+    column.removeFromTop(15);   // skip the "Tempo" label row
+    return column.removeFromTop(24).withSizeKeepingCentre(juce::jmin(80, column.getWidth()), 24);
 }
 
 juce::Rectangle<int> TransportBarComponent::getKeyBounds() const noexcept
@@ -232,77 +257,52 @@ void TransportBarComponent::paint(juce::Graphics& g)
     g.setColour(theme::core::voidBlack.withAlpha(0.58f));
     g.fillRoundedRectangle(panel, 9.0f);
 
-    // One readout column: big value, an optional small muted unit inline (e.g. "BPM"),
-    // an optional dropdown chevron, and a caption underneath — the whole group centred.
+    // One readout column, new-design style: a small muted label on top, the value below
+    // (left-aligned), with an optional dropdown chevron after the value (Key opens a picker).
     auto drawReadout = [&g](juce::Rectangle<int> bounds,
+                            const juce::String& label,
                             const juce::String& value,
-                            const juce::String& suffix,
-                            const juce::String& caption,
                             juce::Colour valueColour,
                             bool showChevron)
     {
-        const auto valueRow = bounds.removeFromTop(22).toFloat();
+        auto col = bounds.reduced(2, 0).withSizeKeepingCentre(bounds.getWidth() - 4, kContentBand);
+        const auto labelRow = col.removeFromTop(kLabelRowH).toFloat();
+        col.removeFromTop(kLabelGap);
+        g.setColour(theme::text::tertiary.withAlpha(0.55f));
+        g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+        g.drawText(label, labelRow, juce::Justification::centred);
 
+        const auto valueRow = col.toFloat();
         const juce::Font valueFont(juce::FontOptions(18.0f, juce::Font::bold));
-        const juce::Font suffixFont(juce::FontOptions(11.5f, juce::Font::plain));
-
-        const float valueW  = juce::GlyphArrangement::getStringWidth(valueFont, value);
-        const float suffGap = suffix.isNotEmpty() ? 5.0f : 0.0f;
-        const float suffW   = suffix.isNotEmpty() ? juce::GlyphArrangement::getStringWidth(suffixFont, suffix) : 0.0f;
-        const float chevGap = showChevron ? 7.0f : 0.0f;
-        const float chevW   = showChevron ? 9.0f : 0.0f;
-        const float groupW  = valueW + suffGap + suffW + chevGap + chevW;
-
-        float x = valueRow.getCentreX() - groupW * 0.5f;
-        const float cy = valueRow.getCentreY();
-
+        const float valueW = juce::GlyphArrangement::getStringWidth(valueFont, value);
         g.setColour(valueColour);
         g.setFont(valueFont);
-        g.drawText(value, juce::Rectangle<float>(x, valueRow.getY(), valueW, valueRow.getHeight()),
-                   juce::Justification::centredLeft);
-        x += valueW;
-
-        if (suffix.isNotEmpty())
-        {
-            x += suffGap;
-            g.setColour(theme::text::tertiary.withAlpha(0.85f));
-            g.setFont(suffixFont);
-            g.drawText(suffix, juce::Rectangle<float>(x, valueRow.getY(), suffW, valueRow.getHeight()),
-                       juce::Justification::centredLeft);
-            x += suffW;
-        }
+        g.drawText(value, valueRow, juce::Justification::centred);
 
         if (showChevron)
         {
-            x += chevGap;
-            const float chx = x + chevW * 0.5f;
+            const float chx = valueRow.getCentreX() + valueW * 0.5f + 9.0f;
+            const float cy = valueRow.getCentreY();
             juce::Path chev;
-            chev.startNewSubPath(chx - chevW * 0.5f, cy - 2.0f);
+            chev.startNewSubPath(chx - 4.0f, cy - 2.0f);
             chev.lineTo(chx, cy + 3.0f);
-            chev.lineTo(chx + chevW * 0.5f, cy - 2.0f);
+            chev.lineTo(chx + 4.0f, cy - 2.0f);
             g.setColour(theme::text::tertiary.withAlpha(0.8f));
             g.strokePath(chev, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         }
-
-        g.setColour(theme::text::tertiary.withAlpha(0.78f));
-        g.setFont(juce::FontOptions(9.5f, juce::Font::plain));
-        g.drawText(caption, bounds, juce::Justification::centredTop);
     };
 
-    // Order: BPM | TIME (centre) | KEY. BPM has no chevron (typed/dragged); KEY does
-    // (it opens a picker).
-    drawReadout(tempoCardBounds, juce::String(state.tempoBpm, 0), "BPM", "BPM", theme::warm::coral, false);
-    drawReadout(positionCardBounds, state.positionText, {}, "TIME", theme::text::primary.withAlpha(0.96f), false);
-    drawReadout(keyCardBounds, state.keyText, {}, "KEY", theme::text::primary.withAlpha(0.96f), true);
+    const auto valueWhite = theme::text::primary.withAlpha(0.96f);
+    drawReadout(keyCardBounds,     "Key",            state.keyText,                  valueWhite, true);
+    drawReadout(timeSigCardBounds, "Time Signature", state.timeSignature,            valueWhite, false);
+    drawReadout(tempoCardBounds,   "Tempo",          juce::String(state.tempoBpm, 0), valueWhite, false);
+    drawReadout(positionCardBounds, "Time",          state.positionText,             valueWhite, false);
 
     drawBrandCluster(g, brandClusterBounds);
-    g.setColour(theme::surface::primary.withAlpha(0.18f));
-    g.fillRoundedRectangle(utilityClusterBounds.toFloat(), 8.0f);
     drawUtilityItem(g, UtilityItem::mixer, "MIXER", getUtilityItemBounds(UtilityItem::mixer));
     drawUtilityItem(g, UtilityItem::clipEditor, "CLIP EDITOR", getUtilityItemBounds(UtilityItem::clipEditor));
+    drawUtilityItem(g, UtilityItem::stepSequencer, "STEPS", getUtilityItemBounds(UtilityItem::stepSequencer));
 
-    g.setColour(theme::surface::primary.withAlpha(0.18f));
-    g.fillRoundedRectangle(monitorClusterBounds.toFloat(), 8.0f);
     drawMasterMeter(g, masterMeterBounds);
     drawCpuMeter(g, cpuMeterBounds);
 
@@ -319,22 +319,23 @@ void TransportBarComponent::paint(juce::Graphics& g)
 void TransportBarComponent::resized()
 {
     auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight);
-    const auto rowCentreY = panel.getCentreY();
+    // Side clusters share the panel's exact vertical band, so brand / mixer-clip / master / cpu
+    // all sit on the same line with the same top & bottom padding as the centre panel.
+    const auto clusterY = panel.getY();
+    const auto clusterH = panel.getHeight();
     utilityClusterBounds = juce::Rectangle<int>(panel.getX() - kGroupGap - kSideGroupWidth,
-                                                rowCentreY - kUtilityHeight / 2,
-                                                kSideGroupWidth,
-                                                kUtilityHeight);
+                                                clusterY, kSideGroupWidth, clusterH);
     brandClusterBounds = juce::Rectangle<int>(kOuterPadding,
-                                              rowCentreY - kUtilityHeight / 2,
+                                              clusterY,
                                               juce::jmax(190, juce::jmin(kBrandWidth, utilityClusterBounds.getX() - kOuterPadding - kGroupGap)),
-                                              kUtilityHeight);
+                                              clusterH);
 
     const auto monitorX = panel.getRight() + kGroupGap;
     const auto monitorRight = getWidth() - kOuterPadding;
     monitorClusterBounds = juce::Rectangle<int>(monitorX,
-                                                rowCentreY - kUtilityHeight / 2,
+                                                clusterY,
                                                 juce::jmax(kSideGroupWidth, monitorRight - monitorX),
-                                                kUtilityHeight);
+                                                clusterH);
     auto monitorContent = monitorClusterBounds.reduced(12, 7);
     // Master meter is a fixed-width readout anchored to the left of the cluster (it used to
     // stretch all the way to the window edge); CPU follows it with a bit more room.
@@ -342,30 +343,29 @@ void TransportBarComponent::resized()
     monitorContent.removeFromLeft(16);
     cpuMeterBounds = monitorContent.removeFromLeft(juce::jmin(kCpuWidth, monitorContent.getWidth()));
 
-    // Readouts: three equal columns spread across the full width (BPM | TIME | KEY).
+    // Readouts: four equal columns (Key | Time Signature | Tempo | Time).
     auto readouts = panel.removeFromTop(kReadoutRowHeight).reduced(16, 0);
-    const int colWidth = readouts.getWidth() / 3;
+    const int colWidth = readouts.getWidth() / 4;
+    keyCardBounds      = readouts.removeFromLeft(colWidth);
+    timeSigCardBounds  = readouts.removeFromLeft(colWidth);
     tempoCardBounds    = readouts.removeFromLeft(colWidth);
-    keyCardBounds      = readouts.removeFromRight(colWidth);
-    positionCardBounds = readouts;   // centre column = whatever remains
+    positionCardBounds = readouts;   // last column = whatever remains
 
-    // Transport controls: five wide rounded buttons filling the width evenly.
-    auto band = panel.reduced(16, 3);   // bottom row, with side + vertical padding
-    constexpr int buttonGap = 10;
-    const int cellWidth = (band.getWidth() - buttonGap * 4) / 5;
+    // Transport controls: a tight cluster of equal-size icons with a fixed gap, centred on
+    // the panel axis — so spacing is perfectly even and the row is symmetric (record/play
+    // straddle the centre).
+    auto band = panel.reduced(16, 3);
+    constexpr int iconSize = 38;
+    constexpr int iconGap = 14;
+    constexpr int count = 6;
+    const int clusterW = count * iconSize + (count - 1) * iconGap;
+    int x = band.getCentreX() - clusterW / 2;
 
-    const auto place = [&band, cellWidth](juce::Button& button, bool last)
+    for (auto* button : { &prevButton, &stopButton, &recordButton, &playButton, &loopButton, &metronomeButton })
     {
-        button.setBounds(last ? band : band.removeFromLeft(cellWidth));
-        if (! last)
-            band.removeFromLeft(buttonGap);
-    };
-
-    place(loopButton, false);
-    place(metronomeButton, false);
-    place(stopButton, false);
-    place(playButton, false);
-    place(recordButton, true);   // takes the remainder so rounding never leaves a gap
+        button->setBounds(x, band.getY(), iconSize, band.getHeight());
+        x += iconSize + iconGap;
+    }
 }
 
 void TransportBarComponent::mouseMove(const juce::MouseEvent& event)
@@ -394,6 +394,8 @@ void TransportBarComponent::mouseDown(const juce::MouseEvent& event)
             onMixer();
         else if (item == UtilityItem::clipEditor && onClipEditor)
             onClipEditor();
+        else if (item == UtilityItem::stepSequencer && onStepSequencer)
+            onStepSequencer();
         return;
     }
 
@@ -431,6 +433,8 @@ void TransportBarComponent::buttonClicked(juce::Button* button)
 
     if (button == &playButton && onPlay)
         onPlay();
+    else if (button == &prevButton && onSkipToStart)
+        onSkipToStart();
     else if (button == &stopButton && onStop)
         onStop();
     else if (button == &recordButton && onRecordChanged)
@@ -456,17 +460,22 @@ juce::Rectangle<int> TransportBarComponent::getUtilityItemBounds(UtilityItem ite
         return {};
 
     auto bounds = utilityClusterBounds;
-    const auto itemWidth = (bounds.getWidth() - 10) / 2;
+    constexpr int gap = 8;
+    const auto itemWidth = (bounds.getWidth() - gap * 2) / 3;
     if (item == UtilityItem::mixer)
         return bounds.removeFromLeft(itemWidth);
 
-    bounds.removeFromLeft(itemWidth + 10);
-    return bounds;
+    bounds.removeFromLeft(itemWidth + gap);
+    if (item == UtilityItem::clipEditor)
+        return bounds.removeFromLeft(itemWidth);
+
+    bounds.removeFromLeft(itemWidth + gap);
+    return bounds;   // stepSequencer
 }
 
 TransportBarComponent::UtilityItem TransportBarComponent::hitTestUtilityItem(juce::Point<int> point) const noexcept
 {
-    for (const auto item : { UtilityItem::mixer, UtilityItem::clipEditor })
+    for (const auto item : { UtilityItem::mixer, UtilityItem::clipEditor, UtilityItem::stepSequencer })
         if (getUtilityItemBounds(item).contains(point))
             return item;
 
@@ -479,7 +488,8 @@ void TransportBarComponent::drawUtilityItem(juce::Graphics& g, UtilityItem item,
         return;
 
     const auto active = (item == UtilityItem::mixer && state.mixerOpen)
-                     || (item == UtilityItem::clipEditor && state.clipEditorOpen);
+                     || (item == UtilityItem::clipEditor && state.clipEditorOpen)
+                     || (item == UtilityItem::stepSequencer && state.stepSequencerOpen);
     const auto hovered = hoveredUtilityItem == item;
     const auto fill = active ? theme::cool::cyan.withAlpha(0.10f)
                     : hovered ? theme::text::primary.withAlpha(0.055f)
@@ -494,13 +504,15 @@ void TransportBarComponent::drawUtilityItem(juce::Graphics& g, UtilityItem item,
         g.fillRoundedRectangle(bounds.toFloat().reduced(2.0f, 1.0f), 7.0f);
     }
 
-    auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), 44).reduced(8, 0);
-    auto icon = content.removeFromTop(24).withSizeKeepingCentre(28, 22);
-    drawUtilityIcon(g, item, icon.toFloat(), colour);
-
+    auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), kContentBand).reduced(8, 0);
+    auto labelRow = content.removeFromTop(kLabelRowH);
+    content.removeFromTop(kLabelGap);
     g.setColour(colour);
-    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
-    g.drawText(label, content.removeFromTop(14), juce::Justification::centred);
+    g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+    g.drawText(label, labelRow, juce::Justification::centred);
+
+    auto icon = content.withSizeKeepingCentre(28, juce::jmin(content.getHeight(), 20));
+    drawUtilityIcon(g, item, icon.toFloat(), colour);
 }
 
 void TransportBarComponent::drawUtilityIcon(juce::Graphics& g, UtilityItem item, juce::Rectangle<float> bounds, juce::Colour colour) const
@@ -529,6 +541,23 @@ void TransportBarComponent::drawUtilityIcon(juce::Graphics& g, UtilityItem item,
         wave.lineTo(body.getRight() - 5.0f, body.getCentreY() + 5.0f);
         g.strokePath(wave, juce::PathStrokeType(1.5f));
     }
+    else if (item == UtilityItem::stepSequencer)
+    {
+        // 2×4 grid of little step cells (Channel-Rack glyph).
+        auto body = bounds.reduced(4.0f, 5.0f);
+        const float cw = body.getWidth() / 4.0f;
+        const float ch = body.getHeight() / 2.0f;
+        for (int r = 0; r < 2; ++r)
+            for (int c = 0; c < 4; ++c)
+            {
+                juce::Rectangle<float> cell(body.getX() + c * cw, body.getY() + r * ch, cw, ch);
+                cell = cell.reduced(1.4f);
+                // A couple of cells "lit" so it reads as an active step pattern.
+                const bool lit = (r == 0 && (c == 0 || c == 2)) || (r == 1 && c == 1);
+                if (lit) g.fillRoundedRectangle(cell, 1.5f);
+                else     g.drawRoundedRectangle(cell, 1.5f, 1.0f);
+            }
+    }
 }
 
 void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const
@@ -536,13 +565,14 @@ void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<i
     if (bounds.isEmpty())
         return;
 
-    auto content = bounds;
-    auto title = content.removeFromTop(17);
+    auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), kContentBand);
+    auto title = content.removeFromTop(kLabelRowH);
+    content.removeFromTop(kLabelGap);
     g.setColour(theme::warm::red);
-    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
     g.drawText("MASTER OUT", title, juce::Justification::centredLeft);
 
-    auto row = content.removeFromTop(22);
+    auto row = content;
     auto meter = row.removeFromLeft(juce::jmax(96, row.getWidth() - 56)).withHeight(12).withY(row.getCentreY() - 6);
     g.setColour(theme::surface::primary.withAlpha(0.72f));
     g.fillRoundedRectangle(meter.toFloat(), 3.0f);
@@ -568,12 +598,13 @@ void TransportBarComponent::drawCpuMeter(juce::Graphics& g, juce::Rectangle<int>
     if (bounds.isEmpty())
         return;
 
-    auto cpu = bounds.reduced(0, 1);
+    auto cpu = bounds.withSizeKeepingCentre(bounds.getWidth(), kContentBand);
     g.setColour(theme::text::tertiary.withAlpha(0.60f));
-    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
-    g.drawText("CPU", cpu.removeFromTop(12), juce::Justification::centred);
+    g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+    g.drawText("CPU", cpu.removeFromTop(kLabelRowH), juce::Justification::centred);
+    cpu.removeFromTop(kLabelGap);
 
-    auto loadRow = cpu.removeFromTop(18);
+    auto loadRow = cpu;
     auto bars = loadRow.removeFromLeft(28).withSizeKeepingCentre(24, 12);
     const auto activeBars = juce::roundToInt(juce::jlimit(0.0f, 1.0f, state.engineLoad) * 4.0f);
     for (int i = 0; i < 4; ++i)
@@ -615,7 +646,8 @@ void TransportBarComponent::drawBrandCluster(juce::Graphics& g, juce::Rectangle<
     g.setColour(theme::cool::cyan.withAlpha(0.95f));
     g.fillEllipse(juce::Rectangle<float>(6.0f, 6.0f).withCentre(centre));
 
-    auto text = bounds.reduced(6, 7);
+    auto text = bounds.reduced(6, 0);
+    text = text.withSizeKeepingCentre(text.getWidth(), 39);   // centre the two text lines vertically
     auto titleRow = text.removeFromTop(19);
     g.setColour(theme::text::primary.withAlpha(0.94f));
     g.setFont(juce::FontOptions(14.0f, juce::Font::bold));

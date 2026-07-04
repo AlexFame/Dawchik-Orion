@@ -185,6 +185,7 @@ private:
     double getVisibleBeatRange() const noexcept;
     double getContentBeats() const noexcept;   // clip length + editing headroom (drawable width)
     void   growClipToFit(double endBeat);       // extend the clip (snapped up to a bar) so notes fit
+    void   shrinkClipToFitNotes();              // pull the clip back to its content (bar-snapped, min 1 bar)
     std::optional<NoteHit> hitTestNote(juce::Point<int> position) const;
     std::optional<SlideHit> hitTestSlide(juce::Point<int> position) const;
     std::optional<int> hitTestVelocityBar(juce::Point<int> position) const;
@@ -210,6 +211,11 @@ private:
     void joinSelectedNotes();
     void splitSelectedSlide();
     void deleteSelectedSlide();
+    // Pitch-curve presets (MidiSketch-style): build a ready-made slide shape on each selected
+    // note, and adjust the selected slide's vibrato depth/rate.
+    void showSlidePresetMenu();
+    void applySlidePreset(int presetId);
+    void setSelectedSlideVibrato(double depthSemitones, double rateCyclesPerBeat, int shape);
     void quantizeSelectedNotes();
     void updateSubtitle();
     void clearSelection();
@@ -264,6 +270,7 @@ private:
     juce::String trackName;
     juce::String clipName;
     juce::Colour trackColour { juce::Colour(0xff5b84d6) };
+    juce::Colour clipColour { juce::Colour(0xff5b84d6) };
     TrackState* activeTrack { nullptr };
     TimelineClip* activeClip { nullptr };
     std::set<int> selectedNotes;
@@ -305,6 +312,7 @@ private:
     juce::TextButton joinButton;
     juce::TextButton splitButton;
     juce::TextButton modButton;   // cycles the selected glide's LFO/vibrato shape
+    juce::TextButton presetsButton;  // popup of pitch-curve presets (scoop/fall/vibrato/…)
     juce::TextButton glideButton;
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;

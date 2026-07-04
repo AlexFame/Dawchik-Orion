@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <tuple>
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
@@ -22,9 +23,10 @@ juce::AudioFormatManager& getSharedWaveformFormatManager()
     return manager;
 }
 
-const auto timelineBackground = juce::Colour(0xff20252a);
-const auto majorGridColour = juce::Colour(0xff56616b);
-const auto minorGridColour = juce::Colour(0xff3b444c);
+const auto timelineBackground = juce::Colour(0xff18212a); // lighter DAW canvas: enough midtone for a calm, readable grid
+const auto barGridColour = juce::Colour(0xff647180);
+const auto beatGridColour = juce::Colour(0xff4f5b68);
+const auto subdivisionGridColour = juce::Colour(0xff3e4954);
 const auto markerColour = juce::Colours::white.withAlpha(0.64f);
 const auto textColour = juce::Colours::white.withAlpha(0.88f);
 const auto playheadColour = orion::theme::states::playhead;
@@ -54,7 +56,7 @@ constexpr auto loopHandleHitWidth = 8;
 constexpr auto playheadHitWidth = 8;
 constexpr auto newTrackDropZoneHeight = 64;
 constexpr auto maxExpandedLaneHeight = 240;
-constexpr auto minPixelsPerBeat = 0.12;
+constexpr auto minPixelsPerBeat = 0.05;   // tiny absolute floor; the real max-zoom-out is content-adaptive (minZoomPixelsPerBeat)
 constexpr auto maxPixelsPerBeat = 160.0;
 constexpr auto minTimelineLengthInBeats = 512.0;
 constexpr auto timelinePaddingInBeats = 64.0;
@@ -84,12 +86,12 @@ double choosePlaylistSubdivisionStep(double pixelsPerBeat, int beatsPerBar)
     if (pixelsPerBeat <= 0.0)
         return static_cast<double>(juce::jmax(1, beatsPerBar));
 
-    // Match the playlist's 1/4-beat snap visually when there is enough room.
-    // As the user zooms out, fall back through coarser musical divisions.
-    static constexpr std::array<double, 7> steps { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0 };
+    // Ableton-like playlist density: normal zoom still shows the musical pulse, but finer
+    // divisions are reserved for closer zoom levels.
+    static constexpr std::array<double, 7> steps { 1.0, 0.5, 0.25, 2.0, 4.0, 8.0, 16.0 };
     for (const auto step : steps)
     {
-        if (pixelsPerBeat * step >= 7.0)
+        if (pixelsPerBeat * step >= 18.0)
             return step;
     }
 
@@ -190,6 +192,32 @@ AudioImportAnalysis analyzeImportedAudioClip(const juce::File& file, double temp
     return result;
 }
 
+AudioImportAnalysis cachedAnalyzeImportedAudioClip(const juce::File& file,
+                                                   double tempoBpm,
+                                                   int numerator,
+                                                   double fallbackLengthBeats)
+{
+    static std::map<std::string, AudioImportAnalysis> cache;
+
+    const auto key = (file.getFullPathName()
+                      + "|" + juce::String(file.getSize())
+                      + "|" + juce::String(file.getLastModificationTime().toMilliseconds())
+                      + "|" + juce::String(tempoBpm, 6)
+                      + "|" + juce::String(numerator)
+                      + "|" + juce::String(fallbackLengthBeats, 6))
+                         .toStdString();
+
+    if (const auto it = cache.find(key); it != cache.end())
+        return it->second;
+
+    auto result = analyzeImportedAudioClip(file, tempoBpm, numerator, fallbackLengthBeats);
+    if (cache.size() > 256)
+        cache.erase(cache.begin());
+
+    cache.emplace(key, result);
+    return result;
+}
+
 juce::String clipNameForImportedFile(const juce::File& file, const juce::DynamicObject& payload)
 {
     if (file.existsAsFile())
@@ -279,6 +307,7 @@ void ArrangementTimelineComponent::selectTrack(int trackIndex)
         return;
     setSingleSelection(std::nullopt);
     selectedTrackIndex = trackIndex;
+    selectedTrackIndices = { trackIndex };
     notifyClipSelectionChanged();
     repaint();
 }
@@ -298,14 +327,28 @@ void ArrangementTimelineComponent::setFitTrackLanesToVisibleArea(bool shouldFit)
     repaint();
 }
 
+// A compact fingerprint of the per-track instrument layout, so undo/redo can tell whether
+// the restored state needs the engine's hosted-instrument slots re-synced. Index position
+// matters (a reorder changes the signature even with the same plugins).
+static juce::String instrumentLayoutSignature(const std::vector<TrackState>& tracks)
+{
+    juce::String sig;
+    for (const auto& t : tracks)
+        sig << t.instrumentPluginId << "|";
+    return sig;
+}
+
 bool ArrangementTimelineComponent::undo()
 {
     if (undoStack.empty())
         return false;
 
+    const auto beforeSig = instrumentLayoutSignature(project.getTracks());
     redoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip });
     restoreSnapshot(undoStack.back());
     undoStack.pop_back();
+    if (onInstrumentLayoutChangedByHistory && beforeSig != instrumentLayoutSignature(project.getTracks()))
+        onInstrumentLayoutChangedByHistory();
     repaint();
     return true;
 }
@@ -315,9 +358,12 @@ bool ArrangementTimelineComponent::redo()
     if (redoStack.empty())
         return false;
 
+    const auto beforeSig = instrumentLayoutSignature(project.getTracks());
     undoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip });
     restoreSnapshot(redoStack.back());
     redoStack.pop_back();
+    if (onInstrumentLayoutChangedByHistory && beforeSig != instrumentLayoutSignature(project.getTracks()))
+        onInstrumentLayoutChangedByHistory();
     repaint();
     return true;
 }
@@ -342,6 +388,7 @@ bool ArrangementTimelineComponent::selectAllClips()
         : std::optional<SelectedClip>(selectedClips.back());
     lastClickedClip = selectedClip;
     selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
     focusedSplitBeat.reset();
     notifyClipSelectionChanged();
     repaint();
@@ -353,6 +400,7 @@ void ArrangementTimelineComponent::resetForNewProject()
     selectedClip.reset();
     lastClickedClip.reset();
     selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
     selectedClips.clear();
     focusedSplitBeat.reset();
     dragState.reset();
@@ -362,6 +410,7 @@ void ArrangementTimelineComponent::resetForNewProject()
     undoStack.clear();
     redoStack.clear();
     scrollX = 0.0;
+    timelineAutoFitActive = true;
     customTrackHeights.clear();
     repaint();
 }
@@ -518,7 +567,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     auto rulerGridArea = rulerArea;
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto trackCount = static_cast<int>(project.getTracks().size());
-    g.setColour(juce::Colours::black.withAlpha(0.18f));
+    g.setColour(juce::Colours::black.withAlpha(0.04f));
     g.fillRoundedRectangle(getLocalBounds().toFloat(), 18.0f);
 
     const auto beatsPerBar = static_cast<double>(project.getNumerator());
@@ -573,21 +622,22 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     const int maxBeat = juce::jmax(lastVisibleBeat, static_cast<int>(std::ceil(totalBeats)));
 
     const auto beatsPerBarInt = juce::jmax(1, static_cast<int>(beatsPerBar));
-    const auto minGridSpacingPixels = 12.0;
     const auto subdivisionStepBeats = choosePlaylistSubdivisionStep(pixelsPerBeat, beatsPerBarInt);
-    const auto fineStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 18.0);
-    const auto barStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 42.0);
-    const auto majorStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 86.0);
-    const auto sectionStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 170.0);
     const auto labelStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 58.0);
 
-        auto drawGridLayer = [&](juce::Rectangle<int> verticalArea, int stepBeats, juce::Colour colour, float thickness, bool forceVisible = false)
-        {
-            if (stepBeats <= 0 || (! forceVisible && pixelsPerBeat * static_cast<double>(stepBeats) < minGridSpacingPixels))
-                return;
+    // Adaptive hierarchical grid: keep the density readable and use opacity, not thick strokes,
+    // for hierarchy. Live's manual documents the beat-time ruler/editing grid behavior, but not
+    // pixel weights; visually its arrangement grid stays close to crisp 1px guides.
+    auto drawHierarchicalGrid = [&](juce::Rectangle<int> verticalArea, float intensity)
+    {
+        const auto barWidth = pixelsPerBeat * static_cast<double>(beatsPerBarInt);
+        const auto stepBeats = barWidth >= 10.0
+            ? beatsPerBarInt
+            : chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 42.0);
+        if (stepBeats <= 0)
+            return;
 
         const auto firstBeat = (firstVisibleBeat / stepBeats) * stepBeats;
-        g.setColour(colour);
         for (int beat = firstBeat; beat <= maxBeat; beat += stepBeats)
         {
             const auto x = beatToX(static_cast<double>(beat), gridArea);
@@ -596,13 +646,28 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             if (x < static_cast<float>(gridArea.getX() - 50))
                 continue;
 
-            g.drawLine(x, static_cast<float>(verticalArea.getY()), x, static_cast<float>(verticalArea.getBottom()), thickness);
+            // Opacity by bar-group. Keep stroke width near 1px so the grid reads as guides,
+            // not vertical dividers.
+            const int bars = beat / beatsPerBarInt;
+            float alpha;
+            if      (bars % 64 == 0) alpha = 0.68f;
+            else if (bars % 32 == 0) alpha = 0.62f;
+            else if (bars % 16 == 0) alpha = 0.56f;
+            else if (bars % 8  == 0) alpha = 0.48f;
+            else if (bars % 4  == 0) alpha = 0.39f;
+            else if (bars % 2  == 0) alpha = 0.30f;
+            else                     alpha = 0.22f;
+
+            g.setColour(barGridColour.withAlpha(alpha * intensity));
+            g.drawLine(x, static_cast<float>(verticalArea.getY()), x, static_cast<float>(verticalArea.getBottom()), 1.0f);
         }
     };
 
-    auto drawSubdivisionGrid = [&](juce::Rectangle<int> verticalArea)
+    auto drawSubdivisionGrid = [&](juce::Rectangle<int> verticalArea, float intensity)
     {
-        if (subdivisionStepBeats <= 0.0 || pixelsPerBeat * subdivisionStepBeats < 7.0)
+        // Beat/sub-beat lines. At arrangement-fit zoom this becomes half-bar/beat guidance;
+        // closer zooms reveal half/quarter beats.
+        if (subdivisionStepBeats <= 0.0 || pixelsPerBeat * subdivisionStepBeats < 18.0)
             return;
 
         const auto firstBeat = std::floor(static_cast<double>(firstVisibleBeat) / subdivisionStepBeats) * subdivisionStepBeats;
@@ -618,26 +683,54 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto beatInBar = std::fmod(std::fmod(beat, beatsPerBar) + beatsPerBar, beatsPerBar);
             const auto isBar = beatInBar <= beatEpsilon || std::abs(beatInBar - beatsPerBar) <= beatEpsilon;
             if (isBar)
-                continue; // strong bar lines are drawn by the existing grid layers
+                continue; // bar lines belong to the hierarchy pass
 
             const auto isWholeBeat = std::abs(beat - std::round(beat)) <= beatEpsilon;
             const auto isHalfBeat = std::abs((beat * 2.0) - std::round(beat * 2.0)) <= beatEpsilon;
-            const auto alpha = isWholeBeat ? 0.48f : (isHalfBeat ? 0.34f : 0.26f);
-            const auto thickness = isWholeBeat ? 1.25f : 1.0f;
+            const auto isQuarterBeat = std::abs((beat * 4.0) - std::round(beat * 4.0)) <= beatEpsilon;
+            const auto alpha = (isWholeBeat ? 0.16f
+                                : isHalfBeat ? 0.10f
+                                : isQuarterBeat ? 0.07f
+                                : 0.05f) * intensity;
 
-            g.setColour(minorGridColour.withAlpha(alpha));
-            g.drawLine(x, static_cast<float>(verticalArea.getY()), x, static_cast<float>(verticalArea.getBottom()), thickness);
+            g.setColour((isWholeBeat ? beatGridColour : subdivisionGridColour).withAlpha(alpha));
+            g.drawLine(x, static_cast<float>(verticalArea.getY()), x, static_cast<float>(verticalArea.getBottom()), 1.0f);
+        }
+    };
+
+    // Ableton-style alternating section bands: every other bar-group gets a faint fill so the grid
+    // reads as columns, not just hairlines. This is what makes Live's timeline legible at a glance.
+    auto drawAlternatingBands = [&](juce::Rectangle<int> verticalArea, float intensity)
+    {
+        // Band width scales with zoom; keep the fill barely perceptible so it doesn't compete
+        // with the grid itself.
+        int bandBars = 1;
+        while (static_cast<double>(bandBars) * beatsPerBarInt * pixelsPerBeat < 96.0)
+            bandBars *= 2;
+        const int bandStepBeats = bandBars * beatsPerBarInt;
+        if (bandStepBeats <= 0)
+            return;
+
+        const auto firstBeat = (firstVisibleBeat / bandStepBeats) * bandStepBeats;
+        for (int beat = firstBeat; beat <= maxBeat; beat += bandStepBeats)
+        {
+            const auto x0 = beatToX(static_cast<double>(beat), gridArea);
+            const auto x1 = beatToX(static_cast<double>(beat + bandStepBeats), gridArea);
+            if (x1 < static_cast<float>(gridArea.getX()) || x0 > static_cast<float>(gridArea.getRight()))
+                continue;
+            const bool lightBand = ((beat / bandStepBeats) & 1) != 0;
+            g.setColour(lightBand ? juce::Colours::white.withAlpha(0.012f * intensity)
+                                  : juce::Colours::black.withAlpha(0.010f * intensity));
+            g.fillRect(juce::Rectangle<float>(x0, static_cast<float>(verticalArea.getY()),
+                                              x1 - x0, static_cast<float>(verticalArea.getHeight())));
         }
     };
 
     g.saveState();
     g.reduceClipRegion(markerLane);
-    drawSubdivisionGrid(rulerGridArea);
-    drawGridLayer(rulerGridArea, fineStepBeats, minorGridColour.withAlpha(0.30f), 1.0f);
-    drawGridLayer(rulerGridArea, barStepBeats, majorGridColour.withAlpha(0.46f), 1.0f);
-    drawGridLayer(rulerGridArea, majorStepBeats, majorGridColour.withAlpha(0.56f), 1.3f);
-    drawGridLayer(rulerGridArea, sectionStepBeats, majorGridColour.withAlpha(0.72f), 1.6f);
-    drawGridLayer(rulerGridArea, labelStepBeats, majorGridColour.withAlpha(0.82f), 1.7f, true);
+    drawAlternatingBands(rulerGridArea, 1.0f);
+    drawSubdivisionGrid(rulerGridArea, 1.0f);
+    drawHierarchicalGrid(rulerGridArea, 1.0f);
 
     const auto firstLabelBeat = (firstVisibleBeat / labelStepBeats) * labelStepBeats;
     for (int beat = firstLabelBeat; beat <= maxBeat; beat += labelStepBeats)
@@ -678,7 +771,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         const auto rowBounds = lane;
 
         auto trackNameArea = lane.removeFromLeft(trackHeaderWidth);
-        g.setColour(juce::Colours::white.withAlpha(0.095f));
+        g.setColour(juce::Colours::white.withAlpha(0.11f));
         g.drawHorizontalLine(rowBounds.getBottom(), static_cast<float>(rowBounds.getX()), static_cast<float>(rowBounds.getRight()));
 
         // Live output level for this track (0..1) — drives the header meter and the
@@ -688,6 +781,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             : 0.0f;
         const auto isAudible = trackLevel > 0.015f;
         const auto isSelectedTrack = (selectedTrackIndex.has_value() && *selectedTrackIndex == trackIndex)
+            || selectedTrackIndices.count(trackIndex) > 0
             || std::any_of(selectedClips.begin(), selectedClips.end(), [trackIndex](const auto& selected)
             {
                 return selected.trackIndex == trackIndex;
@@ -905,12 +999,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     g.reduceClipRegion(gridArea);
 
-    drawSubdivisionGrid(visibleTracksArea);
-    drawGridLayer(visibleTracksArea, fineStepBeats, minorGridColour.withAlpha(0.28f), 1.0f);
-    drawGridLayer(visibleTracksArea, barStepBeats, majorGridColour.withAlpha(0.42f), 1.0f);
-    drawGridLayer(visibleTracksArea, majorStepBeats, majorGridColour.withAlpha(0.56f), 1.2f);
-    drawGridLayer(visibleTracksArea, sectionStepBeats, majorGridColour.withAlpha(0.62f), 1.4f);
-    drawGridLayer(visibleTracksArea, labelStepBeats, majorGridColour.withAlpha(0.72f), 1.65f, true);
+    drawAlternatingBands(visibleTracksArea, 1.0f);    // Ableton-style column stripes, under the grid + clips
+    drawSubdivisionGrid(visibleTracksArea, 0.92f);
+    drawHierarchicalGrid(visibleTracksArea, 0.92f);   // grid reads across the full playlist height, just a hair under the ruler
 
     // Draw Clips
     for (int trackIndex = 0; trackIndex < trackCount; ++trackIndex)
@@ -1053,7 +1144,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                     g.restoreState();
                 }
             }
-            else if (! clip.midiNotes.empty() && clipBodyBounds.getWidth() > 12 && clipBodyBounds.getHeight() > 12)
+            else if (! clip.midiNotes.empty() && clipBodyBounds.getWidth() > 8 && clipBodyBounds.getHeight() > 6)
             {
                 int minPitch = clip.midiNotes.front().pitch;
                 int maxPitch = clip.midiNotes.front().pitch;
@@ -1506,6 +1597,54 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         }
     }
 
+    auto drawDropPreviewWaveform = [&](const juce::String& sourcePath, juce::Rectangle<int> previewBounds, juce::Colour colour)
+    {
+        if (sourcePath.isEmpty() || previewBounds.getWidth() <= 14 || previewBounds.getHeight() <= 14)
+            return;
+
+        const auto* peaks = getOrComputePeaks(sourcePath);
+        if (peaks == nullptr || peaks->minVals.empty())
+            return;
+
+        auto wave = previewBounds.reduced(10, 8);
+        if (wave.isEmpty())
+            return;
+
+        g.saveState();
+        g.reduceClipRegion(previewBounds);
+        g.setColour(colour.darker(0.34f).withAlpha(0.72f));
+
+        const auto centerY = static_cast<float>(wave.getCentreY());
+        const auto halfH = juce::jmax(1.0f, static_cast<float>(wave.getHeight()) * 0.43f);
+        const auto numBuckets = static_cast<int>(peaks->minVals.size());
+        const auto waveformWidth = juce::jmax(1, wave.getWidth());
+
+        for (int px = 0; px < waveformWidth; ++px)
+        {
+            const auto bStart = static_cast<int>(static_cast<double>(px) * numBuckets / waveformWidth);
+            const auto bEnd = static_cast<int>(static_cast<double>(px + 1) * numBuckets / waveformWidth);
+            const auto safeEnd = juce::jmax(bStart + 1, bEnd);
+
+            float minVal = 0.0f;
+            float maxVal = 0.0f;
+            for (int b = bStart; b < safeEnd && b < numBuckets; ++b)
+            {
+                minVal = juce::jmin(minVal, peaks->minVals[static_cast<size_t>(b)]);
+                maxVal = juce::jmax(maxVal, peaks->maxVals[static_cast<size_t>(b)]);
+            }
+
+            const auto x = static_cast<float>(wave.getX() + px);
+            const auto top = centerY + minVal * halfH;
+            const auto bottom = centerY + maxVal * halfH;
+            if (bottom - top >= 0.5f)
+                g.drawLine(x, top, x, bottom, 1.0f);
+            else
+                g.fillRect(x, centerY - 0.5f, 1.0f, 1.0f);
+        }
+
+        g.restoreState();
+    };
+
     if (browserDropPreviewBounds.has_value())
     {
         g.saveState();
@@ -1523,6 +1662,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
         g.setColour(browserDropPreviewColour.withAlpha(0.28f));
         g.fillRoundedRectangle(browserDropPreviewBounds->toFloat(), 10.0f);
+        drawDropPreviewWaveform(browserDropPreviewSourcePath, *browserDropPreviewBounds, browserDropPreviewColour);
         g.setColour(browserDropPreviewColour.withAlpha(0.95f));
         g.drawRoundedRectangle(browserDropPreviewBounds->toFloat(), 10.0f, 1.5f);
         if (browserDropSnapBeat.has_value())
@@ -1565,6 +1705,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
             g.setColour(preview.colour.withAlpha(0.30f));
             g.fillRoundedRectangle(boundsF, 9.0f);
+            drawDropPreviewWaveform(preview.sourcePath, preview.bounds, preview.colour);
             g.setColour(preview.colour.brighter(0.28f).withAlpha(0.94f));
             g.drawRoundedRectangle(boundsF.reduced(0.5f), 9.0f, 1.6f);
 
@@ -2052,6 +2193,9 @@ bool ArrangementTimelineComponent::loopToSelectedClip()
 
 void ArrangementTimelineComponent::resized()
 {
+    if (timelineAutoFitActive)
+        applyTimelineAutoFit();
+
     clampScrollOffsets();
     if (volumeEditorTrackIndex.has_value())
         trackVolumeInlineEditor.setBounds(getTrackVolumeValueBounds(*volumeEditorTrackIndex));
@@ -2239,8 +2383,30 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         }
 
         auto& track = project.getTracks()[static_cast<std::size_t>(trackHeaderHit->trackIndex)];
-        selectedTrackIndex = trackHeaderHit->trackIndex;
+        const auto clickedTrack = trackHeaderHit->trackIndex;
         setSingleSelection(std::nullopt);
+
+        // Multi-select track headers: Cmd toggles, Shift extends a range from the anchor,
+        // plain click selects just this one. Only for a plain body click (not on a control).
+        if (trackHeaderHit->control == TrackHeaderControl::none && event.mods.isCommandDown())
+        {
+            if (selectedTrackIndices.count(clickedTrack) > 0)
+                selectedTrackIndices.erase(clickedTrack);
+            else
+                selectedTrackIndices.insert(clickedTrack);
+        }
+        else if (trackHeaderHit->control == TrackHeaderControl::none && event.mods.isShiftDown()
+                 && selectedTrackIndex.has_value())
+        {
+            selectedTrackIndices.clear();
+            for (int i = juce::jmin(*selectedTrackIndex, clickedTrack); i <= juce::jmax(*selectedTrackIndex, clickedTrack); ++i)
+                selectedTrackIndices.insert(i);
+        }
+        else
+        {
+            selectedTrackIndices = { clickedTrack };
+        }
+        selectedTrackIndex = clickedTrack;
 
         if (trackHeaderHit->control == TrackHeaderControl::mute)
             track.muted = ! track.muted;
@@ -2362,6 +2528,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         if (! event.mods.isShiftDown())
         {
             selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
             setSingleSelection(std::nullopt);
             focusedSplitBeat.reset();
         }
@@ -2375,6 +2542,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     else if (tracksArea.contains(event.getPosition()) && selectedClip.has_value())
     {
         selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
         setSingleSelection(std::nullopt);
         focusedSplitBeat.reset();
     }
@@ -2569,8 +2737,12 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 
     if (dragState->mode == DragMode::move)
     {
+        // Only move to another track after a deliberate drag — a plain click (with a few
+        // pixels of jitter) must never teleport the clip to a neighbouring lane.
+        const auto draggedFarEnough = event.getDistanceFromDragStart() > 5;
         const auto hoveredTrackIndex = trackIndexFromY(event.getPosition().y);
-        if (dragState->clipItems.size() <= 1 && hoveredTrackIndex >= 0 && hoveredTrackIndex != dragState->clip.trackIndex)
+        if (draggedFarEnough && dragState->clipItems.size() <= 1
+            && hoveredTrackIndex >= 0 && hoveredTrackIndex != dragState->clip.trackIndex)
         {
             moveSelectedClipToTrack(hoveredTrackIndex);
         }
@@ -2839,6 +3011,7 @@ void ArrangementTimelineComponent::modifierKeysChanged(const juce::ModifierKeys&
 void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 {
     const auto clipGainHistoryCaptured = clipGainDragState.historyCaptured;
+    const auto wasBoxSelecting = selectionBoxState.active;
 
     inspectorResizeState.active = false;
     inspectorResizeState.trackIndex = -1;
@@ -2849,6 +3022,11 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
     loopSelectionState.reset();
     selectionBoxState.active = false;
 
+    // Box (marquee) selection only notifies ONCE, on release — notifying on every drag move
+    // made the host re-open/relayout the lower panels each frame (sampler/steps flickered).
+    if (wasBoxSelecting)
+        notifyClipSelectionChanged();
+
     if (clipGainHistoryCaptured && ! undoStack.empty() && ! hasTimelineChangedSince(undoStack.back()))
     {
         undoStack.pop_back();
@@ -2857,6 +3035,15 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
     if (dragState.has_value() && dragState->historyCaptured && ! undoStack.empty() && ! hasTimelineChangedSince(undoStack.back()))
     {
         undoStack.pop_back();
+    }
+
+    // A time-stretch / length edit just finished — tell the host so it re-preps warp live (the
+    // new speed is heard immediately, without stopping and replaying).
+    if (onClipWarpEdited && dragState.has_value()
+        && (dragState->mode == DragMode::stretchLeft || dragState->mode == DragMode::stretchRight
+            || dragState->mode == DragMode::resizeLeft || dragState->mode == DragMode::resizeRight))
+    {
+        onClipWarpEdited();
     }
 
     dragState.reset();
@@ -2898,6 +3085,13 @@ void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& even
             transport.setLoopEnabled(true);
         }
         repaint();
+        return;
+    }
+
+    // Double-click the beat ruler = zoom to fit all content to the width (Ableton "W").
+    if (rulerGridArea.contains(event.getPosition()))
+    {
+        zoomToFitContent();
         return;
     }
 
@@ -2980,15 +3174,23 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier, 0))
         return selectAllClips();
 
+    // W — zoom to fit all content to the width (like Ableton's Optimize Arrangement Width).
+    if (key == juce::KeyPress('w', 0, 0))
+    {
+        zoomToFitContent();
+        return true;
+    }
+
     if (selectedClip.has_value() && (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey))
     {
         return deleteSelectedClips();
     }
 
-    if (! selectedClip.has_value() && selectedTrackIndex.has_value()
+    if (! selectedClip.has_value()
+        && (! selectedTrackIndices.empty() || selectedTrackIndex.has_value())
         && (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey))
     {
-        deleteSelectedTrack();
+        deleteSelectedTracks();
         return true;
     }
 
@@ -3046,6 +3248,35 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
 
     if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
         return setTool(ToolMode::audition);
+
+    // ---- Keyboard clip relocation (Logic-style, no dragging) ----
+    // Alt+Up / Alt+Down: move the selected clip(s) one track up/down, keeping the time position.
+    if (key == juce::KeyPress(juce::KeyPress::upKey, juce::ModifierKeys::altModifier, 0)
+        && ! clipsToRelocate().empty())
+    {
+        nudgeSelectedClipsByTracks(-1);
+        return true;
+    }
+    if (key == juce::KeyPress(juce::KeyPress::downKey, juce::ModifierKeys::altModifier, 0)
+        && ! clipsToRelocate().empty())
+    {
+        nudgeSelectedClipsByTracks(+1);
+        return true;
+    }
+    // Alt+M: move the selected clip(s) onto the selected track header, keeping the time position.
+    if (key == juce::KeyPress('m', juce::ModifierKeys::altModifier, 0)
+        && selectedTrackIndex.has_value() && ! clipsToRelocate().empty())
+    {
+        moveSelectedClipsToSelectedTrack();
+        return true;
+    }
+    // Alt+P: move the selected clip(s) onto the playhead, on the same track(s).
+    if (key == juce::KeyPress('p', juce::ModifierKeys::altModifier, 0)
+        && ! clipsToRelocate().empty())
+    {
+        moveSelectedClipsToPlayhead();
+        return true;
+    }
 
     if (key != juce::KeyPress::returnKey || ! selectedClip.has_value())
         return false;
@@ -3204,6 +3435,7 @@ void ArrangementTimelineComponent::setSingleSelection(std::optional<SelectedClip
     selectedClip = clip;
     if (clip.has_value())
         selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
     selectedClips.clear();
 
     if (clip.has_value())
@@ -3292,7 +3524,8 @@ void ArrangementTimelineComponent::updateSelectionBox(const juce::Point<int>& po
     if (selectedClip.has_value())
         lastClickedClip = selectedClip;
 
-    notifyClipSelectionChanged();
+    // NB: no notifyClipSelectionChanged() here — the box drag updates the highlight via repaint
+    // only; the host is notified once on mouse-up so panels don't thrash during the drag.
 }
 
 void ArrangementTimelineComponent::createDragCopiesIfNeeded()
@@ -3538,6 +3771,11 @@ void ArrangementTimelineComponent::deleteSelectedTrack()
 
     pushUndoSnapshot();
     tracks.erase(tracks.begin() + trackIndex);
+    // Keep the audio engine's per-track instrument/insert slots aligned with the new track
+    // indices — otherwise a lower track's instrument keeps the wrong key and a held note,
+    // never receiving its note-off, rings forever.
+    if (onTrackDeleted)
+        onTrackDeleted(trackIndex);
     std::map<int, int> reindexedHeights;
     for (const auto& [index, height] : customTrackHeights)
     {
@@ -3548,6 +3786,53 @@ void ArrangementTimelineComponent::deleteSelectedTrack()
     }
     customTrackHeights = std::move(reindexedHeights);
     selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
+    selectedClip.reset();
+    selectedClips.clear();
+    lastClickedClip.reset();
+    notifyClipSelectionChanged();
+    hoverClip.reset();
+    dragState.reset();
+    clampScrollOffsets();
+    repaint();
+}
+
+void ArrangementTimelineComponent::deleteSelectedTracks()
+{
+    // Collect every selected track (the multi-select set, or the single anchor as a fallback).
+    std::vector<int> indices(selectedTrackIndices.begin(), selectedTrackIndices.end());
+    if (indices.empty() && selectedTrackIndex.has_value())
+        indices.push_back(*selectedTrackIndex);
+    if (indices.empty())
+        return;
+
+    // Delete highest index first so the lower indices (and each onTrackDeleted call) stay valid.
+    std::sort(indices.begin(), indices.end(), [](int a, int b) { return a > b; });
+
+    auto& tracks = project.getTracks();
+    pushUndoSnapshot();
+
+    for (const int trackIndex : indices)
+    {
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        tracks.erase(tracks.begin() + trackIndex);
+        if (onTrackDeleted)   // realign the audio engine's per-track instrument/insert slots
+            onTrackDeleted(trackIndex);
+
+        std::map<int, int> reindexedHeights;
+        for (const auto& [index, height] : customTrackHeights)
+        {
+            if (index < trackIndex)       reindexedHeights[index] = height;
+            else if (index > trackIndex)  reindexedHeights[index - 1] = height;
+        }
+        customTrackHeights = std::move(reindexedHeights);
+    }
+
+    selectedTrackIndices.clear();
+    selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
     selectedClip.reset();
     selectedClips.clear();
     lastClickedClip.reset();
@@ -3598,6 +3883,9 @@ void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event,
     {
         const auto previousScrollX = scrollX;
         scrollX -= horizontalDelta * 600.0;
+        if (std::abs(scrollX - previousScrollX) > 0.01)
+            timelineAutoFitActive = false;
+
         clampScrollOffsets();
 
         if (std::abs(scrollX - previousScrollX) > 0.01)
@@ -3742,7 +4030,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     const auto sampleEndRatio = juce::jlimit(sampleStartRatio + 0.001, 1.0, getPayloadDouble("sampleEndRatio", 1.0));
     const auto sampleTrimSpan = juce::jmax(0.001, sampleEndRatio - sampleStartRatio);
     const auto fallbackLengthBeats = fallbackClipLengthInBeats(*payload);
-    const auto analysis = analyzeImportedAudioClip(sourceFile, project.getTempoBpm(), project.getNumerator(), fallbackLengthBeats);
+    const auto analysis = cachedAnalyzeImportedAudioClip(sourceFile, project.getTempoBpm(), project.getNumerator(), fallbackLengthBeats);
     const auto minImportedLengthBeats = analysis.durationSeconds > 0.0 && analysis.durationSeconds < 1.2 && analysis.detectedBars == 0
         ? minimumOneShotClipLengthInBeats
         : minimumClipLengthInBeats;
@@ -3835,8 +4123,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(targetTrack.clips.size()) - 1 });
 
     clearBrowserDropPreview();
-    // Preserve the user's current timeline zoom on import/drop.
-    clampScrollOffsets();
+    ensureBeatVisible(droppedClip.startBeat + droppedClip.lengthInBeats);
     repaint();
 }
 
@@ -3848,7 +4135,7 @@ int ArrangementTimelineComponent::addAudioClipToTrack(const juce::File& file, in
 
     const auto numerator = juce::jmax(1, project.getNumerator());
     const auto fallbackLengthBeats = static_cast<double>(numerator);   // one bar if analysis fails
-    const auto analysis = analyzeImportedAudioClip(file, project.getTempoBpm(), numerator, fallbackLengthBeats);
+    const auto analysis = cachedAnalyzeImportedAudioClip(file, project.getTempoBpm(), numerator, fallbackLengthBeats);
     const auto lengthBeats = analysis.clipLengthInBeats;
     const auto clampedStart = juce::jlimit(0.0, juce::jmax(0.0, getTimelineEndBeats() - lengthBeats),
                                            juce::jmax(0.0, startBeat));
@@ -3887,9 +4174,51 @@ int ArrangementTimelineComponent::addAudioClipToTrack(const juce::File& file, in
     clip.signalAnalysisPending = analysis.needsSignalAnalysis;
     clip.gainNormalizationPending = false;
 
-    clampScrollOffsets();
+    ensureBeatVisible(clip.startBeat + clip.lengthInBeats);
     repaint();
     return static_cast<int>(targetTrack.clips.size()) - 1;
+}
+
+int ArrangementTimelineComponent::replaceSelectedAudioClipsSource(const juce::File& file)
+{
+    if (! file.existsAsFile() || selectedClips.empty())
+        return 0;
+
+    const auto numerator = juce::jmax(1, project.getNumerator());
+    const auto analysis = cachedAnalyzeImportedAudioClip(file, project.getTempoBpm(), numerator,
+                                                         static_cast<double>(numerator));
+    auto& tracks = project.getTracks();
+
+    bool capturedUndo = false;
+    int replaced = 0;
+    for (const auto& sel : selectedClips)
+    {
+        if (sel.trackIndex < 0 || sel.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+        auto& clips = tracks[static_cast<std::size_t>(sel.trackIndex)].clips;
+        if (sel.clipIndex < 0 || sel.clipIndex >= static_cast<int>(clips.size()))
+            continue;
+        auto& clip = clips[static_cast<std::size_t>(sel.clipIndex)];
+        if (clip.type != ClipType::audio)
+            continue;
+
+        if (! capturedUndo) { pushUndoSnapshot(); capturedUndo = true; }
+
+        // Swap the audio file but keep the clip's position, length and trim.
+        clip.sourcePath = file.getFullPathName();
+        clip.sourceDurationSeconds = analysis.durationSeconds;
+        clip.sourceBpm = analysis.sourceBpm;
+        clip.detectedBars = analysis.detectedBars;
+        clip.bpmGuessed = analysis.bpmGuessed;
+        clip.sourceKeyRoot = analysis.sourceKeyRoot;
+        clip.sourceKeyIsMinor = analysis.sourceKeyIsMinor;
+        clip.signalAnalysisPending = analysis.needsSignalAnalysis;
+        ++replaced;
+    }
+
+    if (replaced > 0)
+        repaint();
+    return replaced;
 }
 
 // ---- External files dragged in from Finder / the OS -------------------------
@@ -4039,7 +4368,7 @@ bool ArrangementTimelineComponent::importAudioFileAt(const juce::File& file,
         return false;
     }
 
-    const auto analysis = analyzeImportedAudioClip(file, project.getTempoBpm(), project.getNumerator(), 4.0);
+    const auto analysis = cachedAnalyzeImportedAudioClip(file, project.getTempoBpm(), project.getNumerator(), 4.0);
     const auto sourceLengthBeats = analysis.clipLengthInBeats;
     const auto minImportedLengthBeats = analysis.durationSeconds > 0.0 && analysis.durationSeconds < 1.2 && analysis.detectedBars == 0
         ? minimumOneShotClipLengthInBeats
@@ -4104,7 +4433,7 @@ bool ArrangementTimelineComponent::importAudioFileAt(const juce::File& file,
     droppedClip.gainNormalizationPending = false;
 
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(targetTrack.clips.size()) - 1 });
-    clampScrollOffsets();
+    ensureBeatVisible(droppedClip.startBeat + droppedClip.lengthInBeats);
     repaint();
     return true;
 }
@@ -4112,8 +4441,7 @@ bool ArrangementTimelineComponent::importAudioFileAt(const juce::File& file,
 void ArrangementTimelineComponent::ensureBeatVisible(double endBeat)
 {
     juce::ignoreUnused(endBeat);
-
-    // Keep imports and drops from changing the user's timeline zoom.
+    timelineAutoFitActive = false;
     clampScrollOffsets();
 }
 
@@ -4140,8 +4468,9 @@ void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double ver
     const auto focusTrackRatio = oldTrackHeight > 0.0 ? (scrollY + focusYInView) / oldTrackHeight : 0.5;
     if (std::abs(horizontalDelta) > 0.0001)
     {
+        timelineAutoFitActive = false;
         const auto zoomFactor = std::pow(1.2, horizontalDelta);
-        pixelsPerBeat = juce::jlimit(minPixelsPerBeat, maxPixelsPerBeat, pixelsPerBeat * zoomFactor);
+        pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, pixelsPerBeat * zoomFactor);
         scrollX = (focusBeat * pixelsPerBeat) - focusXInView;
     }
 
@@ -4194,6 +4523,10 @@ void ArrangementTimelineComponent::clampScrollOffsets()
     auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     
+    // Enforce the content-adaptive max-zoom-out floor here too, so the view fits the content on
+    // load / after edits (not only when the user actively zooms) — no fixed "sliver" view.
+    pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, pixelsPerBeat);
+
     const auto fullWidth = static_cast<double>(rulerGridArea.getWidth());
     const auto timelineWidth = getTimelineEndBeats() * pixelsPerBeat;
     const auto maxScroll = juce::jmax(0.0, timelineWidth - fullWidth);
@@ -4203,6 +4536,52 @@ void ArrangementTimelineComponent::clampScrollOffsets()
     const auto trackContentHeight = static_cast<double>(getTotalTrackHeight());
     const auto maxVerticalScroll = juce::jmax(0.0, trackContentHeight - visibleTrackHeight);
     scrollY = juce::jlimit(0.0, maxVerticalScroll, scrollY);
+}
+
+void ArrangementTimelineComponent::zoomToFitContent()
+{
+    timelineAutoFitActive = true;
+    applyTimelineAutoFit();
+    clampScrollOffsets();
+    repaint();
+}
+
+void ArrangementTimelineComponent::applyTimelineAutoFit()
+{
+    auto bounds = getTimelineContentBounds(*this);
+    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    rulerGridArea.removeFromLeft(trackHeaderWidth);
+    const auto viewportW = static_cast<double>(juce::jmax(1, rulerGridArea.getWidth()));
+
+    pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat,
+                                 viewportW / autoFitTimelineBeats());
+    scrollX = 0.0;
+}
+
+double ArrangementTimelineComponent::minZoomPixelsPerBeat() const noexcept
+{
+    auto bounds = getTimelineContentBounds(*this);
+    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    rulerGridArea.removeFromLeft(trackHeaderWidth);
+    const auto viewportW = static_cast<double>(juce::jmax(1, rulerGridArea.getWidth()));
+
+    // Max zoom-out fits the content with the same tail as auto-fit. Without this, the lower zoom
+    // bound clamps away the right-side breathing room on long clips.
+    const auto beatsPerBar   = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    const auto minVisible    = 64.0 * beatsPerBar;
+    const auto targetBeats   = juce::jmax(minVisible, autoFitTimelineBeats());
+    return juce::jmax(minPixelsPerBeat, viewportW / targetBeats);
+}
+
+double ArrangementTimelineComponent::autoFitTimelineBeats() const noexcept
+{
+    const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    const auto contentBeats = project.getContentEndInBeats();
+    const auto marginBeats = contentBeats > 0.0 ? juce::jmax(8.0 * beatsPerBar, contentBeats * 0.08) : 0.0;
+    // Live's max zoom-out does not resize the whole arrangement to the dropped sample; it
+    // keeps the current density and only leaves a modest tail to the right of long content.
+    const auto defaultVisibleBeats = 64.0 * beatsPerBar;
+    return juce::jmax(defaultVisibleBeats, contentBeats + marginBeats);
 }
 
 double ArrangementTimelineComponent::getTimelineEndBeats() const noexcept
@@ -4220,16 +4599,29 @@ int ArrangementTimelineComponent::getLaneHeightForTrack(int trackIndex) const no
     if (fitTrackLanesToVisibleArea)
     {
         int visibleTrackCount = 0;
+        int visiblePosition   = 0;   // this track's order among the visible ones
         const auto trackCount = static_cast<int>(project.getTracks().size());
         for (int index = 0; index < trackCount; ++index)
             if (! isTrackHidden(index))
+            {
+                if (index < trackIndex)
+                    ++visiblePosition;
                 ++visibleTrackCount;
+            }
 
         if (visibleTrackCount > 0)
         {
-            const auto availableHeight = getVisibleTrackAreaBounds(*this).getHeight();
-            const auto fittedHeight = availableHeight / visibleTrackCount;
-            return juce::jlimit(minimumLaneHeight, defaultLaneHeight, fittedHeight);
+            const auto availableHeight = juce::jmax(0, getVisibleTrackAreaBounds(*this).getHeight());
+            // Distribute the height EXACTLY: base share for everyone, and the integer
+            // remainder spread one px at a time across the first `remainder` lanes so the
+            // lanes sum to the available height with no leftover and, crucially, no overflow
+            // (which previously pushed the bottom track under the open panel). We deliberately
+            // do NOT clamp up to minimumLaneHeight here — fitting all tracks takes priority —
+            // but we cap at defaultLaneHeight so a handful of tracks don't balloon.
+            const auto base      = availableHeight / visibleTrackCount;
+            const auto remainder = availableHeight % visibleTrackCount;
+            const auto share     = base + (visiblePosition < remainder ? 1 : 0);
+            return juce::jmax(1, juce::jmin(defaultLaneHeight, share));
         }
     }
 
@@ -4383,6 +4775,165 @@ void ArrangementTimelineComponent::moveSelectedClipToTrack(int targetTrackIndex)
     if (! dragState->clipItems.empty())
         dragState->clipItems.front().clip = dragState->clip;
     setSingleSelection(dragState->clip);
+}
+
+std::vector<ArrangementTimelineComponent::SelectedClip>
+ArrangementTimelineComponent::clipsToRelocate() const
+{
+    if (! selectedClips.empty())
+        return selectedClips;
+    if (lastClickedClip.has_value())
+        return { *lastClickedClip };
+    return {};
+}
+
+std::vector<ArrangementTimelineComponent::SelectedClip>
+ArrangementTimelineComponent::relocateClips(std::vector<std::tuple<int, int, int, double>> moves)
+{
+    auto& tracks = project.getTracks();
+
+    // Snapshot the moving clips first (copies), because erasing shifts indices.
+    struct Pending { TimelineClip clip; int targetTrack; };
+    std::vector<Pending> pending;
+    for (const auto& [srcTrack, srcIdx, dstTrack, newStart] : moves)
+    {
+        if (srcTrack < 0 || srcTrack >= static_cast<int>(tracks.size())) continue;
+        auto& clips = tracks[static_cast<std::size_t>(srcTrack)].clips;
+        if (srcIdx < 0 || srcIdx >= static_cast<int>(clips.size())) continue;
+        auto clip = clips[static_cast<std::size_t>(srcIdx)];
+        clip.startBeat = juce::jmax(0.0, newStart);
+        pending.push_back({ std::move(clip), dstTrack });
+    }
+
+    // Erase originals, highest index first within each track so earlier indices stay valid.
+    std::sort(moves.begin(), moves.end(), [](const auto& a, const auto& b) {
+        if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
+        return std::get<1>(a) > std::get<1>(b);
+    });
+    for (const auto& [srcTrack, srcIdx, dstTrack, newStart] : moves)
+    {
+        juce::ignoreUnused(dstTrack, newStart);
+        if (srcTrack < 0 || srcTrack >= static_cast<int>(tracks.size())) continue;
+        auto& clips = tracks[static_cast<std::size_t>(srcTrack)].clips;
+        if (srcIdx >= 0 && srcIdx < static_cast<int>(clips.size()))
+            clips.erase(clips.begin() + srcIdx);
+    }
+
+    std::vector<SelectedClip> newSelection;
+    for (auto& p : pending)
+    {
+        auto& dst = tracks[static_cast<std::size_t>(p.targetTrack)].clips;
+        dst.push_back(std::move(p.clip));
+        newSelection.push_back(SelectedClip { p.targetTrack, static_cast<int>(dst.size()) - 1 });
+    }
+    return newSelection;
+}
+
+void ArrangementTimelineComponent::nudgeSelectedClipsByTracks(int delta)
+{
+    const auto src = clipsToRelocate();
+    if (src.empty() || delta == 0)
+        return;
+
+    auto& tracks = project.getTracks();
+    const auto trackCount = static_cast<int>(tracks.size());
+
+    std::vector<std::tuple<int, int, int, double>> moves;
+    for (const auto& c : src)
+    {
+        const auto dst = c.trackIndex + delta;
+        if (dst < 0 || dst >= trackCount) return;   // don't move any if one would fall off the ends
+        if (c.trackIndex < 0 || c.trackIndex >= trackCount) return;
+        const auto& clip = tracks[static_cast<std::size_t>(c.trackIndex)].clips[static_cast<std::size_t>(c.clipIndex)];
+        if (! canClipLiveOnTrack(clip, dst)) return;   // type mismatch → cancel the whole move
+        moves.emplace_back(c.trackIndex, c.clipIndex, dst, clip.startBeat);
+    }
+
+    pushUndoSnapshot();
+    const auto newSel = relocateClips(std::move(moves));
+    selectedClips = newSel;
+    selectedClip = newSel.empty() ? std::optional<SelectedClip>{} : std::optional<SelectedClip>{ newSel.back() };
+    lastClickedClip = selectedClip;
+    selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
+    clampScrollOffsets();
+    notifyClipSelectionChanged();
+    repaint();
+}
+
+void ArrangementTimelineComponent::moveSelectedClipsToSelectedTrack()
+{
+    if (! selectedTrackIndex.has_value())
+        return;
+    const auto target = *selectedTrackIndex;
+    const auto src = clipsToRelocate();
+    if (src.empty())
+        return;
+
+    auto& tracks = project.getTracks();
+    if (target < 0 || target >= static_cast<int>(tracks.size()))
+        return;
+
+    std::vector<std::tuple<int, int, int, double>> moves;
+    for (const auto& c : src)
+    {
+        if (c.trackIndex < 0 || c.trackIndex >= static_cast<int>(tracks.size())) continue;
+        if (c.trackIndex == target) continue;   // already there
+        const auto& clip = tracks[static_cast<std::size_t>(c.trackIndex)].clips[static_cast<std::size_t>(c.clipIndex)];
+        if (! canClipLiveOnTrack(clip, target)) return;   // type mismatch → cancel
+        moves.emplace_back(c.trackIndex, c.clipIndex, target, clip.startBeat);
+    }
+    if (moves.empty())
+        return;
+
+    pushUndoSnapshot();
+    const auto newSel = relocateClips(std::move(moves));
+    selectedClips = newSel;
+    selectedClip = newSel.empty() ? std::optional<SelectedClip>{} : std::optional<SelectedClip>{ newSel.back() };
+    lastClickedClip = selectedClip;
+    selectedTrackIndex.reset();
+    selectedTrackIndices.clear();
+    clampScrollOffsets();
+    notifyClipSelectionChanged();
+    repaint();
+}
+
+void ArrangementTimelineComponent::moveSelectedClipsToPlayhead()
+{
+    const auto src = clipsToRelocate();
+    if (src.empty())
+        return;
+
+    auto& tracks = project.getTracks();
+    const auto playhead = juce::jmax(0.0, transport.getPlayheadBeat());
+
+    // Anchor on the earliest selected clip so multiple clips keep their relative spacing.
+    double anchor = std::numeric_limits<double>::max();
+    for (const auto& c : src)
+        if (c.trackIndex >= 0 && c.trackIndex < static_cast<int>(tracks.size())
+            && c.clipIndex >= 0 && c.clipIndex < static_cast<int>(tracks[static_cast<std::size_t>(c.trackIndex)].clips.size()))
+            anchor = juce::jmin(anchor, tracks[static_cast<std::size_t>(c.trackIndex)].clips[static_cast<std::size_t>(c.clipIndex)].startBeat);
+    if (anchor == std::numeric_limits<double>::max())
+        return;
+
+    std::vector<std::tuple<int, int, int, double>> moves;
+    for (const auto& c : src)
+    {
+        if (c.trackIndex < 0 || c.trackIndex >= static_cast<int>(tracks.size())) continue;
+        const auto& clip = tracks[static_cast<std::size_t>(c.trackIndex)].clips[static_cast<std::size_t>(c.clipIndex)];
+        moves.emplace_back(c.trackIndex, c.clipIndex, c.trackIndex, playhead + (clip.startBeat - anchor));
+    }
+    if (moves.empty())
+        return;
+
+    pushUndoSnapshot();
+    const auto newSel = relocateClips(std::move(moves));
+    selectedClips = newSel;
+    selectedClip = newSel.empty() ? std::optional<SelectedClip>{} : std::optional<SelectedClip>{ newSel.back() };
+    lastClickedClip = selectedClip;
+    clampScrollOffsets();
+    notifyClipSelectionChanged();
+    repaint();
 }
 
 bool ArrangementTimelineComponent::splitClipAtBeat(int trackIndex, int clipIndex, double splitBeat)
@@ -4711,6 +5262,7 @@ void ArrangementTimelineComponent::clearBrowserDropPreview()
 {
     browserDropPreviewBounds.reset();
     browserDropSnapBeat.reset();
+    browserDropPreviewSourcePath = {};
     browserDropCreatesNewTrack = false;
     browserAppendActive = false;   // the open lane animates closed via the timer
     repaint();
@@ -4769,7 +5321,8 @@ void ArrangementTimelineComponent::updateExternalFileDropPreview(const juce::Str
     for (int i = 0; i < maxPreviewCount; ++i)
     {
         const juce::File file(audioFiles[i]);
-        const auto analysis = analyzeImportedAudioClip(file, project.getTempoBpm(), project.getNumerator(), 4.0);
+        getOrComputePeaks(file.getFullPathName());
+        const auto analysis = cachedAnalyzeImportedAudioClip(file, project.getTempoBpm(), project.getNumerator(), 4.0);
         const auto minPreviewLengthBeats = analysis.durationSeconds > 0.0 && analysis.durationSeconds < 1.2 && analysis.detectedBars == 0
             ? minimumOneShotClipLengthInBeats
             : minimumClipLengthInBeats;
@@ -4804,6 +5357,7 @@ void ArrangementTimelineComponent::updateExternalFileDropPreview(const juce::Str
         externalFileDropPreviews.push_back(FileDropPreview {
             clipBounds,
             file.getFileNameWithoutExtension(),
+            file.getFullPathName(),
             colour,
             createNewTrack
         });
@@ -4884,7 +5438,8 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
 
     const auto sourceFile = juce::File(payload->getProperty("path").toString());
     const auto fallbackLengthBeats = fallbackClipLengthInBeats(*payload);
-    const auto analysis = analyzeImportedAudioClip(sourceFile, project.getTempoBpm(), project.getNumerator(), fallbackLengthBeats);
+    getOrComputePeaks(sourceFile.getFullPathName());
+    const auto analysis = cachedAnalyzeImportedAudioClip(sourceFile, project.getTempoBpm(), project.getNumerator(), fallbackLengthBeats);
 
     const auto previewDouble = [&](const char* prop, double fb)
     {
@@ -4936,6 +5491,7 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
     };
 
     browserDropPreviewColour = previewClip.colour;
+    browserDropPreviewSourcePath = sourceFile.getFullPathName();
     browserDropCreatesNewTrack = createNewTrack;
     browserDropSnapBeat = startBeat;
     if (useBottomDropLane)

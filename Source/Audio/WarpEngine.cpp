@@ -717,53 +717,46 @@ LoopType inferLoopType(const juce::String& sourcePath,
 
 double parseBpmFromFileName(const juce::File& file)
 {
-    auto text = file.getFileNameWithoutExtension().toLowerCase();
-    const auto bpmIndex = text.indexOf("bpm");
-    if (bpmIndex < 0)
+    const auto text = file.getFileNameWithoutExtension().toLowerCase();
+
+    // Several sources, in priority order — a source only wins if the earlier ones didn't answer.
+
+    // Source 1 (most reliable): an explicit "… 120 bpm" marker.
+    if (const auto bpmIndex = text.indexOf("bpm"); bpmIndex >= 0)
     {
-        if (! (text.contains("loop") || text.contains("break") || text.contains("drum") || text.contains("beat")))
-            return 0.0;
-
-        double bestBpm = 0.0;
-        int bestDigitCount = 0;
-        juce::String currentNumber;
-
-        const auto textWithDelimiter = text + " ";
-        for (int i = 0; i < textWithDelimiter.length(); ++i)
-        {
-            const auto character = textWithDelimiter[i];
-            if (juce::CharacterFunctions::isDigit(character))
-            {
-                currentNumber += juce::String::charToString(character);
-                continue;
-            }
-
-            if (currentNumber.isNotEmpty())
-            {
-                const auto candidateBpm = currentNumber.getDoubleValue();
-                if (candidateBpm >= 40.0 && candidateBpm <= 260.0 && currentNumber.length() >= bestDigitCount)
-                {
-                    bestBpm = candidateBpm;
-                    bestDigitCount = currentNumber.length();
-                }
-
-                currentNumber.clear();
-            }
-        }
-
-        return bestBpm;
+        auto start = bpmIndex - 1;
+        while (start >= 0 && (juce::CharacterFunctions::isDigit(text[start]) || text[start] == ' ' || text[start] == '_' || text[start] == '-'))
+            --start;
+        const auto numberText = text.substring(start + 1, bpmIndex).retainCharacters("0123456789").trim();
+        const auto bpm = numberText.getDoubleValue();
+        if (bpm >= 40.0 && bpm <= 260.0)
+            return bpm;
+        // else: no valid number by the marker — fall through to the next source.
     }
 
-    auto start = bpmIndex - 1;
-    while (start >= 0 && (juce::CharacterFunctions::isDigit(text[start]) || text[start] == ' ' || text[start] == '_' || text[start] == '-'))
-        --start;
-
-    auto numberText = text.substring(start + 1, bpmIndex).retainCharacters("0123456789").trim();
-    if (numberText.isEmpty())
-        return 0.0;
-
-    const auto bpm = numberText.getDoubleValue();
-    return (bpm >= 40.0 && bpm <= 260.0) ? bpm : 0.0;
+    // Source 2 (fallback): the most plausible bare number (40–260) anywhere in the name, so files
+    // like "Warp 86" / "Track 128" read as tempo (used as the warp source BPM). Prefers the longest
+    // number; out-of-range numbers (e.g. "808", "2024") are ignored.
+    double bestBpm = 0.0;
+    int bestDigitCount = 0;
+    juce::String currentNumber;
+    const auto scan = text + " ";
+    for (int i = 0; i < scan.length(); ++i)
+    {
+        const auto c = scan[i];
+        if (juce::CharacterFunctions::isDigit(c)) { currentNumber += juce::String::charToString(c); continue; }
+        if (currentNumber.isNotEmpty())
+        {
+            const auto candidate = currentNumber.getDoubleValue();
+            if (candidate >= 40.0 && candidate <= 260.0 && currentNumber.length() >= bestDigitCount)
+            {
+                bestBpm = candidate;
+                bestDigitCount = currentNumber.length();
+            }
+            currentNumber.clear();
+        }
+    }
+    return bestBpm;
 }
 
 // ---- Real signal analysis (used when the filename gives no answer) ----------
@@ -1140,6 +1133,10 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
 
     // Pass 1: assume the file is a whole number of bars (exact for clean loops).
     constexpr double neutralCenter = 128.0;
+    // Bias the bar-count guess toward the PROJECT tempo (producers work at a set tempo, and warp
+    // maps the loop there anyway) instead of a hard-coded 128 — a much better prior than assuming
+    // every un-named loop is ~128. Falls back to 128 only if the project tempo is unknown.
+    const auto biasCenter = projectTempoBpm > 0.0 ? projectTempoBpm : neutralCenter;
     constexpr int commonLoopBars[] = { 1, 2, 3, 4, 6, 8, 12, 16, 24, 32 };
     double bestBpm = 0.0;
     int bestBars = 0;
@@ -1149,7 +1146,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
         const auto candidateBpm = (bars * beatsPerBar / result.durationSeconds) * 60.0;
         if (candidateBpm < 70.0 || candidateBpm > 180.0)
             continue;
-        const auto score = std::abs(candidateBpm - neutralCenter);
+        const auto score = std::abs(candidateBpm - biasCenter);
         if (score < bestScore) { bestScore = score; bestBpm = candidateBpm; bestBars = bars; }
     }
 

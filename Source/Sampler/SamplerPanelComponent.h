@@ -127,13 +127,20 @@ private:
 
     // Interactive knobs (Ableton-style): click to select, then drag or use up/down
     // arrows to change the value.
-    enum class Knob { none, transpose, root, gain };
+    enum class Knob { none, transpose, root, gain, attack, decay, sustain, release };
     juce::Rectangle<int> transposeKnobBounds;
     juce::Rectangle<int> rootKnobBounds;
     juce::Rectangle<int> gainKnobBounds;
+    juce::Rectangle<int> attackKnobBounds;
+    juce::Rectangle<int> decayKnobBounds;
+    juce::Rectangle<int> sustainKnobBounds;
+    juce::Rectangle<int> releaseKnobBounds;
+    // Max seconds for the A/D/R knobs (sustain is 0..1).
+    static constexpr double kMaxEnvSeconds = 2.0;
     Knob   selectedKnob { Knob::none };
     int    knobDragStartY { 0 };
     double knobDragStartValue { 0.0 };
+    juce::Rectangle<int> closeButtonBounds;   // X button in the header that closes the panel
 
     void   nudgeSelectedKnob(int direction, bool large);  // arrow keys: ±1 step (×12 with Shift)
 

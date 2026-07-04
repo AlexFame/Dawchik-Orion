@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -27,8 +28,18 @@ public:
     std::function<void(int, int)> onMidiClipDoubleClick;
     std::function<void(int, int)> onAudioClipDoubleClick;
     std::function<void(int, int)> onClipSelectionChanged;
+    // Fired when a time-stretch / length edit finishes, so the host can re-prep warp live (while
+    // playing) — the new speed is heard without stopping and replaying.
+    std::function<void()> onClipWarpEdited;
     std::function<void(int)> onTrackHeaderDoubleClick;
     std::function<void(int)> onTrackHeaderRightClick;
+    // Fired right after a track is removed from the project (passes the removed index) so the
+    // host can keep the audio engine's per-track slots aligned (reindex instruments/inserts).
+    std::function<void(int)> onTrackDeleted;
+    // Fired after an undo/redo whose restored state changed the per-track instrument layout
+    // (track added/removed/reordered). The host re-syncs the engine's instrument slots with
+    // the restored project so a hosted plugin can't stay keyed to the wrong track.
+    std::function<void()> onInstrumentLayoutChangedByHistory;
     // Fired when the instrument button on a MIDI track header is clicked. The host opens
     // the plugin editor if an instrument is loaded, or the instrument picker if not.
     std::function<void(int)> onTrackInstrumentClicked;
@@ -77,6 +88,9 @@ public:
     // analysis / auto-warp logic as a browser drop. Returns the new clip index, or -1.
     // (Used by double-click-to-sampler so the sample also lands in the playlist.)
     int addAudioClipToTrack(const juce::File& file, int trackIndex, double startBeat);
+    // Replaces the audio source of every selected AUDIO clip with `file` (keeps each clip's
+    // position/length, re-analyses tempo/key). Returns how many clips were replaced.
+    int replaceSelectedAudioClipsSource(const juce::File& file);
     // Records an undo checkpoint of the current timeline state (used by the recorder so
     // a finished take can be removed with Cmd+Z).
     void captureUndoSnapshot();
@@ -289,6 +303,7 @@ private:
     {
         juce::Rectangle<int> bounds;
         juce::String label;
+        juce::String sourcePath;
         juce::Colour colour;
         bool createsNewTrack { false };
     };
@@ -334,6 +349,15 @@ private:
     double snapClipCreationBeat(double beat) const noexcept;
     bool canClipLiveOnTrack(const TimelineClip& clip, int trackIndex) const noexcept;
     void moveSelectedClipToTrack(int targetTrackIndex);
+    // Keyboard relocation (Logic-style: no dragging). The clips to act on are the current
+    // selection, or the last-clicked clip if a track header selection cleared it.
+    std::vector<SelectedClip> clipsToRelocate() const;
+    // Core mover: each move is {sourceTrack, sourceClipIndex, targetTrack, newStartBeat}. Removes
+    // originals and re-adds them on the targets; returns the clips' new positions for reselection.
+    std::vector<SelectedClip> relocateClips(std::vector<std::tuple<int, int, int, double>> moves);
+    void nudgeSelectedClipsByTracks(int delta);        // move up/down N tracks, keep the time position
+    void moveSelectedClipsToSelectedTrack();           // move onto the selected track header, keep time
+    void moveSelectedClipsToPlayhead();                // move onto the playhead, same track(s)
     // Splits a clip at an absolute timeline beat into two clips (non-destructive).
     // Returns true if a split happened. splitBeat must lie strictly inside the clip.
     bool splitClipAtBeat(int trackIndex, int clipIndex, double splitBeat);
@@ -359,10 +383,17 @@ private:
     bool hasTimelineChangedSince(const TimelineSnapshot& snapshot) const noexcept;
     void clampScrollOffsets();
     void adjustZoom(double horizontalDelta, double verticalDelta, std::optional<juce::Point<int>> focusPoint);
-    // Zooms out (only when needed) so the given end-beat is visible with some margin.
-    // Used after dropping a clip so the user immediately sees its full extent.
+    // Used after adding/dropping a clip to keep scroll bounds valid without changing the
+    // user's current horizontal zoom. Max zoom-out handles content width separately.
     void ensureBeatVisible(double endBeat);
     double getTimelineEndBeats() const noexcept;
+    // Content-adaptive max-zoom-out floor: the smallest pixels-per-beat allowed, so zooming out
+    // fits the content (+margin) into the viewport instead of a tiny sliver in a huge empty grid.
+    double minZoomPixelsPerBeat() const noexcept;
+    double autoFitTimelineBeats() const noexcept;
+    void applyTimelineAutoFit();
+    // Ableton "Optimize Arrangement Width" (W / double-click ruler): fit all content to the width.
+    void zoomToFitContent();
     int getLaneHeightForTrack(int trackIndex) const noexcept;
     int getTrackTopForIndex(int trackIndex) const noexcept;
     int getTotalTrackHeight() const noexcept;
@@ -391,6 +422,7 @@ private:
     void showAddTrackMenu();
     void createMidiClipAt(int trackIndex, double startBeat);
     void deleteSelectedTrack();
+    void deleteSelectedTracks();   // remove every track selected via its header (Cmd/Shift-click)
     juce::Rectangle<int> getAddTrackButtonBounds() const noexcept;
     juce::Rectangle<int> getTrackVolumeValueBounds(int trackIndex) const noexcept;
     void updateTrackVolumeFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x);
@@ -415,7 +447,8 @@ private:
     TransportEngine& transport;
     std::optional<SelectedClip> selectedClip;
     std::optional<SelectedClip> lastClickedClip;
-    std::optional<int> selectedTrackIndex;
+    std::optional<int> selectedTrackIndex;   // anchor / primary selected track
+    std::set<int> selectedTrackIndices;      // all selected track headers (Cmd/Shift-click)
     std::vector<SelectedClip> selectedClips;
     std::optional<DragState> dragState;
     std::optional<LoopSelectionState> loopSelectionState;
@@ -437,6 +470,7 @@ private:
     double verticalZoom { 1.0 };
     double scrollX { 0.0 };
     double scrollY { 0.0 };
+    bool timelineAutoFitActive { true };
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };
     int trackHeaderWidth { 214 };
@@ -444,6 +478,7 @@ private:
     std::map<int, int> customTrackHeights;
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;
     std::optional<double> browserDropSnapBeat;
+    juce::String browserDropPreviewSourcePath;
     juce::Colour browserDropPreviewColour { orion::theme::warm::red };
     bool browserDropCreatesNewTrack { false };
     std::vector<FileDropPreview> externalFileDropPreviews;

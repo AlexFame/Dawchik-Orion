@@ -57,6 +57,7 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDoubleClick(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
     void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
@@ -86,6 +87,8 @@ private:
     void zoomWaveformAt(int x, double zoomFactor);
     void updateSampleMarker(WaveDragMode mode, int x, bool shouldSeek);
     void setTransposeSemitones(int semitones);
+    void beginPitchTextEntry();      // double-click PITCH to type a value
+    void commitPitchTextEntry();
     void beginTrimmedClipDrag(const juce::MouseEvent& event);
     void setTransportButtonStyle(juce::Button& button);
 
@@ -96,6 +99,7 @@ private:
     juce::TextButton transposeDownButton { "-" };
     juce::TextButton transposeUpButton { "+" };
     juce::Slider gainSlider;
+    std::unique_ptr<juce::TextEditor> pitchEditor;   // inline numeric entry for PITCH
     juce::Rectangle<int> lastWaveformBounds;
     juce::Rectangle<int> pitchValueBounds;
     WaveDragMode waveDragMode { WaveDragMode::none };

@@ -237,10 +237,19 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
         : juce::String("No sample loaded");
     g.setColour(accentColour);
     g.setFont(juce::FontOptions(17.0f, juce::Font::bold));
-    g.drawText(sampleName, headerContent.removeFromLeft(headerContent.getWidth() - 120), juce::Justification::centredLeft, true);
-    g.setColour(mutedText);
-    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
-    g.drawText("ESC CLOSE", headerContent, juce::Justification::centredRight);
+    // Round X close button at the far right of the header (also closes on ESC).
+    auto closeArea = headerContent.removeFromRight(28);
+    closeButtonBounds = closeArea.withSizeKeepingCentre(24, 24);
+    const auto closeF = closeButtonBounds.toFloat();
+    g.setColour(juce::Colours::white.withAlpha(0.10f));
+    g.fillEllipse(closeF);
+    g.setColour(juce::Colours::white.withAlpha(0.75f));
+    const auto x = closeF.reduced(7.5f);
+    g.drawLine(x.getX(), x.getY(), x.getRight(), x.getBottom(), 1.8f);
+    g.drawLine(x.getX(), x.getBottom(), x.getRight(), x.getY(), 1.8f);
+
+    g.drawText(sampleName, headerContent.removeFromLeft(juce::jmax(0, headerContent.getWidth() - 12)),
+               juce::Justification::centredLeft, true);
 
     auto content = panel.reduced(18);
     auto leftModeColumn = content.removeFromLeft(112);
@@ -481,26 +490,45 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
              selectedKnob == Knob::gain, editingKnob == Knob::gain);
 
     controlGrid.removeFromTop(18);
-    auto envelope = controlGrid.removeFromTop(104);
+    auto envelope = controlGrid.removeFromTop(150);
     g.setColour(controlBackground);
     g.fillRoundedRectangle(envelope.toFloat(), 12.0f);
     auto envelopeContent = envelope.reduced(14);
     g.setColour(juce::Colours::white.withAlpha(0.9f));
     g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText("Playback", envelopeContent.removeFromTop(20), juce::Justification::centredLeft);
-    g.setColour(mutedText);
-    g.setFont(juce::FontOptions(12.0f, juce::Font::plain));
-    g.drawText("Mode: " + modeName, envelopeContent.removeFromTop(20), juce::Justification::centredLeft);
-    g.drawText(track != nullptr && track->samplerMode == SamplerPlaybackMode::classic
-                   ? "Voices: Poly / chords"
-                   : "Voices: Mono retrigger",
-               envelopeContent.removeFromTop(20),
-               juce::Justification::centredLeft);
-    g.drawText(track != nullptr && track->samplerMode == SamplerPlaybackMode::slice
-                   ? "Slices: " + juce::String(track->samplerSliceCount)
-                   : "Warp: " + juce::String(track != nullptr && track->samplerWarpEnabled ? "On" : "Off"),
-               envelopeContent.removeFromTop(20),
-               juce::Justification::centredLeft);
+    g.drawText("Amp Envelope", envelopeContent.removeFromTop(18), juce::Justification::centredLeft);
+    envelopeContent.removeFromTop(2);
+
+    const auto attackVal  = track != nullptr ? track->samplerAmpAttackSeconds  : 0.0;
+    const auto decayVal   = track != nullptr ? track->samplerAmpDecaySeconds   : 0.0;
+    const auto sustainVal = track != nullptr ? track->samplerAmpSustain        : 1.0;
+    const auto releaseVal = track != nullptr ? track->samplerAmpReleaseSeconds : 0.0;
+
+    const auto secText = [](double s)
+    {
+        return s < 1.0 ? juce::String(juce::roundToInt(s * 1000.0)) + " ms"
+                       : juce::String(s, 2) + " s";
+    };
+
+    auto adsrRow = envelopeContent.removeFromTop(96);
+    const auto knobW = juce::jmax(48, (adsrRow.getWidth() - 18) / 4);   // 4 knobs + small gaps
+    const auto envNorm = [](double s) { return juce::jlimit(0.0f, 1.0f, static_cast<float>(s / kMaxEnvSeconds)); };
+
+    attackKnobBounds = adsrRow.removeFromLeft(knobW);
+    drawKnob(g, attackKnobBounds, "Attack", secText(attackVal), envNorm(attackVal),
+             selectedKnob == Knob::attack, editingKnob == Knob::attack);
+    adsrRow.removeFromLeft(6);
+    decayKnobBounds = adsrRow.removeFromLeft(knobW);
+    drawKnob(g, decayKnobBounds, "Decay", secText(decayVal), envNorm(decayVal),
+             selectedKnob == Knob::decay, editingKnob == Knob::decay);
+    adsrRow.removeFromLeft(6);
+    sustainKnobBounds = adsrRow.removeFromLeft(knobW);
+    drawKnob(g, sustainKnobBounds, "Sustain", juce::String(juce::roundToInt(sustainVal * 100.0)) + "%",
+             static_cast<float>(sustainVal), selectedKnob == Knob::sustain, editingKnob == Knob::sustain);
+    adsrRow.removeFromLeft(6);
+    releaseKnobBounds = adsrRow.removeFromLeft(knobW);
+    drawKnob(g, releaseKnobBounds, "Release", secText(releaseVal), envNorm(releaseVal),
+             selectedKnob == Knob::release, editingKnob == Knob::release);
 }
 
 void SamplerPanelComponent::ensureWaveformPeaksFor(const juce::String& sourcePath)
@@ -628,6 +656,47 @@ void SamplerPanelComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<int>
 
     g.setColour(accentColour.withAlpha(0.18f));
     g.drawHorizontalLine(waveInner.getCentreY(), static_cast<float>(waveInner.getX()), static_cast<float>(waveInner.getRight()));
+
+    // Amp-envelope overlay: a contour over the waveform that visibly changes as the ADSR knobs
+    // are turned, mapped onto the sample's own timeline (so attack/decay/release read directly).
+    const auto duration = track != nullptr ? track->samplerSourceDurationSeconds : 0.0;
+    if (track != nullptr && duration > 1.0e-4)
+    {
+        const double A = track->samplerAmpAttackSeconds;
+        const double D = track->samplerAmpDecaySeconds;
+        const double S = juce::jlimit(0.0, 1.0, track->samplerAmpSustain);
+        const double R = track->samplerAmpReleaseSeconds;
+        const double relStart = juce::jmax(0.0, duration - R);
+
+        const auto envAt = [&](double sec) -> double
+        {
+            double lvl;
+            if (A > 0.0 && sec < A)            lvl = sec / A;
+            else if (D > 0.0 && sec < A + D)   lvl = 1.0 - (1.0 - S) * ((sec - A) / D);
+            else                                lvl = S;
+            if (R > 0.0 && sec > relStart)
+                lvl = juce::jmin(lvl, S * juce::jmax(0.0, 1.0 - (sec - relStart) / R));
+            return juce::jlimit(0.0, 1.0, lvl);
+        };
+
+        juce::Path top, bottom;
+        bool started = false;
+        for (int x = 0; x <= waveInner.getWidth(); x += 2)
+        {
+            const auto ratio = viewStart + (static_cast<float>(x) / widthF) * viewSpan;
+            const auto sec   = static_cast<double>(ratio) * duration;
+            const auto e     = static_cast<float>(envAt(sec));
+            const auto px    = static_cast<float>(waveInner.getX() + x);
+            const auto yTop  = centerY - e * halfHeight;
+            const auto yBot  = centerY + e * halfHeight;
+            if (! started) { top.startNewSubPath(px, yTop); bottom.startNewSubPath(px, yBot); started = true; }
+            else           { top.lineTo(px, yTop);          bottom.lineTo(px, yBot); }
+        }
+        g.setColour(juce::Colours::white.withAlpha(0.78f));
+        g.strokePath(top,    juce::PathStrokeType(1.6f));
+        g.setColour(juce::Colours::white.withAlpha(0.35f));
+        g.strokePath(bottom, juce::PathStrokeType(1.2f));
+    }
 }
 
 bool SamplerPanelComponent::hitTest(int x, int y)
@@ -637,6 +706,13 @@ bool SamplerPanelComponent::hitTest(int x, int y)
 
 void SamplerPanelComponent::mouseDown(const juce::MouseEvent& event)
 {
+    // Header X button closes the panel.
+    if (! closeButtonBounds.isEmpty() && closeButtonBounds.expanded(4).contains(event.getPosition()))
+    {
+        closePanel();
+        return;
+    }
+
     draggingSens = false;
     draggingSliceIndex = -1;
     auto* track = getActiveTrack();
@@ -802,6 +878,10 @@ void SamplerPanelComponent::mouseDown(const juce::MouseEvent& event)
         if (pickKnob(transposeKnobBounds, Knob::transpose, track->samplerTransposeSemitones)) return;
         if (pickKnob(rootKnobBounds,      Knob::root,      track->samplerRootMidiNote))        return;
         if (pickKnob(gainKnobBounds,      Knob::gain,      track->volumeDb))                   return;
+        if (pickKnob(attackKnobBounds,    Knob::attack,    track->samplerAmpAttackSeconds))    return;
+        if (pickKnob(decayKnobBounds,     Knob::decay,     track->samplerAmpDecaySeconds))     return;
+        if (pickKnob(sustainKnobBounds,   Knob::sustain,   track->samplerAmpSustain))          return;
+        if (pickKnob(releaseKnobBounds,   Knob::release,   track->samplerAmpReleaseSeconds))   return;
     }
 
     selectedKnob = Knob::none;  // click elsewhere deselects
@@ -823,6 +903,10 @@ void SamplerPanelComponent::mouseDoubleClick(const juce::MouseEvent& event)
         { Knob::transpose, transposeKnobBounds, juce::String(track->samplerTransposeSemitones) },
         { Knob::root,      rootKnobBounds,      juce::MidiMessage::getMidiNoteName(track->samplerRootMidiNote, true, true, 3) },
         { Knob::gain,      gainKnobBounds,      juce::String(track->volumeDb, 1) },
+        { Knob::attack,    attackKnobBounds,    juce::String(juce::roundToInt(track->samplerAmpAttackSeconds * 1000.0)) },
+        { Knob::decay,     decayKnobBounds,     juce::String(juce::roundToInt(track->samplerAmpDecaySeconds * 1000.0)) },
+        { Knob::sustain,   sustainKnobBounds,   juce::String(juce::roundToInt(track->samplerAmpSustain * 100.0)) },
+        { Knob::release,   releaseKnobBounds,   juce::String(juce::roundToInt(track->samplerAmpReleaseSeconds * 1000.0)) },
     };
     for (const auto& k : knobs)
     {
@@ -841,6 +925,14 @@ void SamplerPanelComponent::mouseDoubleClick(const juce::MouseEvent& event)
         track->samplerRootMidiNote = 60;          // C3
     else if (gainKnobBounds.contains(pos))
         track->volumeDb = 0.0;
+    else if (attackKnobBounds.contains(pos))
+        track->samplerAmpAttackSeconds = 0.0;
+    else if (decayKnobBounds.contains(pos))
+        track->samplerAmpDecaySeconds = 0.0;
+    else if (sustainKnobBounds.contains(pos))
+        track->samplerAmpSustain = 1.0;
+    else if (releaseKnobBounds.contains(pos))
+        track->samplerAmpReleaseSeconds = 0.0;
     else
         return;
 
@@ -861,6 +953,10 @@ juce::Rectangle<int> SamplerPanelComponent::knobBoundsFor(Knob which) const
         case Knob::transpose: return transposeKnobBounds;
         case Knob::root:      return rootKnobBounds;
         case Knob::gain:      return gainKnobBounds;
+        case Knob::attack:    return attackKnobBounds;
+        case Knob::decay:     return decayKnobBounds;
+        case Knob::sustain:   return sustainKnobBounds;
+        case Knob::release:   return releaseKnobBounds;
         case Knob::none:      break;
     }
     return {};
@@ -932,6 +1028,18 @@ void SamplerPanelComponent::commitKnobTextEntry()
                 break;
             case Knob::gain:
                 track->volumeDb = juce::jlimit(-60.0, 6.0, text.getDoubleValue());
+                break;
+            case Knob::attack:   // typed in milliseconds
+                track->samplerAmpAttackSeconds = juce::jlimit(0.0, kMaxEnvSeconds, text.getDoubleValue() / 1000.0);
+                break;
+            case Knob::decay:
+                track->samplerAmpDecaySeconds = juce::jlimit(0.0, kMaxEnvSeconds, text.getDoubleValue() / 1000.0);
+                break;
+            case Knob::sustain:  // typed in percent
+                track->samplerAmpSustain = juce::jlimit(0.0, 1.0, text.getDoubleValue() / 100.0);
+                break;
+            case Knob::release:
+                track->samplerAmpReleaseSeconds = juce::jlimit(0.0, kMaxEnvSeconds, text.getDoubleValue() / 1000.0);
                 break;
             case Knob::none:
                 break;
@@ -1007,6 +1115,22 @@ void SamplerPanelComponent::mouseDrag(const juce::MouseEvent& event)
         case Knob::gain:
             getActiveTrack()->volumeDb = juce::jlimit(-60.0, 6.0,
                 knobDragStartValue + steps * 0.5);  // 0.5 dB per step
+            break;
+        case Knob::attack:
+            getActiveTrack()->samplerAmpAttackSeconds = juce::jlimit(0.0, kMaxEnvSeconds,
+                knobDragStartValue + steps * 0.01);   // 10 ms per step
+            break;
+        case Knob::decay:
+            getActiveTrack()->samplerAmpDecaySeconds = juce::jlimit(0.0, kMaxEnvSeconds,
+                knobDragStartValue + steps * 0.01);
+            break;
+        case Knob::sustain:
+            getActiveTrack()->samplerAmpSustain = juce::jlimit(0.0, 1.0,
+                knobDragStartValue + steps * 0.02);   // 2% per step
+            break;
+        case Knob::release:
+            getActiveTrack()->samplerAmpReleaseSeconds = juce::jlimit(0.0, kMaxEnvSeconds,
+                knobDragStartValue + steps * 0.01);
             break;
         case Knob::none:
             break;
@@ -1096,6 +1220,10 @@ bool SamplerPanelComponent::keyPressed(const juce::KeyPress& key)
                     case Knob::transpose: current = juce::String(track->samplerTransposeSemitones); break;
                     case Knob::root:      current = juce::MidiMessage::getMidiNoteName(track->samplerRootMidiNote, true, true, 3); break;
                     case Knob::gain:      current = juce::String(track->volumeDb, 1); break;
+                    case Knob::attack:    current = juce::String(juce::roundToInt(track->samplerAmpAttackSeconds * 1000.0)); break;
+                    case Knob::decay:     current = juce::String(juce::roundToInt(track->samplerAmpDecaySeconds * 1000.0)); break;
+                    case Knob::sustain:   current = juce::String(juce::roundToInt(track->samplerAmpSustain * 100.0)); break;
+                    case Knob::release:   current = juce::String(juce::roundToInt(track->samplerAmpReleaseSeconds * 1000.0)); break;
                     case Knob::none:      break;
                 }
                 beginKnobTextEntry(selectedKnob, current);
@@ -1473,7 +1601,14 @@ bool SamplerPanelComponent::updateTypingPianoNotes()
 
 void SamplerPanelComponent::releaseTypingPianoNotes()
 {
-    if (onAllNotesOff)
+    // Only flush when keyboard notes are actually held. onAllNotesOff() panics the hosted
+    // VST instruments (3-block all-notes-off), so calling it unconditionally on every track
+    // switch / clip selection briefly cut VST instrument playback. With nothing held there is
+    // nothing to release, so skip it.
+    const bool hadHeldNotes = ! activeNotePitches.empty()
+                           || ! activeNotes.empty()
+                           || ! activeSliceIndices.empty();
+    if (hadHeldNotes && onAllNotesOff)
         onAllNotesOff();
 
     activeNotes.clear();
@@ -1504,6 +1639,22 @@ void SamplerPanelComponent::nudgeSelectedKnob(int direction, bool large)
         case Knob::gain:
             track->volumeDb = juce::jlimit(-60.0, 6.0,
                 track->volumeDb + direction * (large ? 6.0 : 1.0));
+            break;
+        case Knob::attack:
+            track->samplerAmpAttackSeconds = juce::jlimit(0.0, kMaxEnvSeconds,
+                track->samplerAmpAttackSeconds + direction * (large ? 0.1 : 0.01));
+            break;
+        case Knob::decay:
+            track->samplerAmpDecaySeconds = juce::jlimit(0.0, kMaxEnvSeconds,
+                track->samplerAmpDecaySeconds + direction * (large ? 0.1 : 0.01));
+            break;
+        case Knob::sustain:
+            track->samplerAmpSustain = juce::jlimit(0.0, 1.0,
+                track->samplerAmpSustain + direction * (large ? 0.1 : 0.02));
+            break;
+        case Knob::release:
+            track->samplerAmpReleaseSeconds = juce::jlimit(0.0, kMaxEnvSeconds,
+                track->samplerAmpReleaseSeconds + direction * (large ? 0.1 : 0.01));
             break;
         case Knob::none:
             break;

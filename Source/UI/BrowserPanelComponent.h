@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -31,6 +32,10 @@ public:
 
     std::function<void(const BrowserItem&)> onPreviewItem;
     std::function<void(const BrowserItem&)> onActivateItem;
+    // Context-menu "Open in sampler": load into a sampler track WITHOUT a playlist clip.
+    std::function<void(const BrowserItem&)> onOpenInSampler;
+    // Enter on a file: replace the currently-selected track's sample (or create one if none).
+    std::function<void(const BrowserItem&)> onReplaceSelectedTrackSample;
     std::function<void()>                   onCloseRequested;
     // Footer transport: fired when the play/stop button in the preview bar is clicked.
     std::function<void()>                   onTogglePreviewPlayback;
@@ -136,7 +141,7 @@ private:
     bool showingMacRootOverview { false };
     bool showingUserHomeOverview { false };
     juce::String entrySignature;
-    int scrollOffsetY { 0 };
+    double scrollOffsetY { 0.0 };
     float horizontalWheelAccumulator { 0.0f };
     juce::uint32 lastHorizontalWheelMs { 0 };
     bool horizontalSwipeLocked { false };
@@ -155,6 +160,20 @@ private:
     // Items returned from the filesystem before applying the search filter.
     // `items` (in the .cpp) holds the post-filter view; this holds the source.
     std::vector<BrowserItem> unfilteredItems;
+
+    // Cache of the RECURSIVE file scan for the current folder, so typing in the search box
+    // filters in memory instead of re-scanning the disk on every keystroke. Rebuilt only when
+    // the folder changes or its contents are modified.
+    std::vector<BrowserItem> recursiveScanItems;
+    juce::File recursiveScanDir;
+    bool recursiveScanValid { false };
+    // The recursive disk scan runs on this background pool so a search on a big folder never
+    // freezes the UI (it used to block ~10s). While it runs, a "Searching…" row is shown.
+    juce::ThreadPool scanPool { 1 };
+    std::atomic<int> scanGeneration { 0 };
+    juce::File scanPendingDir;
+    bool recursiveScanPending { false };
+    void beginRecursiveScan(const juce::File& directory);
 
     // Bottom preview bar state (fed by MainComponent's preview transport).
     juce::String        previewName;
