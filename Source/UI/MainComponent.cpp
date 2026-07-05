@@ -1,6 +1,8 @@
 #include "MainComponent.h"
 
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -1150,6 +1152,7 @@ MainComponent::MainComponent()
                                    projectState.getKeyRoot(),
                                    projectState.isKeyMinor(),
                                    projectState.isKeyEnabled() && projectState.isScaleLockEnabled());
+        midiEditorOverlay.setChordModeExternally(projectState.isChordModeEnabled(), projectState.getChordSizeNotes());
     };
     stepSequencer.onPatternEdited = [this]() { arrangementTimeline.repaint(); };
     stepSequencer.onOpenSampler = [this](int trackIndex)
@@ -1505,11 +1508,18 @@ MainComponent::MainComponent()
     };
     browserPanel.onActivateItem = [this](const BrowserItem& item)
     {
-        loadBrowserItemIntoSampler(item);
+        // Double-click a sound → create a sampler track and open its UI only. Do NOT drop an audio
+        // clip into the playlist (that's what dragging the sample onto a lane is for).
+        loadBrowserItemIntoSampler(item, /*addClipToPlaylist*/ false);
     };
     browserPanel.onOpenInSampler = [this](const BrowserItem& item)
     {
         loadBrowserItemIntoSampler(item, /*addClipToPlaylist*/ false);   // sampler track only
+    };
+    browserPanel.onAddItemToPlaylist = [this](const BrowserItem& item)
+    {
+        // Enter in the browser: add the sound to the playlist as a sampler track + clip.
+        loadBrowserItemIntoSampler(item, /*addClipToPlaylist*/ true);
     };
     browserPanel.onReplaceSelectedTrackSample = [this](const BrowserItem& item)
     {
@@ -1850,36 +1860,60 @@ MainComponent::MainComponent()
                                    bool warpEnabled,
                                    double sourceBpm)
     {
+        // Chord mode expands one key into a diatonic chord — but not for SLICE mode, where each key
+        // is a distinct drum slice, not a pitch. Expansion happens here so the sampler component
+        // itself stays single-note (no regression to its keyboard/slice logic).
+        const auto pitches = (playbackMode == SamplerPlaybackMode::slice)
+                                 ? std::vector<int>{ midiNote }
+                                 : chordPitchesForNote(midiNote);
+        samplerChordVoicing[midiNote] = pitches;
+
         if (arrangementPlaybackSource != nullptr)
         {
             const auto activeTrack = samplerPanel.getActiveTrackIndex();
-            if (activeTrack >= 0 && arrangementPlaybackSource->hasTrackInstrument(activeTrack))
-                arrangementPlaybackSource->instrumentLiveNoteOn(activeTrack, midiNote, velocity);
-            else
-                arrangementPlaybackSource->samplerNoteOn(sourcePath,
-                                                         midiNote,
-                                                         velocity,
-                                                         rootMidiNote,
-                                                         gainDb,
-                                                         playbackMode,
-                                                         sliceIndex,
-                                                         sliceCount,
-                                                         warpEnabled,
-                                                         sourceBpm);
+            const bool onInstrument = activeTrack >= 0 && arrangementPlaybackSource->hasTrackInstrument(activeTrack);
+            const bool fullSampleTrigger = activeTrack >= 0
+                && activeTrack < static_cast<int>(projectState.getTracks().size())
+                && projectState.getTracks()[static_cast<std::size_t>(activeTrack)].samplerFullSampleTrigger;
+            for (const auto p : pitches)
+            {
+                if (onInstrument)
+                    arrangementPlaybackSource->instrumentLiveNoteOn(activeTrack, p, velocity);
+                else
+                    arrangementPlaybackSource->samplerNoteOn(sourcePath, p, velocity, rootMidiNote,
+                                                             gainDb, playbackMode, sliceIndex,
+                                                             sliceCount, warpEnabled, sourceBpm,
+                                                             fullSampleTrigger);
+            }
         }
-        recordNoteOn(midiNote, velocity);
+        for (const auto p : pitches)
+            recordNoteOn(p, velocity);
     };
     samplerPanel.onNoteOff = [this](int midiNote, SamplerPlaybackMode playbackMode)
     {
+        std::vector<int> pitches { midiNote };
+        if (const auto it = samplerChordVoicing.find(midiNote); it != samplerChordVoicing.end())
+        {
+            pitches = it->second;
+            samplerChordVoicing.erase(it);
+        }
+
         if (arrangementPlaybackSource != nullptr)
         {
             const auto activeTrack = samplerPanel.getActiveTrackIndex();
-            if (activeTrack >= 0 && arrangementPlaybackSource->hasTrackInstrument(activeTrack))
-                arrangementPlaybackSource->instrumentLiveNoteOff(activeTrack, midiNote);
-            else
-                arrangementPlaybackSource->samplerNoteOff(midiNote, playbackMode);
+            const bool onInstrument = activeTrack >= 0 && arrangementPlaybackSource->hasTrackInstrument(activeTrack);
+            // Classic (без Full Sample) = Ableton: releasing the key stops the note live too.
+            const bool gateByNoteLength = samplerTrackGatesByNoteLength(activeTrack);
+            for (const auto p : pitches)
+            {
+                if (onInstrument)
+                    arrangementPlaybackSource->instrumentLiveNoteOff(activeTrack, p);
+                else
+                    arrangementPlaybackSource->samplerNoteOff(p, playbackMode, gateByNoteLength);
+            }
         }
-        recordNoteOff(midiNote);
+        for (const auto p : pitches)
+            recordNoteOff(p);
     };
     samplerPanel.onAllNotesOff = [this]()
     {
@@ -1935,6 +1969,14 @@ MainComponent::MainComponent()
         if (selectedArrangementClip.has_value())
             liveMidiNoteOff(selectedArrangementClip->first, midiNote);
     };
+    midiEditorOverlay.onPreviewChordRetrigger = [this]()
+    {
+        if (arrangementPlaybackSource != nullptr)
+        {
+            arrangementPlaybackSource->allSamplerNotesOff();
+            arrangementPlaybackSource->allInstrumentNotesOff();
+        }
+    };
     midiEditorOverlay.onGlideChanged = [this](bool on)
     {
         if (arrangementPlaybackSource != nullptr)
@@ -1953,6 +1995,7 @@ MainComponent::MainComponent()
                                    projectState.getKeyRoot(),
                                    projectState.isKeyMinor(),
                                    projectState.isKeyEnabled() && projectState.isScaleLockEnabled());
+        midiEditorOverlay.setChordModeExternally(projectState.isChordModeEnabled(), projectState.getChordSizeNotes());
     };
     arrangementTimeline.onAudioClipDoubleClick = [this](int trackIndex, int clipIndex)
     {
@@ -1982,6 +2025,11 @@ MainComponent::MainComponent()
     midiEditorOverlay.onScaleLockChanged = [this](bool enabled)
     {
         projectState.setScaleLockEnabled(enabled);
+    };
+    midiEditorOverlay.onChordModeChanged = [this](bool enabled)
+    {
+        projectState.setChordModeEnabled(enabled);
+        syncChordModeToSurfaces();
     };
     arrangementTimeline.onClipWarpEdited = [this]()
     {
@@ -2818,6 +2866,16 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    // Catch-all: when the sampler/piano-roll can play typing-piano notes, note playback runs via
+    // keyStateChanged independent of keyboard focus. If the matching keyPressed goes unconsumed,
+    // macOS emits its system beep alongside the note. Consume any plain (no-modifier) musical key
+    // here so the beep never mixes in. Placed after all shortcuts so it steals nothing from them.
+    const bool notesCanPlay = samplerPanel.isVisible() || samplerPanel.isArmed() || midiEditorOverlay.isVisible();
+    if (notesCanPlay
+        && ! key.getModifiers().isAnyModifierKeyDown()
+        && SamplerPanelComponent::isTypingMusicalKey(key.getKeyCode()))
+        return true;
+
     if (key != juce::KeyPress::spaceKey)
         return false;
 
@@ -3320,10 +3378,19 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
         const bool consumedByEditor = midiEditorOverlay.isVisible()
                                       && midiEditorOverlay.stepWriteMidiNoteOn(note, velocity);
 
-        if (! consumedByEditor && targetTrack >= 0)
-            liveMidiNoteOn(targetTrack, note, velocity);
+        // Chord mode expands one key into a diatonic chord for live play + recording. Step-write
+        // keeps its own single-note behaviour (the editor already handled the note).
+        const auto pitches = consumedByEditor ? std::vector<int>{ note } : chordPitchesForNote(note);
+        if (! consumedByEditor)
+        {
+            liveChordVoicing[note] = pitches;
+            if (targetTrack >= 0)
+                for (const auto p : pitches)
+                    liveMidiNoteOn(targetTrack, p, velocity);
+        }
 
-        recordNoteOn(note, velocity);
+        for (const auto p : pitches)
+            recordNoteOn(p, velocity);
         return;
     }
 
@@ -3334,10 +3401,21 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
         const bool consumedByEditor = midiEditorOverlay.isVisible()
                                       && midiEditorOverlay.stepWriteMidiNoteOff(note);
 
-        if (! consumedByEditor && targetTrack >= 0)
-            liveMidiNoteOff(targetTrack, note);
+        // Release exactly the pitches this key sounded (remembered at note-on), so a chord is
+        // fully released even if chord mode was toggled off while the key was held.
+        std::vector<int> pitches { note };
+        if (const auto it = liveChordVoicing.find(note); it != liveChordVoicing.end())
+        {
+            pitches = it->second;
+            liveChordVoicing.erase(it);
+        }
 
-        recordNoteOff(note);
+        if (! consumedByEditor && targetTrack >= 0)
+            for (const auto p : pitches)
+                liveMidiNoteOff(targetTrack, p);
+
+        for (const auto p : pitches)
+            recordNoteOff(p);
         return;
     }
 
@@ -3407,6 +3485,61 @@ int MainComponent::resolveArmedMidiTrack()
     return -1;
 }
 
+std::vector<int> MainComponent::chordPitchesForNote(int midiNote) const
+{
+    // Chord mode needs a project key to be diatonic. Off → the note plays as-is.
+    if (! projectState.isChordModeEnabled() || ! projectState.isKeyEnabled())
+        return { midiNote };
+
+    // Diatonic scales as semitone offsets from the tonic. Minor = natural minor.
+    static constexpr int majorScale[7] = { 0, 2, 4, 5, 7, 9, 11 };
+    static constexpr int minorScale[7] = { 0, 2, 3, 5, 7, 8, 10 };
+    const int* scale = projectState.isKeyMinor() ? minorScale : majorScale;
+    const int root = ((projectState.getKeyRoot() % 12) + 12) % 12;
+
+    // Snap the played note to the nearest scale tone, then find its scale degree + octave.
+    const int pc = (((midiNote - root) % 12) + 12) % 12;
+    int degree = 0, best = 128;
+    for (int i = 0; i < 7; ++i)
+    {
+        const int dist = std::abs(scale[i] - pc);
+        if (dist < best) { best = dist; degree = i; }
+    }
+    const int snapped = midiNote + (scale[degree] - pc);
+    const int octave = (snapped - root - scale[degree]) / 12;
+
+    // Stack diatonic thirds (degree, +2, +4, …) so each chord's quality is correct for the key.
+    const int size = juce::jlimit(3, 7, projectState.getChordSizeNotes());
+    std::vector<int> pitches;
+    pitches.reserve(static_cast<std::size_t>(size));
+    for (int k = 0; k < size; ++k)
+    {
+        const int d = degree + 2 * k;
+        const int o = octave + d / 7;
+        const int midi = root + 12 * o + scale[d % 7];
+        pitches.push_back(juce::jlimit(0, 127, midi));
+    }
+    return pitches;
+}
+
+bool MainComponent::samplerTrackGatesByNoteLength(int trackIndex) const
+{
+    const auto& tracks = projectState.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return false;
+    const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    return track.samplerMode == SamplerPlaybackMode::classic && ! track.samplerFullSampleTrigger;
+}
+
+void MainComponent::syncChordModeToSurfaces()
+{
+    const bool on   = projectState.isChordModeEnabled();
+    const int  size = projectState.getChordSizeNotes();
+    midiEditorOverlay.setChordModeExternally(on, size);
+    updateTransportLabels();
+    arrangementTimeline.repaint();   // track headers reflect the shared state
+}
+
 void MainComponent::liveMidiNoteOn(int trackIndex, int midiNote, int velocity)
 {
     if (arrangementPlaybackSource == nullptr)
@@ -3433,7 +3566,8 @@ void MainComponent::liveMidiNoteOn(int trackIndex, int midiNote, int velocity)
                                                  0,
                                                  track.samplerSliceCount,
                                                  track.samplerWarpEnabled,
-                                                 track.samplerSourceBpm);
+                                                 track.samplerSourceBpm,
+                                                 track.samplerFullSampleTrigger);
 }
 
 void MainComponent::liveMidiNoteOff(int trackIndex, int midiNote)
@@ -3449,7 +3583,8 @@ void MainComponent::liveMidiNoteOff(int trackIndex, int midiNote)
     if (arrangementPlaybackSource->hasTrackInstrument(trackIndex))
         arrangementPlaybackSource->instrumentLiveNoteOff(trackIndex, midiNote);
     else
-        arrangementPlaybackSource->samplerNoteOff(midiNote, track.samplerMode);
+        arrangementPlaybackSource->samplerNoteOff(midiNote, track.samplerMode,
+                                                  samplerTrackGatesByNoteLength(trackIndex));
 }
 
 void MainComponent::refreshMidiInputDevices()
@@ -3544,6 +3679,10 @@ void MainComponent::updateTransportLabels()
         : juce::String("Untitled");
     transportState.keyText = projectState.isKeyEnabled()
         ? formatKeyName(projectState.getKeyRoot(), projectState.isKeyMinor())
+          + (projectState.isChordModeEnabled()
+                 ? " ·" + juce::String(std::array<const char*, 5>{ "3","7","9","11","13" }
+                                           [static_cast<std::size_t>(juce::jlimit(3, 7, projectState.getChordSizeNotes()) - 3)])
+                 : juce::String())
         : juce::String("Off");
     transportState.timeSignature = juce::String(projectState.getNumerator()) + "/" + juce::String(projectState.getDenominator());
     transportState.positionText = formatTransportTime(transportEngine.getPlayheadBeat(), projectState.getTempoBpm());
@@ -3750,8 +3889,9 @@ void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item, bool add
         track.samplerTransposeSemitones = 0;
     }
 
-    // Optionally drop the sample into the playlist on the same (hybrid) track at the start
-    // (double-click does this; the "Open in sampler" menu item loads the sampler only).
+    // Optionally drop the sample into the playlist on the same (hybrid) track at the start.
+    // Double-click and "Open in sampler" both load the sampler only; dragging a sample onto a
+    // lane is the gesture that places an audio clip.
     if (addClipToPlaylist)
         arrangementTimeline.addAudioClipToTrack(item.file, trackIndex, 0.0);
 
@@ -3788,7 +3928,7 @@ int MainComponent::findOrCreateSamplerTargetTrack()
     TrackState samplerTrack;
     samplerTrack.name = "Sampler Track";
     samplerTrack.isMidiTrack = true;
-    samplerTrack.colour = juce::Colour(0xff9db0c4);
+    samplerTrack.colour = theme::tracks::colourForIndex(static_cast<int>(tracks.size()));
     tracks.push_back(std::move(samplerTrack));
 
     const auto newIndex = static_cast<int>(tracks.size()) - 1;
@@ -5084,9 +5224,20 @@ void MainComponent::ensureMidiRecordingSession(int armedTrack)
 
 void MainComponent::recordNoteOn(int pitch, int velocity)
 {
-    // Don't capture notes while count-in is still ticking — only after real playback starts.
-    if (! transportEngine.isPlaying() || transportEngine.isCountInActive() || ! transportEngine.isRecordArmed())
+    if (! transportEngine.isRecordArmed())
         return;
+    if (! transportEngine.isPlaying())
+    {
+        // Not playing yet. Capture ONLY the anticipated first chord struck in the LAST BEAT of the
+        // count-in (it lands at the clip start, beat 0) — players hit the downbeat a hair early. Notes
+        // played earlier in the count-in aren't part of the take, so they're ignored: that avoids a
+        // whole rushed progression piling up at beat 0 (which read as "only one chord recorded").
+        if (! transportEngine.isCountInActive())
+            return;
+        const double countInBeats = static_cast<double>(juce::jmax(1, projectState.getNumerator()));
+        if (transportEngine.getClickBeat() < countInBeats - 1.0)
+            return;
+    }
     // Open the session on the spot if the timer hasn't yet — otherwise the very first note
     // (played in the gap between count-in ending and the next timer tick) was dropped.
     if (! recordingSession.has_value())
@@ -5701,6 +5852,26 @@ void MainComponent::loadProjectFromFile(const juce::File& file)
     }
 
     currentProjectFile = file;
+
+    // Older builds created sampler/MIDI tracks with this fixed grey, which made every MIDI
+    // clip on those tracks grey too. Restore palette colours on load without touching any
+    // user-chosen colours.
+    auto& loadedTracks = projectState.getTracks();
+    constexpr auto legacySamplerGrey = juce::uint32 { 0xff9db0c4 };
+    for (int i = 0; i < static_cast<int>(loadedTracks.size()); ++i)
+    {
+        auto& track = loadedTracks[static_cast<std::size_t>(i)];
+        if (track.isMidiTrack
+            && track.samplerSourcePath.isNotEmpty()
+            && track.colour == juce::Colour(legacySamplerGrey))
+        {
+            const auto paletteColour = theme::tracks::colourForIndex(i);
+            track.colour = paletteColour;
+            for (auto& clip : track.clips)
+                if (clip.colour == juce::Colour(legacySamplerGrey))
+                    clip.colour = paletteColour.brighter(0.1f);
+        }
+    }
 
     // Re-instantiate hosted VST instruments from the loaded track state, and drop
     // any selection/history that referred to the previous project.
@@ -6539,12 +6710,36 @@ void MainComponent::showKeySelectionMenu()
     menu.addSubMenu("Major", majorSub);
     menu.addSubMenu("Minor", minorSub);
 
+    // Chord mode: one key → diatonic chord in the project key.
+    menu.addSeparator();
+    menu.addItem(2, "Chord mode (one key = chord)", projectState.isKeyEnabled(), projectState.isChordModeEnabled());
+    juce::PopupMenu chordSub;
+    static const std::array<std::pair<const char*, int>, 5> chordTypes {{
+        { "Triad", 3 }, { "7th", 4 }, { "9th", 5 }, { "11th", 6 }, { "13th", 7 } }};
+    for (const auto& [name, size] : chordTypes)
+        chordSub.addItem(300 + size, name, true, projectState.getChordSizeNotes() == size);
+    menu.addSubMenu("Chord type", chordSub, projectState.isChordModeEnabled());
+
     const auto keyBounds = transportBar.getKeyBounds().translated(transportBar.getX(), transportBar.getY());
     menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this).withTargetScreenArea(
         localAreaToGlobal(keyBounds.isEmpty() ? cachedKeyCardBounds : keyBounds)),
         [this](int result)
         {
             if (result <= 0) return;
+
+            if (result == 2)
+            {
+                projectState.setChordModeEnabled(! projectState.isChordModeEnabled());
+                syncChordModeToSurfaces();
+                return;
+            }
+            if (result >= 303 && result <= 307)
+            {
+                projectState.setChordSizeNotes(result - 300);
+                projectState.setChordModeEnabled(true);   // picking a type turns the mode on
+                syncChordModeToSurfaces();
+                return;
+            }
 
             if (result == 1)
             {

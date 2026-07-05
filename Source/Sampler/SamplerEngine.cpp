@@ -14,15 +14,27 @@ namespace
 constexpr int kSamplerAttackFadeSamples = 384;
 constexpr int kSamplerSliceAttackFadeSamples = 24;
 constexpr int kSamplerSliceEndFadeSamples = 384;
-constexpr int kSamplerRetriggerFadeSamples = 1536;
+constexpr int kSamplerRetriggerFadeSamples = 480;   // ~10 ms — matches FL's default "Out only" declick
 constexpr int kSamplerMaxLiveVoices = 24;
-constexpr int kSamplerMidiTriggerAttackSamples = 96;
 constexpr int kSamplerMidiTriggerReleaseSamples = 384;
 
 float smoothRamp(float value) noexcept
 {
     const auto x = juce::jlimit(0.0f, 1.0f, value);
     return x * x * (3.0f - 2.0f * x);
+}
+
+// Soft clip for the summed live-voice mix: fully linear (no coloration) up to ±0.8, then saturates
+// smoothly toward ±1.0. Prevents the hard-clip crackle when many voices (fast playing, chords,
+// full-sample rings) sum past unity, without touching normal single-note levels.
+float softClipLiveMix(float x) noexcept
+{
+    constexpr float knee = 0.8f;
+    const float ax = std::abs(x);
+    if (ax <= knee)
+        return x;
+    const float shaped = knee + (1.0f - knee) * std::tanh((ax - knee) / (1.0f - knee));
+    return x < 0.0f ? -shaped : shaped;
 }
 
 float readCubicSample(const juce::AudioBuffer<float>& buffer, int channel, double position) noexcept
@@ -302,6 +314,10 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
     if (track.samplerSourcePath.isEmpty() || clip.type != ClipType::midi || clip.muted || clip.recording || clip.midiNotes.empty())
         return;
 
+    // Flush-to-zero: envelope/sample-end fade tails produce denormal floats (~100x slower), spiking
+    // CPU and crackling at note tails. Enable FTZ for this render scope.
+    juce::ScopedNoDenormals noDenormals;
+
     const auto* sampleData = getSampleData(track.samplerSourcePath);
     if (sampleData == nullptr || sampleData->buffer.getNumSamples() <= 0 || sampleData->sampleRate <= 0.0)
         return;
@@ -385,7 +401,13 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
         if (timelineBeat < clipStartBeat || timelineBeat >= clipEndBeat)
             continue;
 
-        const auto clipLocalBeat = timelineBeat - clipStartBeat;
+        // Render every note at a given clip-local position, scaled by bleedGain. Wrapped in a lambda
+        // so the loop/repeat seam can be made seamless (FL "bleeding" style): after the wrap we also
+        // re-render the OUTGOING cycle's tail at its continued position and mix it in, fading out — so
+        // a still-ringing sample carries across the repeat instead of being cut (a click) or faded to
+        // silence (an audible dip).
+        const auto renderNotesAtBeat = [&](double clipLocalBeat, float bleedGain)
+        {
         for (const auto& note : clip.midiNotes)
         {
             const auto* noteSlide = findSlideForNote(clip, note);
@@ -438,12 +460,13 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
             if (track.samplerStepGateBeats > 0.0)
                 noteEndBeat = juce::jmin(noteEndBeat, note.startBeat + track.samplerStepGateBeats);
 
-            // Amp-envelope note-off point. Classic is a sustaining/melodic voice, so the env is
-            // gated by the MIDI NOTE LENGTH (note ends → release) — Release and step length both
-            // matter. One-Shot/Slice play the whole sample (note-off ignored, drum-style), so the
-            // env is gated by the playback end instead; there A/D/S shape it and Decay→Sustain
-            // shortens an 808.
-            const auto envHoldEnd = (track.samplerMode == SamplerPlaybackMode::classic)
+            // Amp-envelope note-off point. Classic gates by the MIDI NOTE LENGTH (Ableton-style:
+            // note length = sound length, per-note control) UNLESS samplerFullSampleTrigger is on
+            // (FL-style: one hit plays the whole sample, note length only draws the block). One-Shot/
+            // Slice always play the whole sample (note-off ignored). The step gate above still shortens.
+            const bool gateByNoteLength = (track.samplerMode == SamplerPlaybackMode::classic)
+                                          && ! track.samplerFullSampleTrigger;
+            const auto envHoldEnd = gateByNoteLength
                 ? note.startBeat + juce::jmax(0.01, note.lengthInBeats)
                 : noteEndBeat;
 
@@ -532,7 +555,7 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                                        / static_cast<float>(kSamplerMidiTriggerReleaseSamples));
             }
 
-            const auto linearGain = trackGain * clipGain * velocityGain * edgeGain;
+            const auto linearGain = trackGain * clipGain * velocityGain * edgeGain * bleedGain;
 
             for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
             {
@@ -540,6 +563,27 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
                 targetBuffer.addSample(channel,
                                        startSample + sampleIndex,
                                        readCubicSample(sampleData->buffer, sourceChannel, sourceSamplePosition) * linearGain);
+            }
+        }
+        };
+
+        const auto clipLocalBeat = timelineBeat - clipStartBeat;
+        renderNotesAtBeat(clipLocalBeat, 1.0f);
+
+        // Loop/repeat seam bleed: for the first ~10 ms after the wrap, also mix in the OUTGOING
+        // cycle's tail — the same notes evaluated one loop-span later (their continued sample
+        // position), fading out. A still-ringing sample carries across the repeat: no click, no dip.
+        const bool seamLooping = wrapToLoop || wrapToProject;
+        if (seamLooping)
+        {
+            const double seamSpan  = wrapToLoop ? loopSpanBeats : repeatEndBeat;
+            const double seamStart = wrapToLoop ? loopStartBeat : 0.0;
+            const double intoBeats = timelineBeat - seamStart;
+            const double bleedBeats = 0.010 * beatsPerSecond;
+            if (seamSpan > 0.0 && intoBeats >= 0.0 && intoBeats < bleedBeats)
+            {
+                const float g = smoothRamp(static_cast<float>((bleedBeats - intoBeats) / bleedBeats));
+                renderNotesAtBeat(clipLocalBeat + seamSpan, g);
             }
         }
     }
@@ -555,7 +599,8 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
                            int sliceCount,
                            bool warpEnabled,
                            double sourceBpm,
-                           double projectTempoBpm)
+                           double projectTempoBpm,
+                           bool fullSampleTrigger)
 {
     if (sourcePath.isEmpty())
         return;
@@ -573,6 +618,7 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
 
     std::scoped_lock lock(liveNotesMutex);
 
+    juce::ignoreUnused(fullSampleTrigger);
     auto startRelease = [](LiveNote& note)
     {
         if (note.releaseSamplesRemaining <= 0)
@@ -582,11 +628,17 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
         }
     };
 
-    // Classic is polyphonic. One-Shot/Slice behave as mono retrigger for 808-style playing.
-    // Glide forces mono regardless of mode (one voice glides like a mono synth).
+    // Classic is polyphonic (retrigger only the same pitch). One-Shot/Slice choke previous voices
+    // for 808-style playing — BUT notes struck together (within the chord window) count as one chord
+    // and don't choke each other; the NEXT chord/key chokes it (Akai-style). Glide forces mono.
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    const bool newChordTrigger = (nowMs - lastLiveNoteOnMs) > kChordChokeWindowMs;
+    lastLiveNoteOnMs = nowMs;
     for (auto& note : liveNotes)
     {
-        if (glideEnabled || (playbackMode == SamplerPlaybackMode::classic ? note.midiNote == midiNote : true))
+        const bool chokeThis = glideEnabled
+            || (playbackMode == SamplerPlaybackMode::classic ? note.midiNote == midiNote : newChordTrigger);
+        if (chokeThis)
             startRelease(note);
     }
 
@@ -658,9 +710,22 @@ void SamplerEngine::noteOn(const juce::String& sourcePath,
     liveNotes.push_back(nextNote);
 }
 
-void SamplerEngine::noteOff(int midiNote, SamplerPlaybackMode playbackMode)
+void SamplerEngine::noteOff(int midiNote, SamplerPlaybackMode playbackMode, bool gateByNoteLength)
 {
-    juce::ignoreUnused(midiNote, playbackMode);
+    juce::ignoreUnused(playbackMode);
+    // One-Shot / Slice / Full-Sample: note-off is ignored — the sample plays out (drum-style).
+    // Classic without Full Sample (Ableton-style): releasing the key stops the note, so live play
+    // respects how long the key is held, matching the recorded clip's note-length gating.
+    if (! gateByNoteLength)
+        return;
+
+    std::scoped_lock lock(liveNotesMutex);
+    for (auto& note : liveNotes)
+        if (note.midiNote == midiNote && note.releaseSamplesRemaining <= 0)
+        {
+            note.releaseSamplesRemaining = kSamplerRetriggerFadeSamples;
+            note.releaseSamplesTotal = kSamplerRetriggerFadeSamples;
+        }
 }
 
 void SamplerEngine::allNotesOff()
@@ -684,8 +749,21 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
     if (renderSampleRate <= 0.0 || numSamples <= 0)
         return;
 
+    // Flush-to-zero: release/fade tails produce denormal floats which are ~100x slower to process,
+    // spiking CPU and crackling exactly at each note's tail. Standard in every DAW audio path.
+    juce::ScopedNoDenormals noDenormals;
+
     std::scoped_lock lock(liveNotesMutex);
     const auto liveGain = liveGainLinear.load(std::memory_order_relaxed);  // applied live (see noteOn)
+
+    // Sum all live voices into a scratch buffer (from sample 0), soft-clip the mix, then add it to
+    // the output. This stops the hard-clip crackle when many voices sum past unity on fast playing.
+    const int numCh = juce::jmax(1, targetBuffer.getNumChannels());
+    if (liveMixScratch.getNumChannels() < numCh || liveMixScratch.getNumSamples() < numSamples)
+        liveMixScratch.setSize(numCh, juce::jmax(numSamples, 512), false, false, true);
+    for (int ch = 0; ch < numCh; ++ch)
+        liveMixScratch.clear(ch, 0, numSamples);
+
     for (auto& note : liveNotes)
     {
         if (note.sample == nullptr || note.sample->buffer.getNumSamples() <= 0 || note.sample->sampleRate <= 0.0)
@@ -737,13 +815,19 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
                     noteGain *= smoothRamp(static_cast<float>(juce::jmax(0, samplesUntilSliceEnd))
                                            / static_cast<float>(kSamplerSliceEndFadeSamples));
 
-                if (note.releaseSamplesRemaining > 0 && note.releaseSamplesTotal > 0)
-                    noteGain *= smoothRamp(static_cast<float>(note.releaseSamplesRemaining)
-                                           / static_cast<float>(note.releaseSamplesTotal));
+                // Once a release/choke fade is armed, keep attenuating by it — and go SILENT the
+                // instant it completes. Previously, when releaseSamplesRemaining hit 0 mid-block the
+                // condition turned false and the note jumped back to FULL gain for the rest of the
+                // block before being erased → a click at the end of every released/choked note.
+                if (note.releaseSamplesTotal > 0)
+                    noteGain *= note.releaseSamplesRemaining > 0
+                        ? smoothRamp(static_cast<float>(note.releaseSamplesRemaining)
+                                     / static_cast<float>(note.releaseSamplesTotal))
+                        : 0.0f;
 
-                targetBuffer.addSample(channel,
-                                       startSample + sampleIndex,
-                                       readCubicSample(note.sample->buffer, sourceChannel, note.sourcePosition) * noteGain);
+                liveMixScratch.addSample(channel,
+                                         sampleIndex,
+                                         readCubicSample(note.sample->buffer, sourceChannel, note.sourcePosition) * noteGain);
             }
 
             if (note.attackSamplesElapsed < note.attackSamplesTotal)
@@ -771,6 +855,14 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
             || note.sourcePosition >= note.sourceEndPosition
             || (note.releaseSamplesTotal > 0 && note.releaseSamplesRemaining <= 0);
     });
+
+    // Soft-clip the summed live mix, then add it to the output — no hard-clip crackle on overload.
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        const auto* src = liveMixScratch.getReadPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+            targetBuffer.addSample(ch, startSample + i, softClipLiveMix(src[i]));
+    }
 }
 
 const SamplerEngine::SampleData* SamplerEngine::getSampleData(const juce::String& path)

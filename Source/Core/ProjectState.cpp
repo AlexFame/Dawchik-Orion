@@ -55,6 +55,26 @@ void ProjectState::setScaleLockEnabled(bool enabled) noexcept
     scaleLockEnabled = enabled;
 }
 
+bool ProjectState::isChordModeEnabled() const noexcept
+{
+    return chordModeEnabled;
+}
+
+void ProjectState::setChordModeEnabled(bool enabled) noexcept
+{
+    chordModeEnabled = enabled;
+}
+
+int ProjectState::getChordSizeNotes() const noexcept
+{
+    return chordSizeNotes;
+}
+
+void ProjectState::setChordSizeNotes(int notes) noexcept
+{
+    chordSizeNotes = juce::jlimit(3, 7, notes);
+}
+
 bool ProjectState::isRecordWithMetronome() const noexcept
 {
     return recordWithMetronome;

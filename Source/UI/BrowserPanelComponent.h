@@ -21,6 +21,7 @@ struct BrowserItem
     juce::File file;
     bool isDirectory { false };
     bool isParentLink { false };
+    juce::StringArray tags;   // auto-derived content tags (Loop/One-shot, instrument, …) for search
 };
 
 class BrowserPanelComponent final : public juce::Component,
@@ -34,7 +35,9 @@ public:
     std::function<void(const BrowserItem&)> onActivateItem;
     // Context-menu "Open in sampler": load into a sampler track WITHOUT a playlist clip.
     std::function<void(const BrowserItem&)> onOpenInSampler;
-    // Enter on a file: replace the currently-selected track's sample (or create one if none).
+    // Enter on a file: add the sound to the playlist as a sampler track + clip.
+    std::function<void(const BrowserItem&)> onAddItemToPlaylist;
+    // Context menu: replace the currently-selected track's sample (or create one if none).
     std::function<void(const BrowserItem&)> onReplaceSelectedTrackSample;
     std::function<void()>                   onCloseRequested;
     // Footer transport: fired when the play/stop button in the preview bar is clicked.

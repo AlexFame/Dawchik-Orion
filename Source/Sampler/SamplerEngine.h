@@ -48,8 +48,9 @@ public:
                 int sliceCount,
                 bool warpEnabled,
                 double sourceBpm,
-                double projectTempoBpm);
-    void noteOff(int midiNote, SamplerPlaybackMode playbackMode);
+                double projectTempoBpm,
+                bool fullSampleTrigger = false);
+    void noteOff(int midiNote, SamplerPlaybackMode playbackMode, bool gateByNoteLength = false);
     void allNotesOff();
     void renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int startSample, int numSamples, double renderSampleRate);
 
@@ -129,6 +130,7 @@ private:
     juce::ThreadPool warpPool { 1 };
     std::mutex liveNotesMutex;
     std::vector<LiveNote> liveNotes;
+    juce::AudioBuffer<float> liveMixScratch;   // live voices sum here, soft-clipped, then mixed out
     std::uint64_t nextLiveVoiceId { 1 };
 
     // Glide state. glideEnabled/glideTimeSeconds are read from the audio thread (clip
@@ -136,6 +138,11 @@ private:
     std::atomic<bool>   glideEnabled { false };
     std::atomic<double> glideTimeSeconds { 0.08 };
     int    lastLivePitch { -1 };
+    // One-Shot/Slice choke: notes struck within this window of each other count as ONE chord and
+    // don't choke each other; a later hit (a new chord/key) chokes the previous. Touched only under
+    // liveNotesMutex. Akai-style: press a chord → rings full → next chord chokes it.
+    double lastLiveNoteOnMs { -1.0e12 };
+    static constexpr double kChordChokeWindowMs = 40.0;
     std::atomic<float>  liveGainLinear { 1.0f };  // live audition/voice gain (see setLiveGainDb)
     std::vector<double> liveSlicePoints;          // transient slice ratios (guarded by liveNotesMutex)
 };

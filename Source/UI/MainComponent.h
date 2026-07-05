@@ -83,6 +83,18 @@ private:
     int  resolveArmedMidiTrack();
     void liveMidiNoteOn(int trackIndex, int midiNote, int velocity);
     void liveMidiNoteOff(int trackIndex, int midiNote);
+    // Chord mode: expand a single played key into the diatonic chord for the project key
+    // (or just {note} when chord mode / tonality is off). liveChordVoicing remembers each
+    // held key's actual pitches so note-off releases the whole chord even if the mode was
+    // toggled mid-hold.
+    std::vector<int> chordPitchesForNote(int midiNote) const;
+    // True when a sampler track is Classic without Full Sample (Ableton) → live key-up stops the note.
+    bool samplerTrackGatesByNoteLength(int trackIndex) const;
+    // Push the shared chord-mode state to every surface that shows it (piano roll, sampler,
+    // track headers, transport label) — the single source of truth is projectState.
+    void syncChordModeToSurfaces();
+    std::map<int, std::vector<int>> liveChordVoicing;      // hardware-MIDI held keys → sounded pitches
+    std::map<int, std::vector<int>> samplerChordVoicing;   // sampler-keyboard held keys → sounded pitches
     // Enables + attaches every available MIDI input device, skipping ones already
     // connected. Called at launch and polled so freshly plugged-in keyboards work
     // without a restart.

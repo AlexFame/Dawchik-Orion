@@ -25,6 +25,8 @@ public:
     // Sync the scale from outside (e.g. project key changed while editor is open).
     void setProjectKey(int rootSemitones, bool minor);
     void setScaleLockExternally(bool enabled);
+    // Chord mode synced from the project (shared with sampler / track header / hardware MIDI).
+    void setChordModeExternally(bool enabled, int chordSize);
     void closeEditor();
     std::function<void()> onClose;
     std::function<void()> onTogglePlayback;
@@ -32,8 +34,10 @@ public:
     std::function<double()> onRequestPlayheadBeat;
     std::function<bool()> onRequestPlayingState;
     std::function<void(bool)> onScaleLockChanged; // fired when the in-editor toggle is flipped
+    std::function<void(bool)> onChordModeChanged; // fired when the in-editor Chord toggle is flipped
     std::function<void(int, int)> onPreviewNoteOn;
     std::function<void(int)> onPreviewNoteOff;
+    std::function<void()> onPreviewChordRetrigger;
     std::function<void(double)> onStartGlobalSpacePreview;
     std::function<void()> onStopGlobalSpacePreview;
     // A short space TAP promotes the running preview into normal playback (keeps playing,
@@ -201,6 +205,9 @@ private:
     int getDisplayedLaneCount() const noexcept;
     bool isPitchInScale(int pitch) const noexcept;
     int  snapPitchToScale(int pitch) const noexcept;
+    // Chord mode: expand a base pitch into a diatonic chord in the editor's scale (or {base} when off).
+    std::vector<int> chordPitchesForNote(int basePitch) const;
+    std::set<int> chordPitchSetForNote(int basePitch) const;
     bool isBlackKey(int pitch) const noexcept;
     bool isNoteSelected(int noteIndex) const noexcept;
     void selectSingleNote(int noteIndex);
@@ -276,6 +283,7 @@ private:
     std::set<int> selectedNotes;
     std::optional<int> selectedSlide;
     std::set<int> liveKeyboardPitches;
+    std::set<int> liveKeyboardBasePitches;
     std::optional<int> mousePreviewPitch;
     std::optional<int> placedNotePreviewPitch;
     double placedNotePreviewOffMs { 0.0 };
@@ -316,6 +324,7 @@ private:
     juce::TextButton glideButton;
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;
+    juce::TextButton chordToggle;
     juce::Label scaleLockLabel;
     double horizontalZoom { 1.0 };
     double verticalZoom { 1.0 };
@@ -333,6 +342,8 @@ private:
     double stepWriteStepLengthInBeats { 0.25 };
     bool focusModeEnabled { false };
     bool scaleLockEnabled { true };  // new notes snap to in-scale pitches when true
+    bool chordModeEnabled { false }; // one placed/played note becomes a diatonic chord when true
+    int  chordSizeNotes { 3 };       // 3=triad, 4=7th, 5=9th, 6=11th, 7=13th
     bool stepWriteEnabled { false };
     bool slidePenEnabled { false };
     bool glideEnabled { false };  // live portamento
@@ -340,6 +351,7 @@ private:
     bool hasStoredViewportBeforeFocus { false };
     bool ignoreNextMouseDown { false };
     std::set<int> stepWriteLivePitches;
+    std::map<int, std::vector<int>> stepWriteLiveVoicing;
     std::map<int, int> stepWritePendingVelocities;
     std::vector<NoteSnapshot> undoStack;
     std::vector<NoteSnapshot> redoStack;

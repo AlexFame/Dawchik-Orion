@@ -345,7 +345,8 @@ public:
                        int sliceIndex,
                        int sliceCount,
                        bool warpEnabled,
-                       double sourceBpm)
+                       double sourceBpm,
+                       bool fullSampleTrigger = false)
     {
         samplerEngine.noteOn(sourcePath,
                              midiNote,
@@ -357,12 +358,13 @@ public:
                              sliceCount,
                              warpEnabled,
                              sourceBpm,
-                             project.getTempoBpm());
+                             project.getTempoBpm(),
+                             fullSampleTrigger);
     }
 
-    void samplerNoteOff(int midiNote, SamplerPlaybackMode playbackMode)
+    void samplerNoteOff(int midiNote, SamplerPlaybackMode playbackMode, bool gateByNoteLength = false)
     {
-        samplerEngine.noteOff(midiNote, playbackMode);
+        samplerEngine.noteOff(midiNote, playbackMode, gateByNoteLength);
     }
 
     // Pre-build the warped sampler buffer in the background (called when a sample is loaded /
@@ -1852,6 +1854,18 @@ private:
     }
 
 public:
+    // Length of a decoded sample in seconds (0 if unknown). Message-thread only: uses the cache and
+    // falls back to a synchronous decode. Used e.g. to size a recorded one-shot note to the sample.
+    double getSampleLengthSeconds(const juce::String& path)
+    {
+        const auto* data = getAudioFileDataCached(path);
+        if (data == nullptr)
+            data = getAudioFileData(path);
+        if (data == nullptr || data->sampleRate <= 0.0)
+            return 0.0;
+        return static_cast<double>(data->buffer.getNumSamples()) / data->sampleRate;
+    }
+
     // Decode + cache a file in the background (message-thread callers), so nothing blocks on a
     // large decode. No-op if already cached or a decode is already queued for it.
     void prewarmAudioFile(const juce::String& path)

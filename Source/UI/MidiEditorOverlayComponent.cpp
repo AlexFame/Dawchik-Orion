@@ -3,7 +3,10 @@
 #include "OrionTheme.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
+#include <map>
+#include <vector>
 
 namespace
 {
@@ -123,6 +126,39 @@ PianoRollToolInfo getPianoRollToolInfo(int index) noexcept
 	    return std::nullopt;
 	}
 
+    std::optional<int> diatonicPitchForTypingKeyCode(int keyCode, int scaleRoot, int scalePatternIndex)
+    {
+        static const std::array<std::pair<int, int>, 12> upperRow {{
+            {'q', 0}, {'w', 1}, {'e', 2}, {'r', 3}, {'t', 4}, {'y', 5},
+            {'u', 6}, {'i', 7}, {'o', 8}, {'p', 9}, {'[', 10}, {']', 11},
+        }};
+        static const std::array<std::pair<int, int>, 11> lowerRow {{
+            {'z', 0}, {'x', 1}, {'c', 2}, {'v', 3}, {'b', 4}, {'n', 5},
+            {'m', 6}, {',', 7}, {'.', 8}, {'/', 9}, {'\'', 10},
+        }};
+
+        const auto lowerKeyCode = juce::CharacterFunctions::toLowerCase(static_cast<juce::juce_wchar>(keyCode));
+        int diatonicIndex = -1;
+        bool isLowerRow = false;
+        for (const auto& [mappedKey, index] : upperRow)
+            if (lowerKeyCode == mappedKey) { diatonicIndex = index; break; }
+        if (diatonicIndex < 0)
+        {
+            for (const auto& [mappedKey, index] : lowerRow)
+                if (lowerKeyCode == mappedKey) { diatonicIndex = index; isLowerRow = true; break; }
+        }
+        if (diatonicIndex < 0)
+            return std::nullopt;
+
+        const auto& pattern = scalePatterns[static_cast<std::size_t>(juce::jlimit(0, static_cast<int>(scalePatterns.size()) - 1, scalePatternIndex))].pitchClasses;
+        const auto root = ((scaleRoot % 12) + 12) % 12;
+        const auto rowBase = isLowerRow ? 48 : 60;
+        const auto octaveShift = diatonicIndex / 7;
+        const auto degree = diatonicIndex % 7;
+
+        return juce::jlimit(0, 127, rowBase + root + octaveShift * 12 + pattern[static_cast<std::size_t>(degree)]);
+    }
+
 	juce::String noteNameForPitch(int pitch)
 	{
 	    static constexpr const char* noteNames[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -177,6 +213,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     scaleButton.addListener(this);
     addAndMakeVisible(scaleButton);
 
+    snapButton.setTooltip("Snap grid: where notes land and the grid cell size");
     snapButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
     snapButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     snapButton.addListener(this);
@@ -297,6 +334,23 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     };
     addAndMakeVisible(scaleLockToggle);
 
+    chordToggle.setButtonText("Chord");
+    chordToggle.setClickingTogglesState(true);
+    chordToggle.setToggleState(chordModeEnabled, juce::dontSendNotification);
+    chordToggle.setTooltip("Chord mode: one placed/played note becomes a diatonic chord in the project key");
+    chordToggle.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    chordToggle.setColour(juce::TextButton::buttonOnColourId, theme::warm::red);
+    chordToggle.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    chordToggle.setColour(juce::TextButton::textColourOnId, theme::text::primary);
+    chordToggle.onClick = [this]
+    {
+        chordModeEnabled = chordToggle.getToggleState();
+        if (onChordModeChanged)
+            onChordModeChanged(chordModeEnabled);
+        repaint();
+    };
+    addAndMakeVisible(chordToggle);
+
     focusToggle.setVisible(false);
 
     closeButton.setButtonText("Back To Arrangement");
@@ -349,6 +403,7 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     stepWriteStepLengthInBeats = 0.25;
     stepWriteEnabled = false;
     stepWriteLivePitches.clear();
+    stepWriteLiveVoicing.clear();
     stepWritePendingVelocities.clear();
     focusModeEnabled = false;
     slidePenEnabled = false;
@@ -405,6 +460,49 @@ void MidiEditorOverlayComponent::setScaleLockExternally(bool enabled)
     scaleLockEnabled = enabled;
     scaleLockToggle.setToggleState(enabled, juce::dontSendNotification);
     repaint();
+}
+
+void MidiEditorOverlayComponent::setChordModeExternally(bool enabled, int chordSize)
+{
+    chordModeEnabled = enabled;
+    chordSizeNotes   = juce::jlimit(3, 7, chordSize);
+    static const std::array<const char*, 5> label { "Chord 3", "Chord 7", "Chord 9", "Chord 11", "Chord 13" };
+    chordToggle.setButtonText(label[static_cast<std::size_t>(chordSizeNotes - 3)]);
+    chordToggle.setToggleState(enabled, juce::dontSendNotification);
+    repaint();
+}
+
+std::vector<int> MidiEditorOverlayComponent::chordPitchesForNote(int basePitch) const
+{
+    if (! chordModeEnabled)
+        return { basePitch };
+
+    const auto& pattern = scalePatterns[static_cast<std::size_t>(scalePatternIndex)].pitchClasses;
+    const int root = ((scaleRoot % 12) + 12) % 12;
+    const int snapped = snapPitchToScale(basePitch);
+    const int pc = (((snapped - root) % 12) + 12) % 12;
+
+    int degree = 0;
+    for (int i = 0; i < 7; ++i)
+        if (pattern[static_cast<std::size_t>(i)] == pc) { degree = i; break; }
+    const int octave = (snapped - root - pattern[static_cast<std::size_t>(degree)]) / 12;
+
+    const int size = juce::jlimit(3, 7, chordSizeNotes);
+    std::vector<int> out;
+    out.reserve(static_cast<std::size_t>(size));
+    for (int k = 0; k < size; ++k)
+    {
+        const int d = degree + 2 * k;
+        const int o = octave + d / 7;
+        out.push_back(juce::jlimit(0, 127, root + 12 * o + pattern[static_cast<std::size_t>(d % 7)]));
+    }
+    return out;
+}
+
+std::set<int> MidiEditorOverlayComponent::chordPitchSetForNote(int basePitch) const
+{
+    const auto pitches = chordPitchesForNote(basePitch);
+    return { pitches.begin(), pitches.end() };
 }
 
 void MidiEditorOverlayComponent::timerCallback()
@@ -503,7 +601,10 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     activePlaybackPitches.insert(liveKeyboardPitches.begin(), liveKeyboardPitches.end());
     activePlaybackPitches.insert(stepWriteLivePitches.begin(), stepWriteLivePitches.end());
     if (mousePreviewPitch.has_value())
-        activePlaybackPitches.insert(*mousePreviewPitch);
+    {
+        const auto pitches = chordPitchSetForNote(*mousePreviewPitch);
+        activePlaybackPitches.insert(pitches.begin(), pitches.end());
+    }
 
     // === Real piano keyboard: ONE continuous white bed + black-key overlay ======
     const auto kbF       = keyboardArea.toFloat().reduced(1.0f);
@@ -806,14 +907,14 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         const bool isBeatLine = (step % stepsPerBeat) == 0;
 
         if (isBarLine)
-            g.setColour(theme::line::strong.withAlpha(0.64f));
+            g.setColour(theme::line::strong.withAlpha(0.82f));
         else if (isBeatLine)
-            g.setColour(theme::line::normal.withAlpha(0.44f));
+            g.setColour(theme::line::normal.withAlpha(0.64f));
         else
-            g.setColour(theme::line::subtle.withAlpha(0.26f));
+            g.setColour(theme::line::subtle.withAlpha(0.46f));   // snap subdivisions (1/16, 1/32…) — clearly visible
 
         g.drawLine(x, static_cast<float>(visibleGrid.getY()), x, static_cast<float>(visibleGrid.getBottom()),
-                   isBarLine ? 2.0f : (isBeatLine ? 1.4f : 1.0f));
+                   isBarLine ? 2.0f : (isBeatLine ? 1.5f : 1.1f));
     }
 
     // Bar numbers along the top of the grid.
@@ -1053,8 +1154,13 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
                     continue;
                 const auto barBounds = getVelocityBarBounds(noteIndex);
                 const auto selected = isNoteSelected(noteIndex);
-                g.setColour(midiAccentForTrack(clipColour, selected).withAlpha(selected ? 0.95f : 0.58f));
-                g.fillRoundedRectangle(barBounds.toFloat(), 4.0f);
+                const auto accent = midiAccentForTrack(clipColour, selected);
+                g.setColour(accent.withAlpha(selected ? 0.95f : 0.58f));
+                g.fillRoundedRectangle(barBounds.toFloat(), 2.5f);
+                // Bright cap on top so the exact velocity value reads clearly and is easy to grab.
+                const auto cap = barBounds.toFloat().withHeight(3.0f);
+                g.setColour(accent.withAlpha(selected ? 1.0f : 0.9f));
+                g.fillRoundedRectangle(cap, 1.5f);
             }
         }
     }
@@ -1078,11 +1184,11 @@ void MidiEditorOverlayComponent::resized()
 
     scaleButton.setBounds(controlsArea.removeFromLeft(128).reduced(0, 1));
     controlsArea.removeFromLeft(8);
-    snapButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 1));
+    snapButton.setBounds(controlsArea.removeFromLeft(92).reduced(0, 1));
     controlsArea.removeFromLeft(10);
     slideVisibilityButton.setBounds(controlsArea.removeFromLeft(112).reduced(0, 1));
     controlsArea.removeFromLeft(10);
-    stepLengthButton.setBounds(controlsArea.removeFromLeft(58).reduced(0, 1));
+    stepLengthButton.setBounds(controlsArea.removeFromLeft(74).reduced(0, 1));
     controlsArea.removeFromLeft(6);
     stepRestButton.setBounds(controlsArea.removeFromLeft(52).reduced(0, 1));
     controlsArea.removeFromLeft(6);
@@ -1092,6 +1198,8 @@ void MidiEditorOverlayComponent::resized()
     controlsArea.removeFromLeft(10);
     scaleLockToggle.setBounds(controlsArea.removeFromLeft(28).reduced(0, 3));
     scaleLockLabel.setBounds(controlsArea.removeFromLeft(78).reduced(0, 1));
+    controlsArea.removeFromLeft(10);
+    chordToggle.setBounds(controlsArea.removeFromLeft(64).reduced(0, 1));
     controlsArea.removeFromLeft(10);
     glideButton.setBounds(controlsArea.removeFromLeft(60).reduced(0, 1));
     controlsArea.removeFromLeft(10);
@@ -1735,10 +1843,16 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
         // clip end; the clip then grows to fit so you can keep writing the melody.
         const auto maxLen = juce::jmax(minimumNoteLengthInBeats, getContentBeats() - snappedBeat);
         const auto newLength = juce::jlimit(minimumNoteLengthInBeats, maxLen, lastNoteLengthInBeats);
-        activeClip->midiNotes.push_back(MidiNote { pitch, snappedBeat, newLength, 100 });
+        // Chord mode: one click writes the whole diatonic chord (each voice a separate note).
+        const auto chordPitches = chordPitchesForNote(pitch);
+        selectedNotes.clear();
+        for (const auto chordPitch : chordPitches)
+        {
+            activeClip->midiNotes.push_back(MidiNote { chordPitch, snappedBeat, newLength, 100 });
+            selectedNotes.insert(static_cast<int>(activeClip->midiNotes.size()) - 1);
+        }
         growClipToFit(snappedBeat + newLength);
-        selectSingleNote(static_cast<int>(activeClip->midiNotes.size()) - 1);
-        auditionPlacedNote(pitch, 100);
+        auditionPlacedNote(chordPitches.front(), 100);
     }
 
     if (noteDragState.has_value() && activeClip != nullptr && noteDragState->historyCaptured)
@@ -1969,7 +2083,7 @@ bool MidiEditorOverlayComponent::updateLiveKeyboardPitches()
         'z', 's', 'x', 'd', 'c', 'v', 'g', 'b', 'h', 'n', 'j', 'm', ',', 'l', '.', ';', '/', '\''
     };
 
-    std::set<int> nextPitches;
+    std::set<int> nextBasePitches;
     const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
     if (! modifiers.isCommandDown() && ! modifiers.isCtrlDown() && ! modifiers.isAltDown())
     {
@@ -1978,7 +2092,9 @@ bool MidiEditorOverlayComponent::updateLiveKeyboardPitches()
             if (! juce::KeyPress::isKeyCurrentlyDown(keyCode))
                 continue;
 
-            auto pitch = pitchForTypingKeyCode(keyCode);
+            auto pitch = scaleLockEnabled
+                ? diatonicPitchForTypingKeyCode(keyCode, scaleRoot, scalePatternIndex)
+                : pitchForTypingKeyCode(keyCode);
             if (! pitch.has_value())
                 continue;
 
@@ -1987,17 +2103,23 @@ bool MidiEditorOverlayComponent::updateLiveKeyboardPitches()
                 playablePitch += activeTrack->samplerKeyboardOctaveOffset * 12
                                + activeTrack->samplerTransposeSemitones;
 
-            if (scaleLockEnabled)
-            {
-                if (! isPitchInScale(playablePitch))
-                    playablePitch = snapPitchToScale(playablePitch);
-            }
-
-            nextPitches.insert(juce::jlimit(lowestPitch, highestPitch, playablePitch));
+            nextBasePitches.insert(juce::jlimit(lowestPitch, highestPitch, playablePitch));
         }
     }
 
+    std::set<int> nextPitches;
+    if (nextBasePitches.size() == 1)
+    {
+        for (const auto chordPitch : chordPitchesForNote(*nextBasePitches.begin()))
+            nextPitches.insert(juce::jlimit(lowestPitch, highestPitch, chordPitch));
+    }
+    else
+    {
+        nextPitches = std::move(nextBasePitches);
+    }
+
     const auto previousPitches = liveKeyboardPitches;
+    const auto previousBasePitches = liveKeyboardBasePitches;
     if (nextPitches == previousPitches)
         return false;
 
@@ -2006,12 +2128,22 @@ bool MidiEditorOverlayComponent::updateLiveKeyboardPitches()
             if (! nextPitches.contains(pitch))
                 onPreviewNoteOff(pitch);
 
+    const bool retriggerChordGesture = chordModeEnabled
+                                    && previousBasePitches.size() == 1
+                                    && nextBasePitches.size() == 1
+                                    && previousBasePitches != nextBasePitches
+                                    && ! previousPitches.empty()
+                                    && ! nextPitches.empty();
+    if (retriggerChordGesture && onPreviewChordRetrigger)
+        onPreviewChordRetrigger();
+
     if (onPreviewNoteOn)
         for (const auto pitch : nextPitches)
-            if (! previousPitches.contains(pitch))
+            if (retriggerChordGesture || ! previousPitches.contains(pitch))
                 onPreviewNoteOn(pitch, 108);
 
     liveKeyboardPitches = std::move(nextPitches);
+    liveKeyboardBasePitches = std::move(nextBasePitches);
     repaint();
     return true;
 }
@@ -2026,11 +2158,15 @@ bool MidiEditorOverlayComponent::stepWriteMidiNoteOn(int midiNote, int velocity)
         pitch = snapPitchToScale(pitch);
 
     const auto safeVelocity = juce::jlimit(1, 127, velocity > 0 ? velocity : defaultStepWriteVelocity());
-    stepWriteLivePitches.insert(pitch);
+    const auto chordPitches = chordPitchesForNote(pitch);
+    stepWriteLiveVoicing[pitch] = chordPitches;
+    for (const auto chordPitch : chordPitches)
+        stepWriteLivePitches.insert(juce::jlimit(lowestPitch, highestPitch, chordPitch));
     stepWritePendingVelocities[pitch] = safeVelocity;
 
     if (onPreviewNoteOn)
-        onPreviewNoteOn(pitch, safeVelocity);
+        for (const auto chordPitch : chordPitches)
+            onPreviewNoteOn(juce::jlimit(lowestPitch, highestPitch, chordPitch), safeVelocity);
 
     repaint();
     return true;
@@ -2045,10 +2181,20 @@ bool MidiEditorOverlayComponent::stepWriteMidiNoteOff(int midiNote)
     if (scaleLockEnabled && ! isPitchInScale(pitch))
         pitch = snapPitchToScale(pitch);
 
-    stepWriteLivePitches.erase(pitch);
+    auto pitches = chordPitchesForNote(pitch);
+    if (const auto it = stepWriteLiveVoicing.find(pitch); it != stepWriteLiveVoicing.end())
+    {
+        pitches = it->second;
+        stepWriteLiveVoicing.erase(it);
+    }
 
-    if (onPreviewNoteOff)
-        onPreviewNoteOff(pitch);
+    for (const auto chordPitch : pitches)
+    {
+        const auto clamped = juce::jlimit(lowestPitch, highestPitch, chordPitch);
+        stepWriteLivePitches.erase(clamped);
+        if (onPreviewNoteOff)
+            onPreviewNoteOff(clamped);
+    }
 
     if (stepWriteLivePitches.empty())
         commitStepWritePendingChord();
@@ -2064,7 +2210,7 @@ bool MidiEditorOverlayComponent::updateStepWriteKeyboardPitches()
         'z', 's', 'x', 'd', 'c', 'v', 'g', 'b', 'h', 'n', 'j', 'm', ',', 'l', '.', ';', '/', '\''
     };
 
-    std::set<int> nextPitches;
+    std::set<int> nextBasePitches;
     std::map<int, int> nextVelocities;
     const auto modifiers = juce::ModifierKeys::getCurrentModifiers();
     if (! modifiers.isCommandDown() && ! modifiers.isCtrlDown() && ! modifiers.isAltDown())
@@ -2074,7 +2220,9 @@ bool MidiEditorOverlayComponent::updateStepWriteKeyboardPitches()
             if (! juce::KeyPress::isKeyCurrentlyDown(keyCode))
                 continue;
 
-            auto pitch = pitchForTypingKeyCode(keyCode);
+            auto pitch = scaleLockEnabled
+                ? diatonicPitchForTypingKeyCode(keyCode, scaleRoot, scalePatternIndex)
+                : pitchForTypingKeyCode(keyCode);
             if (! pitch.has_value())
                 continue;
 
@@ -2083,13 +2231,21 @@ bool MidiEditorOverlayComponent::updateStepWriteKeyboardPitches()
                 playablePitch += activeTrack->samplerKeyboardOctaveOffset * 12
                                + activeTrack->samplerTransposeSemitones;
 
-            if (scaleLockEnabled && ! isPitchInScale(playablePitch))
-                playablePitch = snapPitchToScale(playablePitch);
-
             playablePitch = juce::jlimit(lowestPitch, highestPitch, playablePitch);
-            nextPitches.insert(playablePitch);
+            nextBasePitches.insert(playablePitch);
             nextVelocities[playablePitch] = defaultStepWriteVelocity();
         }
+    }
+
+    std::set<int> nextPitches;
+    if (nextBasePitches.size() == 1)
+    {
+        for (const auto chordPitch : chordPitchesForNote(*nextBasePitches.begin()))
+            nextPitches.insert(juce::jlimit(lowestPitch, highestPitch, chordPitch));
+    }
+    else
+    {
+        nextPitches = nextBasePitches;
     }
 
     const auto previousPitches = stepWriteLivePitches;
@@ -2127,6 +2283,7 @@ void MidiEditorOverlayComponent::commitStepWritePendingChord()
                 onPreviewNoteOff(pitch);
 
         stepWriteLivePitches.clear();
+        stepWriteLiveVoicing.clear();
     }
 
     if (activeClip == nullptr || stepWritePendingVelocities.empty())
@@ -2155,14 +2312,23 @@ void MidiEditorOverlayComponent::commitStepWritePendingChord()
     selectedNotes.clear();
     selectedSlide.reset();
 
+    // Chord mode means "one key becomes a chord". If the player is already holding multiple
+    // keys, keep that manual chord as-is instead of expanding every note into its own chord.
+    std::map<int, int> pitchToVelocity;   // pitch → velocity (kept sorted, unique)
+    const bool expandSingleKey = stepWritePendingVelocities.size() == 1;
     for (const auto& [pitch, velocity] : stepWritePendingVelocities)
     {
-        activeClip->midiNotes.push_back(MidiNote {
-            pitch,
-            startBeat,
-            noteLength,
-            juce::jlimit(1, 127, velocity)
-        });
+        const auto pitches = expandSingleKey ? chordPitchesForNote(pitch) : std::vector<int> { pitch };
+        for (const auto chordPitch : pitches)
+        {
+            auto& stored = pitchToVelocity[chordPitch];
+            stored = juce::jmax(stored, juce::jlimit(1, 127, velocity));
+        }
+    }
+
+    for (const auto& [pitch, velocity] : pitchToVelocity)
+    {
+        activeClip->midiNotes.push_back(MidiNote { pitch, startBeat, noteLength, velocity });
         selectedNotes.insert(static_cast<int>(activeClip->midiNotes.size()) - 1);
     }
 
@@ -2525,8 +2691,12 @@ void MidiEditorOverlayComponent::setMousePreviewPitch(std::optional<int> pitch)
         return;
 
     mousePreviewPitch = *pitch;
+    if (chordModeEnabled && onPreviewChordRetrigger)
+        onPreviewChordRetrigger();
+
     if (onPreviewNoteOn)
-        onPreviewNoteOn(*pitch, 110);
+        for (const auto chordPitch : chordPitchesForNote(*pitch))
+            onPreviewNoteOn(juce::jlimit(lowestPitch, highestPitch, chordPitch), 110);
     repaint();
 }
 
@@ -2538,7 +2708,8 @@ void MidiEditorOverlayComponent::releaseMousePreviewPitch()
     const auto pitch = *mousePreviewPitch;
     mousePreviewPitch.reset();
     if (onPreviewNoteOff)
-        onPreviewNoteOff(pitch);
+        for (const auto chordPitch : chordPitchesForNote(pitch))
+            onPreviewNoteOff(juce::jlimit(lowestPitch, highestPitch, chordPitch));
     repaint();
 }
 
@@ -2552,6 +2723,7 @@ void MidiEditorOverlayComponent::releaseLiveKeyboardPitches()
             onPreviewNoteOff(pitch);
 
     liveKeyboardPitches.clear();
+    liveKeyboardBasePitches.clear();
     repaint();
 }
 
@@ -3190,12 +3362,14 @@ juce::Rectangle<int> MidiEditorOverlayComponent::getVelocityBarBounds(int noteIn
     const auto note = activeClip->midiNotes[static_cast<std::size_t>(noteIndex)];
     const auto grid = getGridBounds();
     const auto pixelsPerBeat = getPixelsPerBeat();
+    // Narrow column anchored at the note START (FL/Ableton-style velocity stalk) — easy to grab and
+    // adjust one note at a time, instead of a wide bar spanning the whole note that overlaps neighbours.
+    constexpr int barWidth = 7;
     const auto x = grid.getX() + static_cast<int>(std::round((note.startBeat * pixelsPerBeat) - scrollX)) + 1;
-    const auto width = juce::jmax(6, static_cast<int>(std::round(note.lengthInBeats * pixelsPerBeat)) - 2);
     const auto normalisedVelocity = juce::jlimit(0.0, 1.0, static_cast<double>(note.velocity) / 127.0);
     const auto height = juce::jmax(8, static_cast<int>(std::round(normalisedVelocity * static_cast<double>(velocityLane.getHeight() - 20))));
 
-    return juce::Rectangle<int>(x, velocityLane.getBottom() - height, width, height).getIntersection(getVelocityLaneBounds().reduced(8, 8));
+    return juce::Rectangle<int>(x, velocityLane.getBottom() - height, barWidth, height).getIntersection(getVelocityLaneBounds().reduced(8, 8));
 }
 
 std::optional<int> MidiEditorOverlayComponent::hitTestVelocityBar(juce::Point<int> position) const
@@ -3203,11 +3377,16 @@ std::optional<int> MidiEditorOverlayComponent::hitTestVelocityBar(juce::Point<in
     if (activeClip == nullptr)
         return std::nullopt;
 
+    // Grab target = the whole vertical column above the narrow stalk (padded a little sideways), so a
+    // thin bar — or a very low-velocity short one — is still easy to click and drag.
+    const auto lane = getVelocityLaneBounds().reduced(8, 8);
     for (int noteIndex = static_cast<int>(activeClip->midiNotes.size()) - 1; noteIndex >= 0; --noteIndex)
     {
         if (focusModeEnabled && ! isPitchInScale(activeClip->midiNotes[static_cast<std::size_t>(noteIndex)].pitch))
             continue;
-        if (getVelocityBarBounds(noteIndex).contains(position))
+        const auto bar = getVelocityBarBounds(noteIndex);
+        const auto column = juce::Rectangle<int>(bar.getX() - 3, lane.getY(), bar.getWidth() + 6, lane.getHeight());
+        if (column.contains(position))
             return noteIndex;
     }
 
@@ -3719,7 +3898,9 @@ void MidiEditorOverlayComponent::quantizeSelectedNotes()
 void MidiEditorOverlayComponent::updateSubtitle()
 {
     scaleButton.setButtonText(getScaleName());
-    snapButton.setButtonText(getSnapName());
+    // Prefix so the two division menus aren't confused: "Grid" = snap/placement grid,
+    // "Len" = Step Write note length. They can be set independently (e.g. 1/16 grid, 1/32 notes).
+    snapButton.setButtonText("Grid " + getSnapName());
     const auto stepText = [this]
     {
         if (std::abs(stepWriteStepLengthInBeats - 1.0) < beatEpsilon) return juce::String("1/4");
@@ -3728,7 +3909,7 @@ void MidiEditorOverlayComponent::updateSubtitle()
         if (std::abs(stepWriteStepLengthInBeats - 0.125) < beatEpsilon) return juce::String("1/32");
         return juce::String(stepWriteStepLengthInBeats, 3);
     }();
-    stepLengthButton.setButtonText(stepText);
+    stepLengthButton.setButtonText("Len " + stepText);
     contextLabel.setText(trackName, juce::dontSendNotification);
 }
 

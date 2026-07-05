@@ -59,6 +59,9 @@ public:
     void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
     bool keyPressed(const juce::KeyPress& key) override;
     bool keyStateChanged(bool isKeyDown) override;
+    // True if this keycode maps to a typing-piano note — used to consume the key (suppress the macOS
+    // system beep) when a musical key plays a note but the keyPressed event would go unconsumed.
+    static bool isTypingMusicalKey(int keyCode);
     void focusLost(FocusChangeType cause) override;
     void visibilityChanged() override;
 
@@ -109,6 +112,7 @@ private:
     std::array<juce::Rectangle<int>, 3> modeButtonBounds;
     std::array<juce::Rectangle<int>, 4> sliceButtonBounds;
     juce::Rectangle<int> samplerWarpButtonBounds;
+    juce::Rectangle<int> fullSampleButtonBounds;   // toggle: FL-style "one hit plays whole sample"
 
     // AKAI MPC-style chop pads: 4×4 grid showing 16 pads. With 32 slices there are two
     // banks (A: 1-16, B: 17-32); the visible bank follows the most recently played slice.

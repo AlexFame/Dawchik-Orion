@@ -264,6 +264,39 @@ juce::String metadataTypeForFile(const juce::File& file)
     return "Audio";
 }
 
+// Auto-tag a sample from its file/folder name: type (Loop / One-shot) + content/instrument.
+// Synonyms collapse to one canonical tag (vox → Vocal, hh → Hat). Heuristic, filename-based —
+// like Ableton's tags for un-analysed user samples — not audio-content ML.
+juce::StringArray deriveTags(const juce::File& file)
+{
+    juce::StringArray tags;
+    const auto add = [&tags](const juce::String& t) { if (! tags.contains(t)) tags.add(t); };
+
+    const auto type = metadataTypeForFile(file);
+    if (type == "Loop" || type == "One-shot")
+        add(type);
+
+    const auto text = normalisedBrowserPathText(file);
+    static const std::array<std::pair<const char*, const char*>, 52> keywordTags {{
+        { "violin", "Violin" }, { "viola", "Viola" }, { "cello", "Cello" }, { "string", "Strings" },
+        { "piano", "Piano" }, { "rhodes", "Rhodes" }, { "organ", "Organ" }, { "keys", "Keys" },
+        { "guitar", "Guitar" }, { "808", "808" }, { "bass", "Bass" }, { "sub", "Sub" },
+        { "kick", "Kick" }, { "snare", "Snare" }, { "clap", "Clap" }, { "hihat", "Hat" }, { "hat", "Hat" },
+        { "crash", "Crash" }, { "ride", "Ride" }, { "cymbal", "Cymbal" }, { "tom", "Tom" }, { "perc", "Perc" },
+        { "shaker", "Shaker" }, { "conga", "Conga" }, { "bongo", "Bongo" }, { "rim", "Rim" }, { "drum", "Drums" },
+        { "pad", "Pad" }, { "lead", "Lead" }, { "pluck", "Pluck" }, { "arp", "Arp" }, { "chord", "Chords" },
+        { "melod", "Melody" }, { "bell", "Bell" }, { "flute", "Flute" }, { "sax", "Sax" }, { "trumpet", "Trumpet" },
+        { "brass", "Brass" }, { "horn", "Brass" }, { "vocal", "Vocal" }, { "vox", "Vocal" }, { "choir", "Choir" },
+        { "synth", "Synth" }, { "fx", "FX" }, { "riser", "Riser" }, { "sweep", "Sweep" }, { "downlifter", "Downlifter" },
+        { "impact", "Impact" }, { "snap", "Snap" }, { "whistle", "Whistle" }, { "acap", "Vocal" }, { "vocs", "Vocal" },
+    }};
+    for (const auto& [needle, tag] : keywordTags)
+        if (text.contains(needle))
+            add(tag);
+
+    return tags;
+}
+
 struct BrowserSearchFilter
 {
     bool wantsLoop { false };
@@ -339,7 +372,8 @@ bool matchesBrowserSearch(const orion::BrowserItem& item, const BrowserSearchFil
     if (filter.wantsOneShot && ! isOneShotItem(item))
         return false;
 
-    const auto searchable = (item.name + " " + item.subtitle + " " + item.category + " " + item.file.getFullPathName()).toLowerCase();
+    const auto searchable = (item.name + " " + item.subtitle + " " + item.category + " "
+                             + item.tags.joinIntoString(" ") + " " + item.file.getFullPathName()).toLowerCase();
     for (const auto& term : filter.terms)
         if (! searchable.contains(term))
             return false;
@@ -369,6 +403,11 @@ void BrowserPanelComponent::SwipeUnlockTimer::timerCallback()
 
 BrowserPanelComponent::BrowserPanelComponent()
 {
+    // The panel itself takes keyboard focus so Enter / arrows go to keyPressed() here, not to a
+    // focused button (the "Add Folder" button used to grab Enter and pop the folder chooser).
+    setWantsKeyboardFocus(true);
+
+    chooseFolderButton.setWantsKeyboardFocus(false);   // never steal Enter
     chooseFolderButton.setColour(juce::TextButton::buttonColourId, buttonColour);
     chooseFolderButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff26313b));
     chooseFolderButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -398,6 +437,7 @@ BrowserPanelComponent::BrowserPanelComponent()
     const auto styleSectionButton = [this](juce::TextButton& button)
     {
         button.setClickingTogglesState(false);
+        button.setWantsKeyboardFocus(false);   // never steal Enter from the list
         button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff151b21));
         button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff26313b));
         button.setColour(juce::TextButton::textColourOffId, mutedText);
@@ -728,7 +768,12 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 
         juce::PopupMenu menu;
         if (! item.isDirectory)
-            menu.addItem(2, "Open in sampler");
+        {
+            menu.addItem(3, "Add to playlist");                  // sampler track + clip
+            menu.addItem(2, "Open in sampler");                  // sampler track only
+            menu.addItem(4, "Replace selected track's sample");
+            menu.addSeparator();
+        }
         menu.addItem(1, "Open in Finder");
         const auto file = item.file;
         const auto activated = item;
@@ -738,10 +783,16 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
                                .withTargetScreenArea(juce::Rectangle<int>(screenPos.x, screenPos.y, 1, 1)),
                            [safeThis, file, activated](int result)
                            {
+                               if (safeThis == nullptr)
+                                   return;
                                if (result == 1 && file.exists())
                                    file.revealToUser();   // reveal/select the file or folder in Finder
-                               else if (result == 2 && safeThis != nullptr && safeThis->onOpenInSampler)
+                               else if (result == 2 && safeThis->onOpenInSampler)
                                    safeThis->onOpenInSampler(activated);   // sampler track only, no playlist clip
+                               else if (result == 3 && safeThis->onAddItemToPlaylist)
+                                   safeThis->onAddItemToPlaylist(activated);   // sampler track + clip
+                               else if (result == 4 && safeThis->onReplaceSelectedTrackSample)
+                                   safeThis->onReplaceSelectedTrackSample(activated);
                            });
         return;
     }
@@ -752,6 +803,8 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 
     if (! selectedIndex.has_value())
         return;
+
+    grabKeyboardFocus();   // so Enter/arrows act on the browser list, not a focused button
 
     const auto& item = items[static_cast<std::size_t>(*selectedIndex)];
     if (item.isDirectory)
@@ -1002,27 +1055,15 @@ bool BrowserPanelComponent::keyPressed(const juce::KeyPress& key)
         return false;
 
     const auto& item = items[static_cast<std::size_t>(*selectedIndex)];
+    // Enter on a folder does NOT navigate into it — use → or double-click for that. We still consume
+    // the key so it never leaks to the transport (which would reset playback to the start).
     if (item.isDirectory)
-    {
-        // Enter on a folder navigates into it (same as a click).
-        openDirectoryItem(item);
         return true;
-    }
 
-    // Enter replaces the selected track's sample (host decides; falls back to creating a track).
-    if (onReplaceSelectedTrackSample)
-    {
-        onReplaceSelectedTrackSample(item);
-        return true;
-    }
-
-    if (onActivateItem)
-    {
-        onActivateItem(item);
-        return true;
-    }
-
-    return false;
+    // Enter on a sound adds a SAMPLER TRACK (and opens its UI) — no audio clip in the playlist.
+    if (onOpenInSampler)
+        onOpenInSampler(item);
+    return true;
 }
 
 void BrowserPanelComponent::buttonClicked(juce::Button* button)
@@ -1290,7 +1331,7 @@ void BrowserPanelComponent::refreshEntries()
                 if (! isAudioFile(file))
                     continue;
 
-                refreshedItems.push_back(BrowserItem {
+                BrowserItem audioItem {
                     file.getFileName(),
                     file.getParentDirectory().getFileName(),
                     subtitleForFile(file),
@@ -1299,7 +1340,9 @@ void BrowserPanelComponent::refreshEntries()
                     file,
                     false,
                     false
-                });
+                };
+                audioItem.tags = deriveTags(file);
+                refreshedItems.push_back(std::move(audioItem));
             }
         }
     }
@@ -1698,7 +1741,13 @@ double BrowserPanelComponent::defaultLengthForFile(const juce::File& file) const
 juce::String BrowserPanelComponent::subtitleForFile(const juce::File& file) const
 {
     const auto extension = file.getFileExtension().trimCharactersAtStart(".");
-    return metadataTypeForFile(file) + "  •  " + extension.toUpperCase();
+    // Show the auto-derived content tags (instrument/type) inline, Ableton-style. The type tag is
+    // already the leading word, so drop it from the tag list to avoid repeating it.
+    auto tags = deriveTags(file);
+    tags.removeString("Loop");
+    tags.removeString("One-shot");
+    const auto tagText = tags.isEmpty() ? juce::String() : ("  •  " + tags.joinIntoString(" "));
+    return metadataTypeForFile(file) + tagText + "  •  " + extension.toUpperCase();
 }
 
 juce::Time BrowserPanelComponent::getWatchedLocationTimestamp() const

@@ -290,6 +290,20 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
         : juce::String("No BPM");
     g.drawText(sourceBpmText, warpInfo, juce::Justification::centred);
 
+    // Classic length model toggle: OFF = note length gates the sound (Ableton, per-note control);
+    // ON = one hit plays the whole sample (FL, note length only draws the block). Only meaningful in
+    // Classic mode (One-Shot/Slice always play the whole sample).
+    fullSampleButtonBounds = leftModeColumn.removeFromTop(42).reduced(0, 4);
+    const bool classicMode = track != nullptr && track->samplerMode == SamplerPlaybackMode::classic;
+    const bool fullActive = track != nullptr && track->samplerFullSampleTrigger;
+    g.setColour(! classicMode ? controlBackground.withAlpha(0.5f)
+                              : (fullActive ? accentColour : controlBackground));
+    g.fillRoundedRectangle(fullSampleButtonBounds.toFloat(), 8.0f);
+    g.setColour(! classicMode ? juce::Colours::white.withAlpha(0.35f)
+                              : (fullActive ? juce::Colours::white : juce::Colours::white.withAlpha(0.72f)));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.drawText("Full Sample", fullSampleButtonBounds, juce::Justification::centred);
+
     const bool sliceMode = track != nullptr && track->samplerMode == SamplerPlaybackMode::slice;
     // Slices are triggered from the keyboard (octave switches reach slices beyond the
     // visible range), so the waveform keeps full height in every mode.
@@ -863,6 +877,20 @@ void SamplerPanelComponent::mouseDown(const juce::MouseEvent& event)
             return;
         }
 
+        // Full Sample toggle (Classic only): FL-style "one hit = whole sample" vs Ableton "note
+        // length = sound length". Ignored in One-Shot/Slice (they always play the whole sample).
+        if (! fullSampleButtonBounds.isEmpty() && fullSampleButtonBounds.contains(event.getPosition()))
+        {
+            if (track->samplerMode == SamplerPlaybackMode::classic)
+            {
+                releaseTypingPianoNotes();
+                track->samplerFullSampleTrigger = ! track->samplerFullSampleTrigger;
+                repaint();
+                grabKeyboardFocus();
+            }
+            return;
+        }
+
         // Knobs: click selects (so arrow keys edit it) and arms a vertical drag.
         const auto pickKnob = [&](juce::Rectangle<int> bounds, Knob which, double value)
         {
@@ -1337,6 +1365,11 @@ void SamplerPanelComponent::timerCallback()
 juce::Rectangle<int> SamplerPanelComponent::getPanelBounds() const
 {
     return getLocalBounds();
+}
+
+bool SamplerPanelComponent::isTypingMusicalKey(int keyCode)
+{
+    return pitchForKeyCode(keyCode).has_value();
 }
 
 std::optional<int> SamplerPanelComponent::pitchForKeyCode(int keyCode)

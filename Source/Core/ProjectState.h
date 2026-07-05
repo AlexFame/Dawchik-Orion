@@ -197,6 +197,11 @@ struct TrackState
     // Transient-detect sensitivity 0..1 (higher = lower threshold = more slices).
     double samplerSliceSensitivity { 0.5 };
     bool samplerWarpEnabled { false };
+    // Playback length model for CLASSIC mode, toggled per track:
+    //   false (default, Ableton-style) — note length = sound length (per-note control, short notes work).
+    //   true  (FL-style)               — one hit plays the WHOLE sample; note length only draws the block.
+    // One-Shot/Slice always play the whole sample regardless of this.
+    bool samplerFullSampleTrigger { false };
     // Step-sequencer note gate: how long each pattern note sounds, in beats. 0 = play the full
     // sample (default). >0 clamps note length so e.g. a long 808 can be shortened per channel.
     double samplerStepGateBeats { 0.0 };
@@ -277,6 +282,14 @@ public:
     bool isScaleLockEnabled() const noexcept;
     void setScaleLockEnabled(bool enabled) noexcept;
 
+    // Chord mode: when enabled (and the project key is on), one played/recorded key
+    // becomes a diatonic chord in the project key. chordSizeNotes = how many stacked
+    // diatonic thirds: 3=triad, 4=7th, 5=9th, 6=11th, 7=13th.
+    bool isChordModeEnabled() const noexcept;
+    void setChordModeEnabled(bool enabled) noexcept;
+    int  getChordSizeNotes() const noexcept;
+    void setChordSizeNotes(int notes) noexcept;
+
     // Whether the metronome ticks (count-in + during playback) when recording.
     bool isRecordWithMetronome() const noexcept;
     void setRecordWithMetronome(bool enabled) noexcept;
@@ -323,6 +336,8 @@ private:
     bool projectKeyIsMinor { true }; // A minor / C minor are common in production
     bool projectKeyEnabled { true }; // tonality on/off
     bool scaleLockEnabled { true };
+    bool chordModeEnabled { false };
+    int  chordSizeNotes { 3 };   // 3=triad, 4=7th, 5=9th, 6=11th, 7=13th
     bool recordWithMetronome { false };
     bool recordWithCountIn { true };
     std::vector<TrackState> tracks;

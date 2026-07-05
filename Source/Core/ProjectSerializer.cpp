@@ -128,6 +128,7 @@ juce::var trackStateToVar(const orion::TrackState& track)
     }
     object->setProperty("samplerSliceSensitivity", track.samplerSliceSensitivity);
     object->setProperty("samplerWarpEnabled", track.samplerWarpEnabled);
+    object->setProperty("samplerFullSampleTrigger", track.samplerFullSampleTrigger);
     object->setProperty("samplerStepGateBeats", track.samplerStepGateBeats);
     object->setProperty("samplerAmpAttackSeconds", track.samplerAmpAttackSeconds);
     object->setProperty("samplerAmpDecaySeconds", track.samplerAmpDecaySeconds);
@@ -339,6 +340,7 @@ orion::TrackState trackStateFromVar(const juce::var& value)
             track.samplerSlicePoints.push_back(static_cast<double>(v));
     track.samplerSliceSensitivity     = juce::jlimit(0.0, 1.0, getDouble(*obj, "samplerSliceSensitivity", track.samplerSliceSensitivity));
     track.samplerWarpEnabled          = getBool(*obj, "samplerWarpEnabled", track.samplerWarpEnabled);
+    track.samplerFullSampleTrigger    = getBool(*obj, "samplerFullSampleTrigger", track.samplerFullSampleTrigger);
     track.samplerStepGateBeats        = juce::jmax(0.0, getDouble(*obj, "samplerStepGateBeats", track.samplerStepGateBeats));
     track.samplerAmpAttackSeconds     = juce::jmax(0.0, getDouble(*obj, "samplerAmpAttackSeconds", track.samplerAmpAttackSeconds));
     track.samplerAmpDecaySeconds      = juce::jmax(0.0, getDouble(*obj, "samplerAmpDecaySeconds", track.samplerAmpDecaySeconds));
@@ -408,6 +410,8 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
     rootObject->setProperty("keyIsMinor", projectState.isKeyMinor());
     rootObject->setProperty("keyEnabled", projectState.isKeyEnabled());
     rootObject->setProperty("scaleLockEnabled", projectState.isScaleLockEnabled());
+    rootObject->setProperty("chordModeEnabled", projectState.isChordModeEnabled());
+    rootObject->setProperty("chordSizeNotes", projectState.getChordSizeNotes());
     rootObject->setProperty("recordWithMetronome", projectState.isRecordWithMetronome());
     rootObject->setProperty("recordWithCountIn", projectState.isRecordWithCountIn());
     rootObject->setProperty("loopLengthInBeats", projectState.getLoopLengthInBeats());
@@ -505,6 +509,8 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
                         getBool(*root, "keyIsMinor", projectState.isKeyMinor()));
     projectState.setKeyEnabled(getBool(*root, "keyEnabled", projectState.isKeyEnabled()));
     projectState.setScaleLockEnabled(getBool(*root, "scaleLockEnabled", projectState.isScaleLockEnabled()));
+    projectState.setChordModeEnabled(getBool(*root, "chordModeEnabled", projectState.isChordModeEnabled()));
+    projectState.setChordSizeNotes(getInt(*root, "chordSizeNotes", projectState.getChordSizeNotes()));
     projectState.setRecordWithMetronome(getBool(*root, "recordWithMetronome", projectState.isRecordWithMetronome()));
     projectState.setRecordWithCountIn(getBool(*root, "recordWithCountIn", projectState.isRecordWithCountIn()));
     projectState.setLoopLengthInBeats(getDouble(*root, "loopLengthInBeats", projectState.getLoopLengthInBeats()));
