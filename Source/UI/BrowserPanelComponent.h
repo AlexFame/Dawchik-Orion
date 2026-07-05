@@ -3,6 +3,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include "../Analysis/AudioTagger.h"
+
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -22,6 +24,7 @@ struct BrowserItem
     bool isDirectory { false };
     bool isParentLink { false };
     juce::StringArray tags;   // auto-derived content tags (Loop/One-shot, instrument, …) for search
+    bool soundTagsRequested { false };   // by-sound analysis kicked off for this listing
 };
 
 class BrowserPanelComponent final : public juce::Component,
@@ -124,6 +127,8 @@ private:
     juce::Rectangle<int> getPreviewSyncButtonBounds() const noexcept;
     juce::Rectangle<int> getPreviewWaveformBounds() const noexcept;
     void paintPreviewBar(juce::Graphics& g);
+    void paintTagsRow(juce::Graphics& g);
+    juce::Rectangle<int> getTagsRowBounds() const noexcept;
     void setBrowserSection(BrowserSection section);
     void updateSectionButtons();
     void clampScrollOffset() noexcept;
@@ -134,6 +139,11 @@ private:
     double defaultLengthForFile(const juce::File& file) const noexcept;
     juce::String subtitleForFile(const juce::File& file) const;
     juce::Time getWatchedLocationTimestamp() const;
+    // Kick off (or reuse) content-based "by sound" tagging for a listed item, merging the result
+    // into its tags + subtitle when it arrives. Deduped/cached by AudioTagger.
+    void requestSoundTags(int itemIndex);
+
+    AudioTagger audioTagger;
 
     std::vector<BrowserItem> items;
     std::optional<int> selectedIndex;

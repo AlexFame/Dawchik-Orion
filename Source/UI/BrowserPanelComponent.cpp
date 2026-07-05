@@ -22,6 +22,7 @@ constexpr int dragThresholdPx = 5;
 constexpr int headerHeight = 130; // title + gap + subtitle + gap + search + gap + sections + gap
 constexpr int previewBarHeight = 64; // bottom preview card (waveform + play + name)
 constexpr int previewSyncRowHeight = 24; // SYNC toggle row, sits below the preview card
+constexpr int tagsRowHeight = 28; // "Tags:" chips row for the selected sample, above the preview
 constexpr int contentPadX = 4; // uniform horizontal inset so left/right padding stays symmetric
 constexpr float horizontalSwipeThreshold = 0.14f;
 constexpr int horizontalSwipeLockMs = 320;
@@ -525,6 +526,10 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 
         const auto selected = selectedIndex.has_value() && *selectedIndex == index;
         const auto hovered = hoverIndex.has_value() && *hoverIndex == index;
+        // Lazy "by sound" analysis: only for rows actually drawn, so a big folder analyses just what
+        // you look at (deduped/cached in AudioTagger). Result merges into tags + subtitle on arrival.
+        if (! items[static_cast<std::size_t>(index)].soundTagsRequested)
+            requestSoundTags(index);
         const auto& item = items[static_cast<std::size_t>(index)];
 
         // Row card. Selected rows get a faint tint in the entry's own colour so the
@@ -577,7 +582,47 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 
     g.restoreState();
 
+    paintTagsRow(g);
     paintPreviewBar(g);
+}
+
+void BrowserPanelComponent::paintTagsRow(juce::Graphics& g)
+{
+    const auto area = getTagsRowBounds();
+    auto row = area.reduced(2, 4);
+
+    g.setColour(th::text::secondary.withAlpha(0.72f));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.drawText("Tags", row.removeFromLeft(38), juce::Justification::centredLeft);
+
+    const orion::BrowserItem* sel = nullptr;
+    if (selectedIndex.has_value() && *selectedIndex >= 0 && *selectedIndex < static_cast<int>(items.size()))
+    {
+        const auto& it = items[static_cast<std::size_t>(*selectedIndex)];
+        if (! it.isDirectory && ! it.isParentLink)
+            sel = &it;
+    }
+
+    if (sel == nullptr || sel->tags.isEmpty())
+        return;   // nothing to show yet — just the label, no placeholder text
+
+    // Chips for each tag of the selected sample.
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    int x = row.getX();
+    for (const auto& tag : sel->tags)
+    {
+        const int chipW = tag.length() * 7 + 16;
+        if (x + chipW > row.getRight())
+            break;
+        juce::Rectangle<int> chip(x, row.getY(), chipW, row.getHeight());
+        g.setColour(th::cool::turquoise.withAlpha(0.18f));
+        g.fillRoundedRectangle(chip.toFloat(), 5.0f);
+        g.setColour(th::cool::turquoise.withAlpha(0.35f));
+        g.drawRoundedRectangle(chip.toFloat().reduced(0.5f), 5.0f, 1.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.88f));
+        g.drawText(tag, chip, juce::Justification::centred);
+        x += chipW + 5;
+    }
 }
 
 void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
@@ -1598,8 +1643,15 @@ juce::Rectangle<int> BrowserPanelComponent::getListViewportBounds() const noexce
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
     bounds.removeFromTop(headerHeight);
-    bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 3);   // card + sync + border
+    bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 3 + tagsRowHeight);   // card + sync + border + tags
     return bounds;
+}
+
+juce::Rectangle<int> BrowserPanelComponent::getTagsRowBounds() const noexcept
+{
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
+    auto region = bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 3 + tagsRowHeight);
+    return region.removeFromTop(tagsRowHeight);   // strip just above the preview border
 }
 
 juce::Rectangle<int> BrowserPanelComponent::getPreviewBarBounds() const noexcept
@@ -1736,6 +1788,40 @@ double BrowserPanelComponent::defaultLengthForFile(const juce::File& file) const
         return 8.0;
 
     return 4.0;
+}
+
+void BrowserPanelComponent::requestSoundTags(int itemIndex)
+{
+    if (itemIndex < 0 || itemIndex >= static_cast<int>(items.size()))
+        return;
+    auto& item = items[static_cast<std::size_t>(itemIndex)];
+    if (item.isDirectory || item.isParentLink || item.soundTagsRequested)
+        return;
+    item.soundTagsRequested = true;
+
+    const auto path = item.file.getFullPathName();
+    juce::Component::SafePointer<BrowserPanelComponent> safe(this);
+    audioTagger.requestTags(item.file, [safe, path](juce::StringArray soundTags) mutable
+    {
+        if (safe == nullptr || soundTags.isEmpty())
+            return;
+        auto* self = safe.getComponent();
+        for (auto& it : self->items)
+        {
+            if (it.isDirectory || it.file.getFullPathName() != path)
+                continue;
+            juce::StringArray freshForDisplay;
+            for (const auto& t : soundTags)
+                if (! it.tags.contains(t)) { it.tags.add(t); }
+            // Append tags not already visible in the subtitle (keeps the row readable).
+            for (const auto& t : soundTags)
+                if (! it.subtitle.containsIgnoreCase(t)) freshForDisplay.add(t);
+            if (! freshForDisplay.isEmpty())
+                it.subtitle += "  •  " + freshForDisplay.joinIntoString(" ");
+            break;
+        }
+        self->repaint();
+    });
 }
 
 juce::String BrowserPanelComponent::subtitleForFile(const juce::File& file) const

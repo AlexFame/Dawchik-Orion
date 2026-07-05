@@ -61,6 +61,7 @@ target_sources(
         Source/main.cpp
         Source/App/MainWindow.cpp
         Source/App/OrionApplication.cpp
+        Source/Analysis/AudioTagger.cpp
         Source/Audio/AudioInputRecorder.cpp
         Source/Audio/ExportService.cpp
         Source/Audio/OrionStretchEngine.cpp
@@ -114,6 +115,7 @@ target_link_libraries(
         juce::juce_audio_utils
         juce::juce_core
         juce::juce_data_structures
+        juce::juce_dsp
         juce::juce_events
         juce::juce_graphics
         juce::juce_gui_basics
