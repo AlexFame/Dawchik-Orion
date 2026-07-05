@@ -1,4 +1,5 @@
 #include "AudioTagger.h"
+#include "SoundClassifier.h"
 
 #include <juce_dsp/juce_dsp.h>
 #include <juce_events/juce_events.h>
@@ -232,6 +233,14 @@ void AudioTagger::requestTags(const juce::File& file, std::function<void(juce::S
 
 juce::StringArray AudioTagger::analyseFile(const juce::File& file)
 {
-    return classify(extractFeatures(formatManager, file));
+    // Instruments recognised BY SOUND via Apple's SoundAnalysis (violin, piano, guitar…).
+    juce::StringArray tags = classifyWithSoundAnalysis(file);
+
+    // Add the DSP broad tags (Loop/One-shot, Bright/Dark, Bass, Drums…) that the ML doesn't cover.
+    for (const auto& t : classify(extractFeatures(formatManager, file)))
+        if (! tags.contains(t))
+            tags.add(t);
+
+    return tags;
 }
 }  // namespace orion

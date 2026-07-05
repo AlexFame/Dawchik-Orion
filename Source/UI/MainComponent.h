@@ -385,6 +385,12 @@ private:
     double clipEditorLocalPreviewStartRatio { 0.0 };
     double clipEditorLocalPreviewEndRatio { 1.0 };
     double clipEditorLocalPreviewDurationSeconds { 0.0 };
+    // Wall-clock interpolation of the preview playhead: the transport reports position only per audio
+    // block, so we advance a smoothed seconds value by real elapsed time (playback is 1x) and softly
+    // pull it toward the actual position — that's what makes the line sweep smoothly, not in steps.
+    double clipEditorSmoothPlayheadSec { 0.0 };
+    double clipEditorLastActualPlayheadSec { 0.0 };
+    double clipEditorPlayheadWallMs { 0.0 };
 
     // Live MIDI recording state — captures keys pressed on the laptop keyboard
     // while transport is playing AND record-armed AND a MIDI track is R-armed.

@@ -82,6 +82,9 @@ private:
     void updateControlsFromState();
     double visibleWaveSpan() const noexcept;
     double clampWaveViewStart(double start) const noexcept;
+    // Adaptive beat grid step (in beats) for the current zoom — used for both drawing the grid and
+    // snapping START/END to it. 0 = no usable grid (unknown source length).
+    double currentGridStepBeats() const noexcept;
     double xToWaveRatio(int x) const noexcept;
     int waveRatioToX(double ratio) const noexcept;
     void zoomWaveformAt(int x, double zoomFactor);
@@ -105,6 +108,7 @@ private:
     WaveDragMode waveDragMode { WaveDragMode::none };
     bool trimmedClipDragCandidate { false };
     bool trimmedClipDragStarted { false };
+    bool snapBypass { false };   // Alt held → drag START/END freely without snapping to the grid
     juce::String lastSourcePath;
     double waveformZoom { 1.0 };
     double waveformViewStart { 0.0 };

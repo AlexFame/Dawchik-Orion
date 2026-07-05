@@ -62,6 +62,7 @@ target_sources(
         Source/App/MainWindow.cpp
         Source/App/OrionApplication.cpp
         Source/Analysis/AudioTagger.cpp
+        Source/Analysis/AppleSoundClassifier.mm
         Source/Audio/AudioInputRecorder.cpp
         Source/Audio/ExportService.cpp
         Source/Audio/OrionStretchEngine.cpp
@@ -121,6 +122,8 @@ target_link_libraries(
         juce::juce_gui_basics
         juce::juce_gui_extra
         signalsmith-stretch
+        "-framework SoundAnalysis"
+        "-framework CoreMedia"
         $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_LIBRARY}>
         $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_ACCELERATE_FRAMEWORK}>
     PUBLIC

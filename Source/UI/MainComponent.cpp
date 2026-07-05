@@ -5031,18 +5031,19 @@ void MainComponent::toggleTransportFromUi()
     // Play always drives the arrangement, so the clip plays in context with the rest of the
     // playlist. (The local preview still re-auditions automatically on transpose changes.)
 
-    // While the clip editor is open, EACH Play should start from the set START marker (not
-    // resume wherever the play/pause toggle last left the playhead) — so auditioning the clip
-    // from its start point is repeatable. Only applies when starting playback, not pausing.
-    if (clipEditorPanel.isVisible()
-        && ! transportEngine.isPlaying()
-        && ! transportEngine.isCountInActive())
+    // Clip editor open + audio clip: Play LOOPS the selected [START,END] region locally (Ableton
+    // clip-view style) so you can dial in the loop points by ear — drag START/END while it plays and
+    // the loop follows live. Re-pressing Play stops it. (MIDI clips fall through to normal playback.)
+    if (clipEditorPanel.isVisible())
     {
         if (auto* clip = getSelectedTimelineClip(); clip != nullptr && clip->type == ClipType::audio)
         {
-            const auto startBeat = clip->startBeat
-                + juce::jlimit(0.0, 1.0, clipEditorPreviewStartRatio) * clip->lengthInBeats;
-            transportEngine.setPlayheadBeat(startBeat);
+            if (clipEditorPreviewTransportSource.isPlaying())
+                stopClipEditorPreview(true);
+            else
+                startClipEditorPreview();   // pauses the arrangement itself, then loops the selection
+            updateTransportLabels();
+            return;
         }
     }
 
@@ -6279,6 +6280,38 @@ void MainComponent::refreshClipEditor()
         // (clipEditorLocalPreview*). Clamp the displayed playhead to THAT range, not the
         // editor's live selection — otherwise dragging the start/end markers pins the line
         // to the moving marker and it flickers against the real playback position.
+        // Interpolate the preview playhead with wall-clock time so it sweeps smoothly instead of
+        // stepping with the audio-block-quantised transport position (that was the "low FPS" jerk).
+        if (clipEditorPreviewTransportSource.isPlaying() && clipEditorLocalPreviewDurationSeconds > 0.0)
+        {
+            const double duration = clipEditorLocalPreviewDurationSeconds;
+            const double startSec = clipEditorLocalPreviewStartRatio * duration;
+            const double endSec   = clipEditorLocalPreviewEndRatio * duration;
+            const double actualSec = clipEditorPreviewTransportSource.getCurrentPosition();
+            const double now = juce::Time::getMillisecondCounterHiRes();
+            const double dt = juce::jlimit(0.0, 0.1, (now - clipEditorPlayheadWallMs) / 1000.0);
+            clipEditorPlayheadWallMs = now;
+
+            // Loop wrap or seek → the reported position jumps; snap the smoothed value to it.
+            const bool discontinuity = actualSec < clipEditorLastActualPlayheadSec - 0.001
+                                    || std::abs(actualSec - clipEditorSmoothPlayheadSec) > 0.15;
+            clipEditorLastActualPlayheadSec = actualSec;
+
+            if (discontinuity)
+                clipEditorSmoothPlayheadSec = actualSec;
+            else
+                // advance by real time (1x playback) then gently correct drift toward the true position
+                clipEditorSmoothPlayheadSec += dt + (actualSec - clipEditorSmoothPlayheadSec) * 0.10;
+
+            clipEditorSmoothPlayheadSec = juce::jlimit(startSec, endSec, clipEditorSmoothPlayheadSec);
+            clipEditorPreviewPlayheadRatio = juce::jlimit(0.0, 1.0, clipEditorSmoothPlayheadSec / duration);
+        }
+        else
+        {
+            // Keep the wall clock fresh so the first frame of the next playback has a small dt.
+            clipEditorPlayheadWallMs = juce::Time::getMillisecondCounterHiRes();
+        }
+
         auto previewSourceRatio = clipEditorPreviewTransportSource.isPlaying()
             ? juce::jlimit(clipEditorLocalPreviewStartRatio, clipEditorLocalPreviewEndRatio, clipEditorPreviewPlayheadRatio)
             : juce::jlimit(editorState.sampleStartRatio, editorState.sampleEndRatio, clipEditorPreviewPlayheadRatio);

@@ -75,11 +75,42 @@ ClipEditorComponent::ClipEditorComponent()
 
 void ClipEditorComponent::setState(const ClipEditorState& newState)
 {
-    if (lastSourcePath != newState.sourcePath)
+    const bool sourceChanged = (lastSourcePath != newState.sourcePath);
+    if (sourceChanged)
     {
         lastSourcePath = newState.sourcePath;
         waveformZoom = 1.0;
         waveformViewStart = 0.0;
+    }
+
+    // Fast path for the common case where only the playhead moved (transport ticking every frame):
+    // everything else that affects the layout/controls/waveform is identical, so we can skip the
+    // control refresh and full repaint and only invalidate a thin strip around the old + new playhead.
+    // That's what keeps the line sweeping smoothly instead of janking under 60 full repaints/sec.
+    const bool onlyPlayheadMoved =
+        ! sourceChanged
+        && state.hasSelection == newState.hasSelection
+        && state.isAudioClip == newState.isAudioClip
+        && state.sampleStartRatio == newState.sampleStartRatio
+        && state.sampleEndRatio == newState.sampleEndRatio
+        && state.gainDb == newState.gainDb
+        && state.transposeSemitones == newState.transposeSemitones
+        && state.warpEnabled == newState.warpEnabled
+        && state.keyShiftEnabled == newState.keyShiftEnabled
+        && state.sourceLengthBeats == newState.sourceLengthBeats
+        && state.lengthInBeats == newState.lengthInBeats
+        && state.title == newState.title
+        && ! lastWaveformBounds.isEmpty();
+
+    if (onlyPlayheadMoved)
+    {
+        const int oldX = waveRatioToX(juce::jlimit(0.0, 1.0, state.previewSourceRatio));
+        const int newX = waveRatioToX(juce::jlimit(0.0, 1.0, newState.previewSourceRatio));
+        state = newState;
+        const int lo = juce::jmin(oldX, newX) - 3;
+        const int hi = juce::jmax(oldX, newX) + 3;
+        repaint(lo, lastWaveformBounds.getY(), hi - lo, lastWaveformBounds.getHeight());
+        return;
     }
 
     state = newState;
@@ -220,6 +251,7 @@ void ClipEditorComponent::mouseDown(const juce::MouseEvent& event)
 
     trimmedClipDragCandidate = false;
     trimmedClipDragStarted = false;
+    snapBypass = event.mods.isAltDown();
 
     const auto startX = waveRatioToX(state.sampleStartRatio);
     const auto endX = waveRatioToX(state.sampleEndRatio);
@@ -269,6 +301,7 @@ void ClipEditorComponent::mouseDrag(const juce::MouseEvent& event)
     if (waveDragMode == WaveDragMode::none)
         return;
 
+    snapBypass = event.mods.isAltDown();
     updateSampleMarker(waveDragMode, event.x, true);
 }
 
@@ -451,6 +484,37 @@ void ClipEditorComponent::drawWaveformPreview(juce::Graphics& g, juce::Rectangle
     if (endX < waveform.getRight())
         g.fillRect(waveform.withX(juce::jmax(endX, waveform.getX())));
 
+    // Beat / bar grid over the waveform so START/END read against musical positions (Ableton-style).
+    if (const double totalBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
+        totalBeats > 0.0 && totalBeats < 100000.0)
+    {
+        const double step = currentGridStepBeats();
+        constexpr int beatsPerBar = 4;
+        if (step > 0.0)
+        {
+            const double visStart = waveformViewStart;
+            const double visEnd = juce::jlimit(0.0, 1.0, waveformViewStart + visibleWaveSpan());
+            double beat = std::floor((visStart * totalBeats) / step) * step;
+            for (; beat <= totalBeats + 0.001 && (beat / totalBeats) <= visEnd + 0.001; beat += step)
+            {
+                const int x = waveRatioToX(beat / totalBeats);
+                if (x < waveform.getX() - 1 || x > waveform.getRight() + 1)
+                    continue;
+                const double inBar = std::fmod(beat, static_cast<double>(beatsPerBar));
+                const bool onBar = inBar < 0.001 || (beatsPerBar - inBar) < 0.001;
+                g.setColour(juce::Colours::white.withAlpha(onBar ? 0.18f : 0.07f));
+                g.drawVerticalLine(x, static_cast<float>(waveform.getY()), static_cast<float>(waveform.getBottom()));
+                if (onBar)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.5f));
+                    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+                    g.drawText(juce::String(static_cast<int>(std::round(beat / beatsPerBar)) + 1),
+                               x + 3, waveform.getBottom() - 13, 26, 11, juce::Justification::bottomLeft);
+                }
+            }
+        }
+    }
+
     const auto drawMarker = [&](int x, const juce::String& label)
     {
         if (x < waveform.getX() || x > waveform.getRight())
@@ -577,9 +641,32 @@ double ClipEditorComponent::clampWaveViewStart(double start) const noexcept
     return juce::jlimit(0.0, juce::jmax(0.0, 1.0 - span), start);
 }
 
+double ClipEditorComponent::currentGridStepBeats() const noexcept
+{
+    const double totalBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
+    if (totalBeats <= 0.0 || lastWaveformBounds.getWidth() <= 0)
+        return 0.0;
+    const double pxPerBeat = static_cast<double>(lastWaveformBounds.getWidth()) / (totalBeats * visibleWaveSpan());
+    // Finest musical step whose lines are at least ~9px apart (no picket fence).
+    static const double steps[] = { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0 };
+    for (const double s : steps)
+        if (pxPerBeat * s >= 9.0)
+            return s;
+    return 256.0;
+}
+
 void ClipEditorComponent::updateSampleMarker(WaveDragMode mode, int x, bool shouldSeek)
 {
-    const auto ratio = xToWaveRatio(x);
+    auto ratio = xToWaveRatio(x);
+
+    // Snap START/END to the beat grid (hold Alt to place freely). Makes trimming to bars/beats exact.
+    if (! snapBypass && (mode == WaveDragMode::start || mode == WaveDragMode::end))
+    {
+        const double totalBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
+        const double step = currentGridStepBeats();
+        if (totalBeats > 0.0 && step > 0.0)
+            ratio = juce::jlimit(0.0, 1.0, (std::round((ratio * totalBeats) / step) * step) / totalBeats);
+    }
 
     if (mode == WaveDragMode::start)
     {

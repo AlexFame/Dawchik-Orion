@@ -210,6 +210,13 @@ public:
                         // dragged past the playhead we let the current pass finish and wrap
                         // naturally; snapping every block was what crackled while dragging.
 
+        // Short S-shaped fade in at the loop start and out at the loop end so the seam doesn't click
+        // when it wraps. Timing is preserved (no samples skipped), so a tempo-locked loop stays in sync.
+        const int loopLen = le - ls;
+        const int fadeLen = (loopLen > 8) ? juce::jmin(loopLen / 4, static_cast<int>(sampleRate * 0.004)) : 0;
+        const auto smoothstep = [](float x) { x = juce::jlimit(0.0f, 1.0f, x); return x * x * (3.0f - 2.0f * x); };
+        const int nch = info.buffer->getNumChannels();
+
         int written = 0;
         while (written < info.numSamples)
         {
@@ -219,10 +226,20 @@ public:
             if (pos >= cap)
                 break;                    // producer hasn't filled this far yet → silence rest
             const int n = juce::jmin(info.numSamples - written, cap - pos);
-            for (int c = 0; c < info.buffer->getNumChannels(); ++c)
+            for (int i = 0; i < n; ++i)
             {
-                const int sc = juce::jmin(c, out.getNumChannels() - 1);
-                info.buffer->copyFrom(c, info.startSample + written, out, sc, pos, n);
+                const int p = pos + i;
+                float g = 1.0f;
+                if (fadeLen > 0)
+                {
+                    if (p - ls < fadeLen) g *= smoothstep(static_cast<float>(p - ls) / static_cast<float>(fadeLen));
+                    if (le - p <= fadeLen) g *= smoothstep(static_cast<float>(le - p) / static_cast<float>(fadeLen));
+                }
+                for (int c = 0; c < nch; ++c)
+                {
+                    const int sc = juce::jmin(c, out.getNumChannels() - 1);
+                    info.buffer->setSample(c, info.startSample + written + i, out.getSample(sc, p) * g);
+                }
             }
             pos += n;
             written += n;
