@@ -110,11 +110,13 @@ class StreamingWarpPreviewSource final : public juce::PositionableAudioSource,
 {
 public:
     StreamingWarpPreviewSource(juce::AudioBuffer<float> sourceRegion, double sr,
-                               int targetSamples, double pitchScale)
+                               int targetSamples, double pitchScale,
+                               std::vector<std::pair<double, double>> warpPoints = {})
         : juce::Thread("ClipPreviewWarp"),
           input(std::move(sourceRegion)),
           sampleRate(sr > 0.0 ? sr : 44100.0),
-          totalOut(juce::jmax(1, targetSamples))
+          totalOut(juce::jmax(1, targetSamples)),
+          warpPointsOutIn(std::move(warpPoints))
     {
         channels = juce::jlimit(1, 2, input.getNumChannels());
         out.setSize(channels, totalOut);
@@ -144,6 +146,16 @@ public:
     void releaseResources() override {}
 
     void run() override
+    {
+        if (! warpPointsOutIn.empty())
+        {
+            runPiecewise();
+            return;
+        }
+        runLinear();
+    }
+
+    void runLinear()
     {
         const double inRatio = static_cast<double>(input.getNumSamples()) / juce::jmax(1, totalOut);
 
@@ -175,6 +187,53 @@ public:
                 }
             }
             inputPos += inChunk;
+            const float* inPtrs[2]  = { scratch.getReadPointer(0), channels > 1 ? scratch.getReadPointer(1) : nullptr };
+            float*       outPtrs[2] = { out.getWritePointer(0) + produced, channels > 1 ? out.getWritePointer(1) + produced : nullptr };
+            stretch.process(inPtrs, inChunk, outPtrs, outChunk);
+            produced += outChunk;
+            producedSamples.store(produced, std::memory_order_release);
+        }
+    }
+
+    // Piecewise warp: the stretch ratio varies along the sample so each control point's source
+    // position lands on its target beat. We size each output chunk so the (variable) input span fits
+    // the scratch buffer, read that source span with linear interpolation, and feed the stretcher.
+    void runPiecewise()
+    {
+        const int inputSamples = input.getNumSamples();
+        juce::AudioBuffer<float> scratch(channels, 8192);
+        const int scratchCap = scratch.getNumSamples();
+
+        double inputCursor = inputRatioAt(0.0) * inputSamples;   // fractional source read position
+        int produced = 0;
+        while (produced < totalOut && ! threadShouldExit())
+        {
+            // Local ratio (input samples per output sample) around this point → keep inChunk <= scratchCap.
+            const int probe = juce::jmin(totalOut, produced + 256);
+            const double localRatio = juce::jmax(1.0e-4,
+                (inputRatioAt(static_cast<double>(probe) / totalOut) - inputRatioAt(static_cast<double>(produced) / totalOut))
+                    * inputSamples / juce::jmax(1, probe - produced));
+            int outChunk = juce::jlimit(1, totalOut - produced,
+                                        juce::jmin(2048, static_cast<int>(scratchCap / juce::jmax(1.0, localRatio))));
+
+            const double inStart = inputCursor;
+            const double inEnd   = inputRatioAt(static_cast<double>(produced + outChunk) / totalOut) * inputSamples;
+            const int inChunk = juce::jlimit(1, scratchCap, static_cast<int>(std::llround(inEnd - inStart)));
+
+            for (int c = 0; c < channels; ++c)
+            {
+                auto* dst = scratch.getWritePointer(c);
+                const int sc = juce::jmin(c, input.getNumChannels() - 1);
+                for (int i = 0; i < inChunk; ++i)
+                {
+                    const double idx = inStart + i;
+                    const int i0 = static_cast<int>(idx);
+                    const float a = (i0 >= 0 && i0 < inputSamples) ? input.getSample(sc, i0) : 0.0f;
+                    const float b = (i0 + 1 >= 0 && i0 + 1 < inputSamples) ? input.getSample(sc, i0 + 1) : a;
+                    dst[i] = a + static_cast<float>(idx - i0) * (b - a);
+                }
+            }
+            inputCursor = inEnd;
             const float* inPtrs[2]  = { scratch.getReadPointer(0), channels > 1 ? scratch.getReadPointer(1) : nullptr };
             float*       outPtrs[2] = { out.getWritePointer(0) + produced, channels > 1 ? out.getWritePointer(1) + produced : nullptr };
             stretch.process(inPtrs, inChunk, outPtrs, outChunk);
@@ -272,6 +331,26 @@ private:
     std::atomic<int> loopStartSample { 0 };
     std::atomic<int> loopEndSample { 1 };
     juce::int64 positionSamples { 0 };
+
+    // Piecewise warp map as (outputRatio, inputRatio) control points, sorted by outputRatio and always
+    // spanning (0,0)..(1,1). Empty = plain linear warp (legacy path). Only read on the producer thread.
+    std::vector<std::pair<double, double>> warpPointsOutIn;
+
+    // Piecewise-linear lookup: warped output ratio [0,1] -> source input ratio [0,1].
+    double inputRatioAt(double outRatio) const noexcept
+    {
+        outRatio = juce::jlimit(0.0, 1.0, outRatio);
+        for (std::size_t i = 1; i < warpPointsOutIn.size(); ++i)
+        {
+            if (outRatio <= warpPointsOutIn[i].first)
+            {
+                const auto span = juce::jmax(1.0e-9, warpPointsOutIn[i].first - warpPointsOutIn[i - 1].first);
+                const auto t = (outRatio - warpPointsOutIn[i - 1].first) / span;
+                return warpPointsOutIn[i - 1].second + t * (warpPointsOutIn[i].second - warpPointsOutIn[i - 1].second);
+            }
+        }
+        return warpPointsOutIn.empty() ? outRatio : warpPointsOutIn.back().second;
+    }
 };
 
 class ArrangementPlaybackSource final : public juce::AudioSource

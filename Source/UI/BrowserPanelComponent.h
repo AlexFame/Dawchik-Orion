@@ -155,6 +155,9 @@ private:
     bool showingUserHomeOverview { false };
     juce::String entrySignature;
     double scrollOffsetY { 0.0 };
+    // Debounce for the by-sound ML tagging: don't kick off Apple SoundAnalysis for rows while the list
+    // is actively scrolling (that CPU spike made scrolling feel watery during a preview).
+    double lastScrollMs { 0.0 };
     float horizontalWheelAccumulator { 0.0f };
     juce::uint32 lastHorizontalWheelMs { 0 };
     bool horizontalSwipeLocked { false };

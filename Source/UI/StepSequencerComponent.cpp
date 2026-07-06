@@ -198,6 +198,15 @@ void StepSequencerComponent::toggleStep(int trackIndex, int step)
 }
 
 //==============================================================================
+std::pair<juce::Rectangle<int>, juce::Rectangle<int>> StepSequencerComponent::stepCountToggleBounds() const
+{
+    auto header = getLocalBounds().removeFromTop(kHeaderHeight).reduced(kLeftPad, 0);
+    header.removeFromLeft(184);   // past the title
+    auto area = header.withSizeKeepingCentre(112, 22);
+    auto left = area.removeFromLeft(area.getWidth() / 2);
+    return { left, area };
+}
+
 juce::Rectangle<int> StepSequencerComponent::gridArea() const
 {
     return getLocalBounds().withTrimmedTop(kHeaderHeight).reduced(kLeftPad, 8);
@@ -267,6 +276,22 @@ void StepSequencerComponent::paint(juce::Graphics& g)
     g.setColour(theme::text::muted.withAlpha(0.8f));
     g.setFont(juce::FontOptions(11.0f, juce::Font::plain));
     g.drawText("right-click a row for the piano roll", header, juce::Justification::centredRight);
+
+    // "16 / 32" step-count toggle.
+    {
+        const auto [b16, b32] = stepCountToggleBounds();
+        const bool is32 = bars >= 2;
+        const auto drawSeg = [&](juce::Rectangle<int> b, const juce::String& label, bool active)
+        {
+            g.setColour(active ? theme::cool::cyan.withAlpha(0.85f) : theme::core::voidBlack.withAlpha(0.6f));
+            g.fillRoundedRectangle(b.toFloat(), 5.0f);
+            g.setColour(active ? theme::core::deepSpace : theme::text::muted);
+            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+            g.drawText(label, b, juce::Justification::centred);
+        };
+        drawSeg(b16, "16", ! is32);
+        drawSeg(b32, "32", is32);
+    }
 
     if (channelTrackIndices.empty())
     {
@@ -426,6 +451,21 @@ void StepSequencerComponent::mouseDown(const juce::MouseEvent& event)
     rebuildChannels();
     const auto pos = event.getPosition();
     const bool popup = event.mods.isPopupMenu();
+
+    // "16 / 32" step-count toggle in the header (32 steps = 2 bars of 16).
+    if (const auto [b16, b32] = stepCountToggleBounds(); b16.contains(pos) || b32.contains(pos))
+    {
+        const int newBars = b32.contains(pos) ? 2 : 1;
+        if (newBars != bars)
+        {
+            bars = newBars;
+            rebuildChannels();           // resizes the pattern clips to the new length
+            if (onPatternEdited)
+                onPatternEdited();
+            repaint();
+        }
+        return;
+    }
 
     for (int row = 0; row < static_cast<int>(channelTrackIndices.size()); ++row)
     {

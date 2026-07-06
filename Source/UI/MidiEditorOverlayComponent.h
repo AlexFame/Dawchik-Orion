@@ -330,14 +330,26 @@ private:
     double verticalZoom { 1.0 };
     double scrollX { 0.0 };
     double scrollY { 0.0 };
+    // Smooth (FL-style) zoom + scroll: gestures set targets and a pinned focus; the 120 Hz timer eases
+    // the actual values toward them, so panning and zooming glide instead of snapping frame to frame.
+    double targetHorizontalZoom { 1.0 };
+    double targetVerticalZoom { 1.0 };
+    double targetScrollX { 0.0 };
+    double targetScrollY { 0.0 };
+    bool   zoomAnimating { false };
+    double zoomFocusBeat { 0.0 };
+    double zoomFocusLane { 0.0 };
+    double zoomFocusXInView { 0.0 };
+    double zoomFocusYInView { 0.0 };
+    void   syncZoomScrollTargets();   // set targets = current (call after any direct scroll/zoom set)
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };
     int scaleRoot { 0 };
     int scalePatternIndex { 0 };
     double snapSizeInBeats { 0.25 };
-    // Default length for a freshly drawn note. Starts at 4 bars (4 beats/bar = 16 beats) and
-    // then remembers whatever length the user last drew/stretched a note to.
-    double lastNoteLengthInBeats { 16.0 };
+    // Default length for a freshly drawn note. Starts at the "Len" grid step (1/16) and then follows
+    // the Len button / whatever length the user last drew, stretched, or clicked (FL-style).
+    double lastNoteLengthInBeats { 0.25 };
     double stepWriteCursorBeat { 0.0 };
     double stepWriteStepLengthInBeats { 0.25 };
     bool focusModeEnabled { false };

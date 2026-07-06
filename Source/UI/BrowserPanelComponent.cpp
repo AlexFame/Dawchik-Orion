@@ -527,8 +527,10 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         const auto selected = selectedIndex.has_value() && *selectedIndex == index;
         const auto hovered = hoverIndex.has_value() && *hoverIndex == index;
         // Lazy "by sound" analysis: only for rows actually drawn, so a big folder analyses just what
-        // you look at (deduped/cached in AudioTagger). Result merges into tags + subtitle on arrival.
-        if (! items[static_cast<std::size_t>(index)].soundTagsRequested)
+        // you look at (deduped/cached in AudioTagger). Skipped while actively scrolling (debounce) so the
+        // heavy ML doesn't spike the CPU mid-flick — it runs once the list settles.
+        if (! items[static_cast<std::size_t>(index)].soundTagsRequested
+            && juce::Time::getMillisecondCounterHiRes() - lastScrollMs > 260.0)
             requestSoundTags(index);
         const auto& item = items[static_cast<std::size_t>(index)];
 
@@ -1037,6 +1039,10 @@ void BrowserPanelComponent::mouseWheelMove(const juce::MouseEvent& event, const 
     scrollOffsetY -= static_cast<double>(wheel.deltaY) * pixelsPerWheelUnit * speedGain;
     clampScrollOffset();
     hoverIndex = hitTestRow(event.getPosition());
+    lastScrollMs = juce::Time::getMillisecondCounterHiRes();
+    // Once scrolling settles, repaint so the debounced ML tagging kicks in for the now-visible rows.
+    juce::Component::SafePointer<BrowserPanelComponent> safe(this);
+    juce::Timer::callAfterDelay(300, [safe]() mutable { if (safe != nullptr) safe->repaint(); });
     repaint();
 }
 

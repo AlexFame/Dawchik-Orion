@@ -1321,9 +1321,10 @@ MainComponent::MainComponent()
     {
         if (auto* clip = getSelectedTimelineClip())
         {
+            // The audio render reads clip.gainDb live per block, so this is instant. Keep the handler
+            // LIGHT — no full clip-editor rebuild / waveform redraw per drag tick (that made the slider
+            // feel laggy). The GAIN readouts refresh on the next timer tick anyway.
             clip->gainDb = juce::jlimit(-24.0, 12.0, gainDb);
-            refreshClipInspector();
-            refreshClipEditor();
             arrangementTimeline.repaint();
         }
     };
@@ -1454,6 +1455,46 @@ MainComponent::MainComponent()
         refreshClipEditor();
     };
     clipEditorPanel.onNormalize = [this]() { normalizeSelectedAudioClip(); };
+
+    // Warp markers. Mutate the clip, keep them sorted by source position, refresh the editor, and — if
+    // the loop preview is running — rebuild it so the piecewise warp is heard immediately.
+    auto applyWarpMarkerChange = [this]()
+    {
+        refreshClipEditor();
+        if (clipEditorPreviewTransportSource.isPlaying())
+            startClipEditorPreview();
+    };
+    clipEditorPanel.onWarpMarkerAdded = [this, applyWarpMarkerChange](double sourceRatio, double beat)
+    {
+        if (auto* clip = getSelectedTimelineClip())
+        {
+            arrangementTimeline.captureUndoSnapshot();   // so Ctrl+Z removes the marker, not the track
+            clip->warpMarkers.push_back({ sourceRatio, beat });
+            std::sort(clip->warpMarkers.begin(), clip->warpMarkers.end(),
+                      [](const auto& a, const auto& b) { return a.sourceRatio < b.sourceRatio; });
+            applyWarpMarkerChange();
+        }
+    };
+    clipEditorPanel.onWarpMarkerMoved = [this, applyWarpMarkerChange](int index, double beat)
+    {
+        if (auto* clip = getSelectedTimelineClip(); clip != nullptr
+            && index >= 0 && index < static_cast<int>(clip->warpMarkers.size()))
+        {
+            arrangementTimeline.captureUndoSnapshot();
+            clip->warpMarkers[static_cast<std::size_t>(index)].beat = beat;
+            applyWarpMarkerChange();
+        }
+    };
+    clipEditorPanel.onWarpMarkerRemoved = [this, applyWarpMarkerChange](int index)
+    {
+        if (auto* clip = getSelectedTimelineClip(); clip != nullptr
+            && index >= 0 && index < static_cast<int>(clip->warpMarkers.size()))
+        {
+            arrangementTimeline.captureUndoSnapshot();
+            clip->warpMarkers.erase(clip->warpMarkers.begin() + index);
+            applyWarpMarkerChange();
+        }
+    };
 
     // Both the mixer strips and the timeline track headers read the decayed levels
     // that this component maintains (single owner — see updateTrackMeterLevels()).
@@ -2839,6 +2880,12 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
     if ((key == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)
          || key == juce::KeyPress('y', juce::ModifierKeys::commandModifier, 0)) && arrangementTimeline.redo())
+        return true;
+
+    // Delete/Backspace: forward to the timeline so deleting the selected clip(s) or track(s) works even
+    // when keyboard focus landed on MainComponent (or elsewhere) rather than the timeline itself.
+    if ((key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey)
+        && arrangementTimeline.keyPressed(key))
         return true;
 
     if ((samplerPanel.isVisible() || samplerPanel.isArmed()) && samplerPanel.keyPressed(key))
@@ -4826,16 +4873,30 @@ bool MainComponent::startClipEditorPreview()
     // follows live (see setLoopBounds in onSampleRangeChanged).
     const double projectBps = projectState.getTempoBpm() / 60.0;
     int fullTargetSamples = fullSourceSamples;
+    double fullWarpBeats = 0.0;
     if (clip->warpEnabled && projectBps > 0.0)
     {
         const auto clipTrimStart = juce::jlimit(0.0, 0.999, clip->sampleStartRatio);
         const auto clipTrimEnd   = juce::jlimit(clipTrimStart + 0.001, 1.0, clip->sampleEndRatio);
         const auto clipTrimSpan  = juce::jmax(0.001, clipTrimEnd - clipTrimStart);
-        const double fullWarpBeats = clip->warpTargetLengthInBeats > 0.0
+        fullWarpBeats = clip->warpTargetLengthInBeats > 0.0
             ? clip->warpTargetLengthInBeats
             : clip->lengthInBeats / clipTrimSpan;
         const double tgt = (fullWarpBeats / projectBps) * reader->sampleRate;
         fullTargetSamples = juce::jlimit(1, std::numeric_limits<int>::max(), static_cast<int>(std::llround(tgt)));
+    }
+
+    // Piecewise warp control points for the streamer: (outputRatio, sourceRatio) across the whole
+    // warped source. Only when warp is on and the user has placed markers; otherwise empty = linear.
+    std::vector<std::pair<double, double>> warpPts;
+    juce::String warpSig;
+    if (clip->warpEnabled && ! clip->warpMarkers.empty() && fullWarpBeats > 0.0)
+    {
+        for (const auto& p : warpControlPoints(clip->warpMarkers, fullWarpBeats))
+        {
+            warpPts.push_back({ p.beat / fullWarpBeats, p.sourceRatio });
+            warpSig << juce::String(p.sourceRatio, 4) << ":" << juce::String(p.beat, 4) << ";";
+        }
     }
 
     clipEditorPreviewResumeSeconds = -1.0;
@@ -4843,7 +4904,8 @@ bool MainComponent::startClipEditorPreview()
     const double fullDurationSeconds = static_cast<double>(fullTargetSamples) / reader->sampleRate;
     const auto streamKey = clip->sourcePath.toStdString()
                          + "|" + std::to_string(semitones)
-                         + "|t" + std::to_string(fullTargetSamples);
+                         + "|t" + std::to_string(fullTargetSamples)
+                         + "|w" + warpSig.toStdString();
 
     // Reuse the existing rendered source when nothing that affects the buffer changed
     // (same file/pitch/tempo). Its producer fills the whole source even while stopped, so
@@ -4876,7 +4938,7 @@ bool MainComponent::startClipEditorPreview()
         clipEditorPreviewBufferSource.reset();
         clipEditorPreviewStreamSource.reset();
         clipEditorPreviewStreamSource = std::make_unique<StreamingWarpPreviewSource>(
-            std::move(region), reader->sampleRate, juce::jmax(1, fullTargetSamples), pitchScale);
+            std::move(region), reader->sampleRate, juce::jmax(1, fullTargetSamples), pitchScale, std::move(warpPts));
         clipEditorPreviewStreamKey = streamKey;
         clipEditorPreviewTransportSource.setSource(clipEditorPreviewStreamSource.get(), 0, nullptr, reader->sampleRate);
     }
@@ -5031,21 +5093,9 @@ void MainComponent::toggleTransportFromUi()
     // Play always drives the arrangement, so the clip plays in context with the rest of the
     // playlist. (The local preview still re-auditions automatically on transpose changes.)
 
-    // Clip editor open + audio clip: Play LOOPS the selected [START,END] region locally (Ableton
-    // clip-view style) so you can dial in the loop points by ear — drag START/END while it plays and
-    // the loop follows live. Re-pressing Play stops it. (MIDI clips fall through to normal playback.)
-    if (clipEditorPanel.isVisible())
-    {
-        if (auto* clip = getSelectedTimelineClip(); clip != nullptr && clip->type == ClipType::audio)
-        {
-            if (clipEditorPreviewTransportSource.isPlaying())
-                stopClipEditorPreview(true);
-            else
-                startClipEditorPreview();   // pauses the arrangement itself, then loops the selection
-            updateTransportLabels();
-            return;
-        }
-    }
+    // The main transport ALWAYS drives the arrangement now, even with the clip editor open, so you can
+    // hear the whole mix while tweaking a clip. The clip-editor loop preview lives on its own ▶ button
+    // in the clip editor (onLoopPreviewToggle), so it never hijacks the global Play again.
 
     // Count-in belongs to recording only. Keep normal playback instant even if the
     // user previously selected "4-count before recording" in the REC options.
@@ -6252,6 +6302,17 @@ void MainComponent::refreshClipEditor()
         editorState.sourceBpm = clip->sourceBpm;
         editorState.detectedBars = clip->detectedBars;
         editorState.transposeSemitones = clip->transposeSemitones;
+        // Auto key-shift into the project key (mirrors computeKeyShiftSemitones), shown in CLIP INFO.
+        editorState.autoKeyShiftActive = clip->keyShiftEnabled && clip->sourceKeyRoot >= 0 && projectState.isKeyEnabled();
+        if (editorState.autoKeyShiftActive)
+        {
+            int keyDiff = projectState.getKeyRoot() - clip->sourceKeyRoot;
+            while (keyDiff > 6)  keyDiff -= 12;
+            while (keyDiff < -6) keyDiff += 12;
+            editorState.autoKeyShiftSemitones = keyDiff;
+        }
+        else
+            editorState.autoKeyShiftSemitones = 0;
         if (! selectedArrangementClip.has_value() || clipEditorPreviewClip != selectedArrangementClip)
         {
             stopClipEditorPreview(false);
@@ -6332,10 +6393,12 @@ void MainComponent::refreshClipEditor()
             clipEditorPreviewPlayheadRatio = previewSourceRatio;
         }
         editorState.previewSourceRatio = previewSourceRatio;
+        editorState.playheadIsBeatTime = clipEditorPreviewTransportSource.isPlaying();
         editorState.playheadBeat = transportEngine.getPlayheadBeat();
         editorState.playing = transportEngine.isPlaying() || clipEditorPreviewTransportSource.isPlaying();
         editorState.warpEnabled = clip->warpEnabled;
         editorState.keyShiftEnabled = clip->keyShiftEnabled;
+        editorState.warpMarkers = clip->warpMarkers;
         if (editorState.isAudioClip && clip->sourcePath.isNotEmpty())
         {
             rebuildClipEditorWaveform(clip->sourcePath);

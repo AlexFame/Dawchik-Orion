@@ -20,7 +20,7 @@ const auto pianoGridBase = orion::theme::surface::primary.darker(0.58f);
 const auto pianoGridScaleRow = orion::theme::surface::elevated.brighter(0.10f).withAlpha(0.34f);
 const auto pianoGridBlackRow = orion::theme::core::voidBlack.withAlpha(0.46f);
 constexpr int resizeHandleWidth = 10;
-constexpr double minimumNoteLengthInBeats = 0.125;
+constexpr double minimumNoteLengthInBeats = 0.03125;   // 1/128 — small enough that a 1/64 grid cell isn't clamped up
 // Empty space (in beats) shown PAST the clip's end so you can keep writing the melody beyond
 // the current clip length. Drawing a note into this area grows the clip to fit (4 bars).
 constexpr double editingHeadroomBeats = 16.0;
@@ -391,6 +391,7 @@ void MidiEditorOverlayComponent::openClip(TrackState& trackState, TimelineClip& 
     verticalZoom = 1.0;
     scrollX = 0.0;
     scrollY = 0.0;
+    syncZoomScrollTargets();
     pendingMagnifyDelta = 0.0;
     ignoreWheelUntilMs = 0.0;
     // Inherit scale from project key. scalePatterns[0]=Minor, [1]=Major.
@@ -542,7 +543,67 @@ void MidiEditorOverlayComponent::timerCallback()
     if (! isVisible())
         return;
 
-    repaint();
+    // FL-style smooth glide: ease zoom + scroll toward their targets each tick.
+    bool moved = false;
+    if (zoomAnimating)
+    {
+        bool done = true;
+        const double dh = targetHorizontalZoom - horizontalZoom;
+        if (std::abs(dh) > horizontalZoom * 0.0025) { horizontalZoom += dh * 0.35; done = false; }
+        else horizontalZoom = targetHorizontalZoom;
+        const double dv = targetVerticalZoom - verticalZoom;
+        if (std::abs(dv) > verticalZoom * 0.0025) { verticalZoom += dv * 0.35; done = false; }
+        else verticalZoom = targetVerticalZoom;
+        // Re-pin the focus point under the cursor while the zoom eases.
+        const double ppb = getPixelsPerBeat();
+        const double lane = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
+        scrollX = zoomFocusBeat * ppb - zoomFocusXInView;
+        scrollY = zoomFocusLane * lane - zoomFocusYInView;
+        clampScrollOffsets();
+        targetScrollX = scrollX;   // the zoom anchor owns scroll while animating
+        targetScrollY = scrollY;
+        if (done)
+            zoomAnimating = false;
+        updateSubtitle();
+        moved = true;
+    }
+    else
+    {
+        const double dx = targetScrollX - scrollX;
+        const double dy = targetScrollY - scrollY;
+        if (std::abs(dx) > 0.5 || std::abs(dy) > 0.5)
+        {
+            scrollX += dx * 0.35;
+            scrollY += dy * 0.35;
+            clampScrollOffsets();
+            moved = true;
+        }
+        else if (dx != 0.0 || dy != 0.0)
+        {
+            scrollX = targetScrollX;
+            scrollY = targetScrollY;
+            moved = true;
+        }
+    }
+
+    // Only repaint the whole editor when something is actually changing — a blanket 120 Hz repaint of
+    // the full grid was the real "fps drop", especially zoomed out with a dense grid.
+    const bool playing = onRequestPlayingState && onRequestPlayingState();
+    const bool previewsActive = placedNotePreviewPitch.has_value() || globalSpacePreviewActive
+                             || cmdPreviewPending || cmdWasDown
+                             || ! liveKeyboardPitches.empty() || ! stepWriteLivePitches.empty()
+                             || mousePreviewPitch.has_value();
+    if (moved || playing || previewsActive)
+        repaint();
+}
+
+void MidiEditorOverlayComponent::syncZoomScrollTargets()
+{
+    targetHorizontalZoom = horizontalZoom;
+    targetVerticalZoom = verticalZoom;
+    targetScrollX = scrollX;
+    targetScrollY = scrollY;
+    zoomAnimating = false;
 }
 
 void MidiEditorOverlayComponent::paint(juce::Graphics& g)
@@ -896,25 +957,60 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     const auto beatsPerBar  = 4; // visual bar — independent of project's time-sig numerator for now
     const auto stepsPerBar  = stepsPerBeat * beatsPerBar;
 
-    for (int step = 0; step <= steps; ++step)
+    // Adaptive density (Ableton/FL-style): don't draw a grid level once its lines get denser than a few
+    // pixels — that "picket fence" of sub-pixel lines is what tanked the frame rate when zoomed out.
+    const double subPx  = snapSizeInBeats * pixelsPerBeat;
+    const double beatPx = pixelsPerBeat;
+    const bool drawSub  = subPx  >= 6.0;    // 1/16, 1/32… subdivisions
+    const bool drawBeat = beatPx >= 6.0;    // beat lines
+
+    // Iterate only the steps within (a little past) the visible window instead of the whole clip.
+    const double leftBeat  = (static_cast<double>(visibleGrid.getX() - 8) - static_cast<double>(gridArea.getX()) + scrollX) / juce::jmax(1.0e-6, pixelsPerBeat);
+    const double rightBeat = (static_cast<double>(visibleGrid.getRight() + 8) - static_cast<double>(gridArea.getX()) + scrollX) / juce::jmax(1.0e-6, pixelsPerBeat);
+    const int firstStep = juce::jmax(0, static_cast<int>(std::floor(leftBeat / juce::jmax(0.001, snapSizeInBeats))));
+    const int lastStep  = juce::jmin(steps, static_cast<int>(std::ceil(rightBeat / juce::jmax(0.001, snapSizeInBeats))));
+
+    // FL-style: faintly shade alternate beat cells so the grid reads clearly for placing notes.
+    if (drawBeat)
     {
+        for (int b = juce::jmax(0, static_cast<int>(std::floor(leftBeat))); b <= static_cast<int>(std::ceil(rightBeat)); ++b)
+        {
+            if ((b & 1) == 0)
+                continue;
+            const float bx = static_cast<float>(gridArea.getX() + (static_cast<double>(b) * pixelsPerBeat) - scrollX);
+            const float bx2 = bx + static_cast<float>(pixelsPerBeat);
+            const float x0 = juce::jmax(bx, static_cast<float>(visibleGrid.getX()));
+            const float x1 = juce::jmin(bx2, static_cast<float>(visibleGrid.getRight()));
+            if (x1 <= x0)
+                continue;
+            g.setColour(juce::Colours::white.withAlpha(0.025f));
+            g.fillRect(juce::Rectangle<float>(x0, static_cast<float>(visibleGrid.getY()), x1 - x0, static_cast<float>(visibleGrid.getHeight())));
+        }
+    }
+
+    for (int step = firstStep; step <= lastStep; ++step)
+    {
+        const bool isBarLine  = (step % stepsPerBar)  == 0;
+        const bool isBeatLine = (step % stepsPerBeat) == 0;
+
+        // Skip levels that are too dense to read (keeps only the meaningful lines when zoomed out).
+        if (! isBarLine && (isBeatLine ? ! drawBeat : ! drawSub))
+            continue;
+
         const auto beat = static_cast<double>(step) * snapSizeInBeats;
         const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
         if (x < static_cast<float>(visibleGrid.getX() - 8) || x > static_cast<float>(visibleGrid.getRight() + 8))
             continue;
 
-        const bool isBarLine  = (step % stepsPerBar)  == 0;
-        const bool isBeatLine = (step % stepsPerBeat) == 0;
-
         if (isBarLine)
-            g.setColour(theme::line::strong.withAlpha(0.82f));
+            g.setColour(theme::line::strong.withAlpha(0.95f));
         else if (isBeatLine)
-            g.setColour(theme::line::normal.withAlpha(0.64f));
+            g.setColour(theme::line::normal.withAlpha(0.8f));
         else
-            g.setColour(theme::line::subtle.withAlpha(0.46f));   // snap subdivisions (1/16, 1/32…) — clearly visible
+            g.setColour(juce::Colours::white.withAlpha(0.14f));   // snap subdivisions (1/16, 1/32…) — clearer
 
         g.drawLine(x, static_cast<float>(visibleGrid.getY()), x, static_cast<float>(visibleGrid.getBottom()),
-                   isBarLine ? 2.0f : (isBeatLine ? 1.5f : 1.1f));
+                   isBarLine ? 2.0f : (isBeatLine ? 1.5f : 1.0f));
     }
 
     // Bar numbers along the top of the grid.
@@ -1132,8 +1228,12 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
         g.excludeClipRegion(visibleGrid);
         g.reduceClipRegion(velocityLane);
 
-        for (int step = 0; step <= steps; ++step)
+        for (int step = firstStep; step <= lastStep; ++step)
         {
+            const bool isBarLine  = (step % stepsPerBar)  == 0;
+            const bool isBeatLine = (step % stepsPerBeat) == 0;
+            if (! isBarLine && (isBeatLine ? ! drawBeat : ! drawSub))
+                continue;
             const auto beat = static_cast<double>(step) * snapSizeInBeats;
             const auto x = static_cast<float>(gridArea.getX() + (beat * pixelsPerBeat) - scrollX);
             if (x < static_cast<float>(velocityLane.getX() - 8) || x > static_cast<float>(velocityLane.getRight() + 8))
@@ -1884,6 +1984,10 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
             }
         }
 
+        // Shortening / moving a note back can leave the clip overlong — pull it back to fit the content
+        // (symmetric with growClipToFit; only ever shrinks, never below one bar).
+        shrinkClipToFitNotes();
+
         if (! undoStack.empty() && ! notesChangedSince(undoStack.back()))
             undoStack.pop_back();
     }
@@ -1921,10 +2025,11 @@ void MidiEditorOverlayComponent::mouseWheelMove(const juce::MouseEvent& event, c
     // Mac trackpad. Pinch (mouseMagnify) is what zooms into the cursor.
     if (std::abs(wheel.deltaX) > 0.0001f || std::abs(wheel.deltaY) > 0.0001f)
     {
-        scrollX -= static_cast<double>(wheel.deltaX) * 600.0;
-        scrollY -= static_cast<double>(wheel.deltaY) * 600.0;
+        // Move the SCROLL TARGET; the timer eases toward it for a smooth glide.
+        zoomAnimating = false;
+        targetScrollX -= static_cast<double>(wheel.deltaX) * 600.0;
+        targetScrollY -= static_cast<double>(wheel.deltaY) * 600.0;
         clampScrollOffsets();
-        repaint();
     }
 }
 
@@ -1949,20 +2054,17 @@ void MidiEditorOverlayComponent::mouseMagnify(const juce::MouseEvent& event, flo
 
     const double ppbOld  = getPixelsPerBeat();
     const double laneOld = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
-    const double beatUnderCursor = (scrollX + focusXInView) / juce::jmax(1.0e-6, ppbOld);
-    const double laneUnderCursor = (scrollY + focusYInView) / juce::jmax(1.0, laneOld);
 
-    horizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, horizontalZoom * pendingMagnifyDelta);
-    verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, verticalZoom * pendingMagnifyDelta);
+    // Pin the point under the cursor, set a zoom target; the timer eases toward it (smooth zoom).
+    zoomFocusXInView = focusXInView;
+    zoomFocusYInView = focusYInView;
+    zoomFocusBeat = (scrollX + focusXInView) / juce::jmax(1.0e-6, ppbOld);
+    zoomFocusLane = (scrollY + focusYInView) / juce::jmax(1.0, laneOld);
+    targetHorizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, targetHorizontalZoom * pendingMagnifyDelta);
+    targetVerticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, targetVerticalZoom * pendingMagnifyDelta);
     pendingMagnifyDelta = 1.0;
-
-    const double ppbNew  = getPixelsPerBeat();
-    const double laneNew = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
-    scrollX = beatUnderCursor * ppbNew - focusXInView;
-    scrollY = laneUnderCursor * laneNew - focusYInView;
-    clampScrollOffsets();
+    zoomAnimating = true;
     updateSubtitle();
-    repaint();
 }
 
 void MidiEditorOverlayComponent::buttonClicked(juce::Button* button)
@@ -3509,6 +3611,10 @@ void MidiEditorOverlayComponent::selectSingleNote(int noteIndex)
 {
     selectedNotes.clear();
     selectedNotes.insert(noteIndex);
+    // FL-style: clicking a note adopts its length, so the next note you draw matches it.
+    if (activeClip != nullptr && noteIndex >= 0 && noteIndex < static_cast<int>(activeClip->midiNotes.size()))
+        lastNoteLengthInBeats = juce::jmax(minimumNoteLengthInBeats,
+                                           activeClip->midiNotes[static_cast<std::size_t>(noteIndex)].lengthInBeats);
 }
 
 void MidiEditorOverlayComponent::duplicateSelectedNotes()
@@ -3939,8 +4045,8 @@ void MidiEditorOverlayComponent::restoreSnapshot(const NoteSnapshot& snapshot)
     activeClip->pitchSlides = snapshot.pitchSlides;
     selectedNotes = snapshot.selectedNotes;
     selectedSlide = snapshot.selectedSlide;
-    horizontalZoom = snapshot.horizontalZoom;
-    verticalZoom = snapshot.verticalZoom;
+    // Do NOT restore the zoom/scroll from the snapshot — undo should only change the notes, never jump
+    // or zoom the view (FL keeps the view put through undo/redo).
     scaleRoot = snapshot.scaleRoot;
     scalePatternIndex = snapshot.scalePatternIndex;
     snapSizeInBeats = snapshot.snapSizeInBeats;
@@ -4026,6 +4132,7 @@ void MidiEditorOverlayComponent::focusViewportAroundClipNotes()
                 - (static_cast<double>(visible.getHeight()) * 0.5);
         scrollX = 0.0;
         clampScrollOffsets();
+        syncZoomScrollTargets();
         return;
     }
 
@@ -4077,6 +4184,9 @@ void MidiEditorOverlayComponent::focusViewportAroundClipNotes()
     scrollX = (beatCenter * pixelsPerBeat) - (static_cast<double>(visible.getWidth()) * 0.5);
 
     clampScrollOffsets();   // keep the framed view within the valid scroll range
+    syncZoomScrollTargets();
+
+    // The freshly framed view is the target — no glide from a stale position.
 }
 
 bool MidiEditorOverlayComponent::shouldConsumeFocusClick() const noexcept
@@ -4093,22 +4203,17 @@ void MidiEditorOverlayComponent::adjustZoom(double horizontalDelta, double verti
     const double focusYInView = focusPoint.has_value()
         ? static_cast<double>(focusPoint->y - visible.getY()) : static_cast<double>(visible.getHeight()) * 0.5;
 
-    // Anchor by the beat (x) and lane (y) under the pointer so it stays put.
+    // Anchor by the beat (x) and lane (y) under the pointer so it stays put; ease toward the target.
     const double ppbOld  = getPixelsPerBeat();
     const double laneOld = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
-    const double beatUnderCursor = (scrollX + focusXInView) / juce::jmax(1.0e-6, ppbOld);
-    const double laneUnderCursor = (scrollY + focusYInView) / juce::jmax(1.0, laneOld);
-
-    horizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, horizontalZoom + horizontalDelta);
-    verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, verticalZoom + verticalDelta);
-
-    const double ppbNew  = getPixelsPerBeat();
-    const double laneNew = juce::jmax(10.0, baseLaneHeightPx * verticalZoom);
-    scrollX = beatUnderCursor * ppbNew - focusXInView;
-    scrollY = laneUnderCursor * laneNew - focusYInView;
-    clampScrollOffsets();
+    zoomFocusXInView = focusXInView;
+    zoomFocusYInView = focusYInView;
+    zoomFocusBeat = (scrollX + focusXInView) / juce::jmax(1.0e-6, ppbOld);
+    zoomFocusLane = (scrollY + focusYInView) / juce::jmax(1.0, laneOld);
+    targetHorizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, targetHorizontalZoom + horizontalDelta);
+    targetVerticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, targetVerticalZoom + verticalDelta);
+    zoomAnimating = true;
     updateSubtitle();
-    repaint();
 }
 
 void MidiEditorOverlayComponent::clampScrollOffsets()
@@ -4126,6 +4231,8 @@ void MidiEditorOverlayComponent::clampScrollOffsets()
     const auto maxScrollY = juce::jmax(0.0, zoomedHeight - fullHeight * 0.5);
     scrollX = juce::jlimit(0.0, maxScrollX, scrollX);
     scrollY = juce::jlimit(0.0, maxScrollY, scrollY);
+    targetScrollX = juce::jlimit(0.0, maxScrollX, targetScrollX);
+    targetScrollY = juce::jlimit(0.0, maxScrollY, targetScrollY);
 }
 
 juce::String MidiEditorOverlayComponent::getScaleName() const
@@ -4190,7 +4297,11 @@ void MidiEditorOverlayComponent::showSnapMenu()
                                return;
 
                            snapSizeInBeats = snapSettings[static_cast<std::size_t>(selectedId - 1)].beats;
-                           updateSubtitle();
+                           // FL-style: the grid cell size becomes the default note size, so a freshly
+                           // drawn note is exactly one cell of the chosen grid. "Len" follows too.
+                           lastNoteLengthInBeats = snapSizeInBeats;
+                           stepWriteStepLengthInBeats = snapSizeInBeats;
+                           updateSubtitle();   // refreshes both the "Grid" and "Len" button labels
                            repaint();
                        });
 }
@@ -4220,6 +4331,8 @@ void MidiEditorOverlayComponent::showStepLengthMenu()
 
                            commitStepWritePendingChord();
                            stepWriteStepLengthInBeats = stepLengths[static_cast<std::size_t>(selectedId - 1)].beats;
+                           // "Len" is also the default length for freshly drawn notes.
+                           lastNoteLengthInBeats = juce::jmax(minimumNoteLengthInBeats, stepWriteStepLengthInBeats);
                            stepWriteCursorBeat = getSnappedStepWriteCursorBeat();
                            updateSubtitle();
                            repaint();

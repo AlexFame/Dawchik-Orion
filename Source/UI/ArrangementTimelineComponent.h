@@ -470,6 +470,15 @@ private:
     double verticalZoom { 1.0 };
     double scrollX { 0.0 };
     double scrollY { 0.0 };
+    // Smooth zoom: wheel/pinch set targets + a pinned focus; the timer eases the actual zoom toward
+    // them so the playlist glides open/closed instead of stepping a notch per event.
+    double targetPixelsPerBeat { 6.0 };
+    double targetVerticalZoom { 1.0 };
+    bool zoomAnimating { false };
+    double zoomFocusBeat { 0.0 };
+    double zoomFocusXInView { 0.0 };
+    double zoomFocusTrackRatio { 0.5 };
+    double zoomFocusYInView { 0.0 };
     bool timelineAutoFitActive { true };
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };

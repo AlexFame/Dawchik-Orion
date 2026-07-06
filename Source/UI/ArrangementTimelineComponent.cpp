@@ -4470,24 +4470,55 @@ void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double ver
     {
         timelineAutoFitActive = false;
         const auto zoomFactor = std::pow(1.2, horizontalDelta);
-        pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, pixelsPerBeat * zoomFactor);
-        scrollX = (focusBeat * pixelsPerBeat) - focusXInView;
+        targetPixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, targetPixelsPerBeat * zoomFactor);
+        zoomFocusBeat = focusBeat;
+        zoomFocusXInView = focusXInView;
+        zoomAnimating = true;
     }
 
     if (std::abs(verticalDelta) > 0.0001)
     {
         const auto zoomFactor = std::pow(1.18, verticalDelta);
-        verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, verticalZoom * zoomFactor);
-        const auto newTrackHeight = static_cast<double>(getTotalTrackHeight());
-        scrollY = (focusTrackRatio * newTrackHeight) - focusYInView;
+        targetVerticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, targetVerticalZoom * zoomFactor);
+        zoomFocusTrackRatio = focusTrackRatio;
+        zoomFocusYInView = focusYInView;
+        zoomAnimating = true;
     }
-
-    clampScrollOffsets();
-    repaint();
+    // The eased application happens in timerCallback; nothing to apply instantly here.
 }
 
 void ArrangementTimelineComponent::timerCallback()
 {
+    // Ease the zoom toward its target while keeping the focus point pinned, so the playlist glides
+    // instead of stepping. Scroll is recomputed each frame from the pinned focus beat / track ratio.
+    if (zoomAnimating)
+    {
+        bool done = true;
+        const double dh = targetPixelsPerBeat - pixelsPerBeat;
+        if (std::abs(dh) > pixelsPerBeat * 0.0025)
+        {
+            pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, pixelsPerBeat + dh * 0.3);
+            done = false;
+        }
+        else
+            pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, targetPixelsPerBeat);
+        scrollX = (zoomFocusBeat * pixelsPerBeat) - zoomFocusXInView;
+
+        const double dv = targetVerticalZoom - verticalZoom;
+        if (std::abs(dv) > verticalZoom * 0.0025)
+        {
+            verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, verticalZoom + dv * 0.3);
+            done = false;
+        }
+        else
+            verticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, targetVerticalZoom);
+        scrollY = (zoomFocusTrackRatio * static_cast<double>(getTotalTrackHeight())) - zoomFocusYInView;
+
+        clampScrollOffsets();
+        if (done)
+            zoomAnimating = false;
+    }
+
     // Smoothly open / close the freed append lane below the last track.
     const float appendTarget = browserAppendActive ? 1.0f : 0.0f;
     if (std::abs(browserAppendAnim - appendTarget) > 0.001f)
@@ -4536,6 +4567,14 @@ void ArrangementTimelineComponent::clampScrollOffsets()
     const auto trackContentHeight = static_cast<double>(getTotalTrackHeight());
     const auto maxVerticalScroll = juce::jmax(0.0, trackContentHeight - visibleTrackHeight);
     scrollY = juce::jlimit(0.0, maxVerticalScroll, scrollY);
+
+    // Keep the zoom targets in step with any external change (fit, load, clamp) so the easing timer
+    // doesn't yank the view back toward a stale target.
+    if (! zoomAnimating)
+    {
+        targetPixelsPerBeat = pixelsPerBeat;
+        targetVerticalZoom = verticalZoom;
+    }
 }
 
 void ArrangementTimelineComponent::zoomToFitContent()
@@ -4555,6 +4594,8 @@ void ArrangementTimelineComponent::applyTimelineAutoFit()
 
     pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat,
                                  viewportW / autoFitTimelineBeats());
+    targetPixelsPerBeat = pixelsPerBeat;
+    zoomAnimating = false;
     scrollX = 0.0;
 }
 

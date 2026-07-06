@@ -2,6 +2,7 @@
 
 #include "OrionTheme.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace orion
@@ -68,45 +69,72 @@ ClipEditorComponent::ClipEditorComponent()
         state.gainDb = nextGain;
         if (onGainChanged)
             onGainChanged(nextGain);
-        repaint();
+        // No full repaint here — the slider draws itself and the GAIN readout refreshes on the timer.
+        // A full waveform repaint per drag tick is what made changing the level feel sluggish.
     };
     addAndMakeVisible(gainSlider);
 }
 
 void ClipEditorComponent::setState(const ClipEditorState& newState)
 {
+    // A live warp-marker drag owns the state — don't let the 60 Hz timer refresh clobber the marker
+    // back to the clip's stored position (that was the flicker / snap-back while dragging).
+    if (waveDragMode == WaveDragMode::warpMarker)
+        return;
+
     const bool sourceChanged = (lastSourcePath != newState.sourcePath);
     if (sourceChanged)
     {
         lastSourcePath = newState.sourcePath;
         waveformZoom = 1.0;
+        targetWaveformZoom = 1.0;
         waveformViewStart = 0.0;
+        stopTimer();
     }
+    // Recompute onsets when the displayed source changes (waveform arrives via setState).
+    const bool needTransients = sourceChanged || (transientRatios.empty() && ! newState.waveformMax.empty());
 
-    // Fast path for the common case where only the playhead moved (transport ticking every frame):
-    // everything else that affects the layout/controls/waveform is identical, so we can skip the
-    // control refresh and full repaint and only invalidate a thin strip around the old + new playhead.
-    // That's what keeps the line sweeping smoothly instead of janking under 60 full repaints/sec.
-    const bool onlyPlayheadMoved =
+    // Fast path when nothing that affects the WAVEFORM changed (source/trim/warp/markers). The playhead
+    // and the control readouts (gain/pitch) can still differ — those get cheap targeted repaints, never
+    // a full waveform redraw. This is what keeps the playhead smooth AND makes dragging the gain instant
+    // (a full waveform repaint per drag tick made changing the level feel sluggish).
+    const bool waveformUnchanged =
         ! sourceChanged
         && state.hasSelection == newState.hasSelection
         && state.isAudioClip == newState.isAudioClip
         && state.sampleStartRatio == newState.sampleStartRatio
         && state.sampleEndRatio == newState.sampleEndRatio
-        && state.gainDb == newState.gainDb
-        && state.transposeSemitones == newState.transposeSemitones
         && state.warpEnabled == newState.warpEnabled
         && state.keyShiftEnabled == newState.keyShiftEnabled
         && state.sourceLengthBeats == newState.sourceLengthBeats
         && state.lengthInBeats == newState.lengthInBeats
-        && state.title == newState.title
+        && state.warpMarkers.size() == newState.warpMarkers.size()
+        && std::equal(state.warpMarkers.begin(), state.warpMarkers.end(), newState.warpMarkers.begin(),
+                      [](const WarpMarker& a, const WarpMarker& b)
+                      { return a.sourceRatio == b.sourceRatio && a.beat == b.beat; })
         && ! lastWaveformBounds.isEmpty();
 
-    if (onlyPlayheadMoved)
+    if (waveformUnchanged)
     {
-        const int oldX = waveRatioToX(juce::jlimit(0.0, 1.0, state.previewSourceRatio));
-        const int newX = waveRatioToX(juce::jlimit(0.0, 1.0, newState.previewSourceRatio));
+        const bool controlsUnchanged = state.gainDb == newState.gainDb
+            && state.transposeSemitones == newState.transposeSemitones
+            && state.autoKeyShiftSemitones == newState.autoKeyShiftSemitones
+            && state.autoKeyShiftActive == newState.autoKeyShiftActive
+            && state.title == newState.title;
+
+        const int oldX = state.playheadIsBeatTime ? beatNormToX(state.previewSourceRatio)
+                                                  : waveRatioToX(juce::jlimit(0.0, 1.0, state.previewSourceRatio));
         state = newState;
+
+        if (! controlsUnchanged)
+        {
+            updateControlsFromState();      // sync the gain slider / pitch (cheap)
+            repaint(lastControlsBounds);    // redraw only the control + info cards, not the waveform
+            repaint(lastInfoBounds);
+        }
+
+        const int newX = newState.playheadIsBeatTime ? beatNormToX(newState.previewSourceRatio)
+                                                     : waveRatioToX(juce::jlimit(0.0, 1.0, newState.previewSourceRatio));
         const int lo = juce::jmin(oldX, newX) - 3;
         const int hi = juce::jmax(oldX, newX) + 3;
         repaint(lo, lastWaveformBounds.getY(), hi - lo, lastWaveformBounds.getHeight());
@@ -114,6 +142,9 @@ void ClipEditorComponent::setState(const ClipEditorState& newState)
     }
 
     state = newState;
+    if (needTransients)
+        recomputeTransients();
+    rebuildWarpMap();
     waveformViewStart = clampWaveViewStart(waveformViewStart);
     updateControlsFromState();
     repaint();
@@ -159,6 +190,9 @@ void ClipEditorComponent::paint(juce::Graphics& g)
     auto controls = bounds.removeFromBottom(64);
     bounds.removeFromBottom(12);
 
+    const_cast<ClipEditorComponent*>(this)->lastControlsBounds = controls;
+    const_cast<ClipEditorComponent*>(this)->lastInfoBounds = info;
+
     drawWaveformPreview(g, bounds);
     drawControlCard(g, controls);
     drawInfoCard(g, info);
@@ -201,7 +235,33 @@ void ClipEditorComponent::resized()
 void ClipEditorComponent::mouseDoubleClick(const juce::MouseEvent& event)
 {
     if (state.hasSelection && state.isAudioClip && pitchValueBounds.contains(event.getPosition()))
+    {
         beginPitchTextEntry();
+        return;
+    }
+
+    // Warp editing: double-click a marker deletes it; double-click the waveform adds one that pins the
+    // clicked source point to the nearest grid beat (quantise a transient to the grid, Ableton-style).
+    if (state.warpEnabled && state.isAudioClip && lastWaveformBounds.expanded(0, 8).contains(event.getPosition()))
+    {
+        if (const int wm = warpMarkerAtX(static_cast<int>(event.position.x)); wm >= 0)
+        {
+            if (onWarpMarkerRemoved)
+                onWarpMarkerRemoved(wm);
+        }
+        else
+        {
+            // Activate the nearest transient (Ableton-style) rather than dropping a marker blindly.
+            double sr = juce::jlimit(0.001, 0.999, xToWaveRatio(event.x));
+            const double maxDist = (14.0 / juce::jmax(1, lastWaveformBounds.getWidth())) * visibleWaveSpan();
+            if (const double t = nearestTransient(sr, maxDist); t >= 0.0)
+                sr = juce::jlimit(0.001, 0.999, t);
+            // Pin the point at the beat it ALREADY sits on (no grid snap) so adding a marker never shifts
+            // the audio — Ableton-style. Warping only happens when the marker is then dragged.
+            if (onWarpMarkerAdded)
+                onWarpMarkerAdded(sr, srcRatioToBeat(sr));
+        }
+    }
 }
 
 void ClipEditorComponent::beginPitchTextEntry()
@@ -236,6 +296,42 @@ void ClipEditorComponent::commitPitchTextEntry()
     repaint();
 }
 
+void ClipEditorComponent::mouseMove(const juce::MouseEvent& event)
+{
+    const bool active = state.warpEnabled && state.isAudioClip
+                        && lastWaveformBounds.expanded(0, 14).contains(event.getPosition());
+    const int wm = active ? warpMarkerAtX(static_cast<int>(event.position.x)) : -1;
+
+    // No existing marker under the cursor → show a grey "ghost" marker at the nearest transient, the
+    // candidate a double-click would activate (Ableton shows exactly this on hover).
+    double cand = -1.0;
+    if (active && wm < 0)
+    {
+        const double sr = xToWaveRatio(event.x);
+        const double maxDist = (26.0 / juce::jmax(1, lastWaveformBounds.getWidth())) * visibleWaveSpan();
+        cand = nearestTransient(sr, maxDist);
+    }
+
+    if (wm != hoveredWarpMarker || std::abs(cand - hoverCandidateSourceRatio) > 1.0e-9)
+    {
+        hoveredWarpMarker = wm;
+        hoverCandidateSourceRatio = cand;
+        setMouseCursor(wm >= 0 ? juce::MouseCursor::LeftRightResizeCursor
+                               : (cand >= 0.0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor));
+        repaint();
+    }
+}
+
+void ClipEditorComponent::mouseExit(const juce::MouseEvent&)
+{
+    if (hoveredWarpMarker != -1 || hoverCandidateSourceRatio >= 0.0)
+    {
+        hoveredWarpMarker = -1;
+        hoverCandidateSourceRatio = -1.0;
+        repaint();
+    }
+}
+
 void ClipEditorComponent::mouseDown(const juce::MouseEvent& event)
 {
     if (state.hasSelection && state.isAudioClip && pitchValueBounds.contains(event.getPosition()))
@@ -252,6 +348,14 @@ void ClipEditorComponent::mouseDown(const juce::MouseEvent& event)
     trimmedClipDragCandidate = false;
     trimmedClipDragStarted = false;
     snapBypass = event.mods.isAltDown();
+
+    // Grabbing a warp-marker handle takes priority (it sits mid-waveform, away from START/END).
+    if (const int wm = warpMarkerAtX(static_cast<int>(event.position.x)); wm >= 0)
+    {
+        activeWarpMarker = wm;
+        waveDragMode = WaveDragMode::warpMarker;
+        return;
+    }
 
     const auto startX = waveRatioToX(state.sampleStartRatio);
     const auto endX = waveRatioToX(state.sampleEndRatio);
@@ -302,12 +406,61 @@ void ClipEditorComponent::mouseDrag(const juce::MouseEvent& event)
         return;
 
     snapBypass = event.mods.isAltDown();
+
+    // Dragging a warp marker moves which source point is pinned to its beat (visual only until release;
+    // rebuilding the warped preview every frame would be too heavy). Beat stays fixed.
+    if (waveDragMode == WaveDragMode::warpMarker)
+    {
+        if (activeWarpMarker >= 0 && activeWarpMarker < static_cast<int>(state.warpMarkers.size()))
+        {
+            // Move the marker along the BEAT ruler; its pinned source point stays, so the audio around it
+            // stretches (Ableton warp). Snap the beat to the grid unless Alt is held.
+            double beat = juce::jmax(0.0, xToBeatNorm(event.x) * warpTotalBeats);
+            if (! snapBypass)
+            {
+                const double step = currentGridStepBeats();
+                if (step > 0.0)
+                    beat = std::round(beat / step) * step;
+            }
+            // Keep the marker strictly between its source-neighbours' beats so the map stays monotonic.
+            double lo = 0.001, hi = juce::jmax(0.002, warpTotalBeats - 0.001);
+            for (int j = 0; j < static_cast<int>(state.warpMarkers.size()); ++j)
+            {
+                if (j == activeWarpMarker) continue;
+                const auto& o = state.warpMarkers[static_cast<std::size_t>(j)];
+                if (o.sourceRatio < state.warpMarkers[static_cast<std::size_t>(activeWarpMarker)].sourceRatio)
+                    lo = juce::jmax(lo, o.beat + 0.001);
+                else
+                    hi = juce::jmin(hi, o.beat - 0.001);
+            }
+            state.warpMarkers[static_cast<std::size_t>(activeWarpMarker)].beat = juce::jlimit(lo, juce::jmax(lo, hi), beat);
+            rebuildWarpMap();   // live: waveform + grid restretch under the drag
+            repaint();
+        }
+        return;
+    }
+
     updateSampleMarker(waveDragMode, event.x, true);
 }
 
 void ClipEditorComponent::mouseUp(const juce::MouseEvent& event)
 {
     const auto endedMode = waveDragMode;
+
+    // Commit a warp-marker move to the host (which rebuilds the warped preview). Reset the drag state
+    // BEFORE the callback so the refresh it triggers isn't blocked by the in-drag guard in setState.
+    if (endedMode == WaveDragMode::warpMarker)
+    {
+        const int idx = activeWarpMarker;
+        const double beat = (idx >= 0 && idx < static_cast<int>(state.warpMarkers.size()))
+            ? state.warpMarkers[static_cast<std::size_t>(idx)].beat : -1.0;
+        activeWarpMarker = -1;
+        waveDragMode = WaveDragMode::none;
+        if (beat >= 0.0 && onWarpMarkerMoved)
+            onWarpMarkerMoved(idx, beat);
+        return;
+    }
+
     if (endedMode != WaveDragMode::none)
         updateSampleMarker(endedMode, event.x, true);
 
@@ -382,14 +535,32 @@ void ClipEditorComponent::mouseMagnify(const juce::MouseEvent& event, float scal
 
 void ClipEditorComponent::zoomWaveformAt(int x, double zoomFactor)
 {
-    const auto oldSpan = visibleWaveSpan();
     const auto localX = juce::jlimit(0.0, 1.0,
         static_cast<double>(x - lastWaveformBounds.getX()) / juce::jmax(1.0, static_cast<double>(lastWaveformBounds.getWidth())));
-    const auto anchorRatio = waveformViewStart + localX * oldSpan;
+    // Remember the point under the cursor and set a zoom target; the timer eases toward it and keeps
+    // this point pinned, so the zoom feels organic instead of jumping a notch per event.
+    zoomAnchorLocalX = localX;
+    zoomAnchorRatio = waveformViewStart + localX * visibleWaveSpan();
+    targetWaveformZoom = juce::jlimit(1.0, 96.0, targetWaveformZoom * zoomFactor);
+    if (! isTimerRunning())
+        startTimerHz(90);
+    return;
+}
 
-    waveformZoom = juce::jlimit(1.0, 96.0, waveformZoom * zoomFactor);
-    const auto newSpan = visibleWaveSpan();
-    waveformViewStart = clampWaveViewStart(anchorRatio - localX * newSpan);
+void ClipEditorComponent::timerCallback()
+{
+    // Critically-damped-ish ease toward the target zoom, re-pinning the anchor each frame.
+    const double diff = targetWaveformZoom - waveformZoom;
+    if (std::abs(diff) < waveformZoom * 0.002)
+    {
+        waveformZoom = targetWaveformZoom;
+        stopTimer();
+    }
+    else
+    {
+        waveformZoom += diff * 0.30;
+    }
+    waveformViewStart = clampWaveViewStart(zoomAnchorRatio - zoomAnchorLocalX * visibleWaveSpan());
     repaint();
 }
 
@@ -427,8 +598,11 @@ void ClipEditorComponent::drawWaveformPreview(juce::Graphics& g, juce::Rectangle
         g.setColour(accent.withAlpha(0.82f));
         for (int px = 0; px < width; ++px)
         {
-            const auto ratioStart = visibleStart + (static_cast<double>(px) / juce::jmax(1.0, static_cast<double>(width))) * visibleSpan;
-            const auto ratioEnd = visibleStart + (static_cast<double>(px + 1) / juce::jmax(1.0, static_cast<double>(width))) * visibleSpan;
+            // x is BEAT time → map each column's beat span to the source span it plays (warp view).
+            const auto beatNormStart = visibleStart + (static_cast<double>(px) / juce::jmax(1.0, static_cast<double>(width))) * visibleSpan;
+            const auto beatNormEnd = visibleStart + (static_cast<double>(px + 1) / juce::jmax(1.0, static_cast<double>(width))) * visibleSpan;
+            const auto ratioStart = beatToSrcRatio(beatNormStart * warpTotalBeats);
+            const auto ratioEnd = beatToSrcRatio(beatNormEnd * warpTotalBeats);
             const auto bStart = juce::jlimit(0, bucketCount - 1, static_cast<int>(std::floor(ratioStart * bucketCount)));
             const auto bEnd = juce::jlimit(bStart + 1, bucketCount, static_cast<int>(std::ceil(ratioEnd * bucketCount)));
             float minVal = 0.0f;
@@ -492,12 +666,10 @@ void ClipEditorComponent::drawWaveformPreview(juce::Graphics& g, juce::Rectangle
         constexpr int beatsPerBar = 4;
         if (step > 0.0)
         {
-            const double visStart = waveformViewStart;
-            const double visEnd = juce::jlimit(0.0, 1.0, waveformViewStart + visibleWaveSpan());
-            double beat = std::floor((visStart * totalBeats) / step) * step;
-            for (; beat <= totalBeats + 0.001 && (beat / totalBeats) <= visEnd + 0.001; beat += step)
+            for (double beat = 0.0; beat <= totalBeats + 0.001; beat += step)
             {
-                const int x = waveRatioToX(beat / totalBeats);
+                // The axis IS beat time, so beat lines are uniform; the warped waveform slides under them.
+                const int x = beatNormToX(beat / totalBeats);
                 if (x < waveform.getX() - 1 || x > waveform.getRight() + 1)
                     continue;
                 const double inBar = std::fmod(beat, static_cast<double>(beatsPerBar));
@@ -531,14 +703,73 @@ void ClipEditorComponent::drawWaveformPreview(juce::Graphics& g, juce::Rectangle
         g.drawText(label, x + 5, waveform.getY() + 4, 42, 14, juce::Justification::centredLeft);
     };
 
-    if (state.lengthInBeats > 0.0)
+    // Only while playing — a stopped playhead line sitting next to a just-placed warp marker read as a
+    // confusing stray "stripe".
+    if (state.playing && state.lengthInBeats > 0.0)
     {
         const auto playheadRatio = juce::jlimit(0.0, 1.0, state.previewSourceRatio);
-        const auto playheadX = waveRatioToX(playheadRatio);
+        // Preview playback reports position in warped output (beat) time → straight onto the beat axis;
+        // otherwise it's a source ratio that must go through the warp map.
+        const auto playheadX = state.playheadIsBeatTime ? beatNormToX(playheadRatio) : waveRatioToX(playheadRatio);
         if (waveform.contains(playheadX, waveform.getCentreY()))
         {
-            g.setColour(theme::cool::cyan.withAlpha(state.playing ? 0.95f : 0.42f));
+            g.setColour(theme::cool::cyan.withAlpha(0.95f));
             g.drawVerticalLine(playheadX, static_cast<float>(waveform.getY()), static_cast<float>(waveform.getBottom()));
+        }
+    }
+
+    // Warp markers. Only shown when warp is on.
+    if (state.warpEnabled)
+    {
+        // A warp flag: vertical line + a pennant cap ABOVE the waveform (the grab handle).
+        const auto drawWarpFlag = [&](int x, juce::Colour colour, bool big)
+        {
+            if (x < waveform.getX() || x > waveform.getRight())
+                return;
+            g.setColour(colour);
+            g.drawVerticalLine(x, static_cast<float>(waveform.getY()), static_cast<float>(waveform.getBottom()));
+            const float fx = static_cast<float>(x);
+            const float tipY = static_cast<float>(waveform.getY());
+            const float capTop = tipY - (big ? 14.0f : 10.0f);
+            const float capW = big ? 7.0f : 5.0f;
+            juce::Path flag;
+            flag.startNewSubPath(fx - capW, capTop);
+            flag.lineTo(fx + capW, capTop);
+            flag.lineTo(fx + capW, tipY - 5.0f);
+            flag.lineTo(fx, tipY);                 // point down onto the waveform
+            flag.lineTo(fx - capW, tipY - 5.0f);
+            flag.closeSubPath();
+            g.fillPath(flag);
+        };
+
+        // Faint transient ticks — the candidate positions a marker snaps to.
+        for (const double t : transientRatios)
+        {
+            const int tx = waveRatioToX(t);
+            if (tx < waveform.getX() || tx > waveform.getRight())
+                continue;
+            g.setColour(juce::Colours::white.withAlpha(0.20f));
+            g.drawVerticalLine(tx, static_cast<float>(waveform.getY()), static_cast<float>(waveform.getY() + 6));
+        }
+
+        // Grey "ghost" marker under the cursor (double-click to activate it) — the Ableton hover cue.
+        if (hoverCandidateSourceRatio >= 0.0)
+            drawWarpFlag(waveRatioToX(hoverCandidateSourceRatio), juce::Colours::white.withAlpha(0.55f), true);
+
+        // Active (amber) markers, pinned to their source point.
+        for (int i = 0; i < static_cast<int>(state.warpMarkers.size()); ++i)
+        {
+            const auto& m = state.warpMarkers[static_cast<std::size_t>(i)];
+            const int x = waveRatioToX(juce::jlimit(0.0, 1.0, m.sourceRatio));
+            const bool hot = (i == hoveredWarpMarker || i == activeWarpMarker);
+            drawWarpFlag(x, juce::Colour(0xffffc24d).withAlpha(hot ? 1.0f : 0.9f), hot);
+            if (hot && x >= waveform.getX() && x <= waveform.getRight())
+            {
+                g.setColour(juce::Colours::black.withAlpha(0.85f));
+                g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+                g.drawText(juce::String(m.beat + 1.0, 1), x + 9, waveform.getY() - 15, 40, 13,
+                           juce::Justification::centredLeft);
+            }
         }
     }
 
@@ -573,6 +804,9 @@ void ClipEditorComponent::drawInfoCard(juce::Graphics& g, juce::Rectangle<int> b
     drawRow("LENGTH", juce::String(state.lengthInBeats, 2));
     drawRow("GAIN", formatDb(state.gainDb));
     drawRow("PITCH", juce::String(state.transposeSemitones >= 0 ? "+" : "") + juce::String(state.transposeSemitones) + " st");
+    drawRow("KEY SHIFT", state.autoKeyShiftActive
+                             ? juce::String(state.autoKeyShiftSemitones >= 0 ? "+" : "") + juce::String(state.autoKeyShiftSemitones) + " st"
+                             : juce::String("off"));
     drawRow("BPM", state.sourceBpm > 0.0 ? juce::String(state.sourceBpm, 1) : "-");
     drawRow("BARS", state.detectedBars > 0 ? juce::String(state.detectedBars) : "-");
     drawRow("FILE", state.fileName.isNotEmpty() ? state.fileName : "-");
@@ -612,22 +846,70 @@ void ClipEditorComponent::drawControlCard(juce::Graphics& g, juce::Rectangle<int
     g.drawText(formatDb(state.gainDb), gainLabel.removeFromLeft(80), juce::Justification::centredLeft);
 }
 
-double ClipEditorComponent::xToWaveRatio(int x) const noexcept
+void ClipEditorComponent::rebuildWarpMap()
+{
+    warpTotalBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
+    warpMap = warpControlPoints(state.warpMarkers, juce::jmax(1.0e-6, warpTotalBeats));
+}
+
+double ClipEditorComponent::srcRatioToBeat(double sourceRatio) const noexcept
+{
+    if (warpMap.size() < 2)
+        return juce::jlimit(0.0, 1.0, sourceRatio) * warpTotalBeats;
+    sourceRatio = juce::jlimit(0.0, 1.0, sourceRatio);
+    for (std::size_t i = 1; i < warpMap.size(); ++i)
+        if (sourceRatio <= warpMap[i].sourceRatio)
+        {
+            const auto span = juce::jmax(1.0e-9, warpMap[i].sourceRatio - warpMap[i - 1].sourceRatio);
+            const auto t = (sourceRatio - warpMap[i - 1].sourceRatio) / span;
+            return warpMap[i - 1].beat + t * (warpMap[i].beat - warpMap[i - 1].beat);
+        }
+    return warpMap.back().beat;
+}
+
+double ClipEditorComponent::beatToSrcRatio(double beat) const noexcept
+{
+    if (warpMap.size() < 2)
+        return warpTotalBeats > 0.0 ? juce::jlimit(0.0, 1.0, beat / warpTotalBeats) : 0.0;
+    beat = juce::jlimit(0.0, warpMap.back().beat, beat);
+    for (std::size_t i = 1; i < warpMap.size(); ++i)
+        if (beat <= warpMap[i].beat)
+        {
+            const auto span = juce::jmax(1.0e-9, warpMap[i].beat - warpMap[i - 1].beat);
+            const auto t = (beat - warpMap[i - 1].beat) / span;
+            return warpMap[i - 1].sourceRatio + t * (warpMap[i].sourceRatio - warpMap[i - 1].sourceRatio);
+        }
+    return warpMap.back().sourceRatio;
+}
+
+double ClipEditorComponent::xToBeatNorm(int x) const noexcept
 {
     if (lastWaveformBounds.getWidth() <= 0)
         return 0.0;
-
-    const auto local = juce::jlimit(0.0, 1.0, static_cast<double>(x - lastWaveformBounds.getX()) / static_cast<double>(lastWaveformBounds.getWidth()));
+    const auto local = juce::jlimit(0.0, 1.0, static_cast<double>(x - lastWaveformBounds.getX())
+                                              / static_cast<double>(lastWaveformBounds.getWidth()));
     return juce::jlimit(0.0, 1.0, waveformViewStart + local * visibleWaveSpan());
 }
 
-int ClipEditorComponent::waveRatioToX(double ratio) const noexcept
+int ClipEditorComponent::beatNormToX(double beatNorm) const noexcept
 {
     if (lastWaveformBounds.getWidth() <= 0)
         return 0;
+    const auto visible = (juce::jlimit(0.0, 1.0, beatNorm) - waveformViewStart) / visibleWaveSpan();
+    return lastWaveformBounds.getX() + static_cast<int>(std::round(visible * lastWaveformBounds.getWidth()));
+}
 
-    const auto visibleRatio = (juce::jlimit(0.0, 1.0, ratio) - waveformViewStart) / visibleWaveSpan();
-    return lastWaveformBounds.getX() + static_cast<int>(std::round(visibleRatio * lastWaveformBounds.getWidth()));
+// A pixel maps to a beat; that beat maps (through the warp) to a source ratio.
+double ClipEditorComponent::xToWaveRatio(int x) const noexcept
+{
+    return beatToSrcRatio(xToBeatNorm(x) * warpTotalBeats);
+}
+
+// A source ratio sits at the x of the beat it warps to.
+int ClipEditorComponent::waveRatioToX(double ratio) const noexcept
+{
+    const double bn = warpTotalBeats > 0.0 ? srcRatioToBeat(ratio) / warpTotalBeats : juce::jlimit(0.0, 1.0, ratio);
+    return beatNormToX(bn);
 }
 
 double ClipEditorComponent::visibleWaveSpan() const noexcept
@@ -655,17 +937,98 @@ double ClipEditorComponent::currentGridStepBeats() const noexcept
     return 256.0;
 }
 
+int ClipEditorComponent::warpMarkerAtX(int x) const noexcept
+{
+    if (! state.warpEnabled)
+        return -1;
+    int best = -1;
+    int bestDist = markerHitRadius + 1;
+    for (int i = 0; i < static_cast<int>(state.warpMarkers.size()); ++i)
+    {
+        const int mx = waveRatioToX(juce::jlimit(0.0, 1.0, state.warpMarkers[static_cast<std::size_t>(i)].sourceRatio));
+        const int d = std::abs(x - mx);
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+}
+
+void ClipEditorComponent::recomputeTransients()
+{
+    transientRatios.clear();
+    const auto& mx = state.waveformMax;
+    const auto& mn = state.waveformMin;
+    const int n = static_cast<int>(std::min(mx.size(), mn.size()));
+    if (n < 8)
+        return;
+
+    std::vector<float> env(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i)
+        env[static_cast<std::size_t>(i)] = std::max(std::abs(mx[static_cast<std::size_t>(i)]),
+                                                    std::abs(mn[static_cast<std::size_t>(i)]));
+
+    // Onset strength = positive envelope difference (a rise in energy). Peaks above a mean-relative
+    // threshold, spaced apart, are the transients — the same idea Ableton uses for its transient marks.
+    std::vector<float> flux(static_cast<std::size_t>(n), 0.0f);
+    double mean = 0.0;
+    for (int i = 1; i < n; ++i)
+    {
+        flux[static_cast<std::size_t>(i)] = std::max(0.0f, env[static_cast<std::size_t>(i)] - env[static_cast<std::size_t>(i - 1)]);
+        mean += flux[static_cast<std::size_t>(i)];
+    }
+    mean /= std::max(1, n - 1);
+    const float thr = static_cast<float>(mean) * 2.5f + 1.0e-4f;
+    const int minSpacing = std::max(2, n / 256);
+    int last = -minSpacing;
+    for (int i = 1; i < n - 1; ++i)
+    {
+        const float f = flux[static_cast<std::size_t>(i)];
+        if (f > thr && f >= flux[static_cast<std::size_t>(i - 1)] && f >= flux[static_cast<std::size_t>(i + 1)]
+            && (i - last) >= minSpacing)
+        {
+            transientRatios.push_back(static_cast<double>(i) / static_cast<double>(n - 1));
+            last = i;
+        }
+    }
+    if (transientRatios.empty() || transientRatios.front() > 0.01)
+        transientRatios.insert(transientRatios.begin(), 0.0);
+}
+
+double ClipEditorComponent::nearestTransient(double sourceRatio, double maxDistRatio) const noexcept
+{
+    double best = -1.0, bestDist = maxDistRatio;
+    for (const double t : transientRatios)
+    {
+        const double d = std::abs(t - sourceRatio);
+        if (d < bestDist) { bestDist = d; best = t; }
+    }
+    return best;
+}
+
+double ClipEditorComponent::snappedBeatForSourceRatio(double sourceRatio) const noexcept
+{
+    const double totalBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
+    const double step = currentGridStepBeats();
+    if (totalBeats <= 0.0)
+        return 0.0;
+    const double beat = warpSourceRatioToBeat(state.warpMarkers, totalBeats, sourceRatio);
+    const double snapped = step > 0.0 ? std::round(beat / step) * step : beat;
+    return juce::jlimit(0.0, totalBeats, snapped);
+}
+
 void ClipEditorComponent::updateSampleMarker(WaveDragMode mode, int x, bool shouldSeek)
 {
     auto ratio = xToWaveRatio(x);
 
     // Snap START/END to the beat grid (hold Alt to place freely). Makes trimming to bars/beats exact.
+    // Snap the BEAT the point maps to, then convert back to a source ratio (matters once warped).
     if (! snapBypass && (mode == WaveDragMode::start || mode == WaveDragMode::end))
     {
-        const double totalBeats = state.sourceLengthBeats > 0.0 ? state.sourceLengthBeats : state.lengthInBeats;
         const double step = currentGridStepBeats();
-        if (totalBeats > 0.0 && step > 0.0)
-            ratio = juce::jlimit(0.0, 1.0, (std::round((ratio * totalBeats) / step) * step) / totalBeats);
+        if (warpTotalBeats > 0.0 && step > 0.0)
+        {
+            const double snappedBeat = std::round(srcRatioToBeat(ratio) / step) * step;
+            ratio = juce::jlimit(0.0, 1.0, beatToSrcRatio(snappedBeat));
+        }
     }
 
     if (mode == WaveDragMode::start)

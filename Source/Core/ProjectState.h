@@ -3,6 +3,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_graphics/juce_graphics.h>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -83,6 +84,67 @@ struct PitchSlide
     double sourceNoteStartBeat { 0.0 };
 };
 
+// Ableton-style warp marker: pins a point in the SOURCE sample (sourceRatio in [0,1]) to a position
+// in warped time (beat, measured from the clip's warped start). Between consecutive markers the time
+// stretch is linear; a list of markers therefore describes a piecewise-linear warp. An empty list =
+// plain linear warp (the legacy behaviour), so this is purely additive.
+struct WarpMarker
+{
+    double sourceRatio { 0.0 };
+    double beat { 0.0 };
+};
+
+// Build the full, monotonic warp control-point list from the user markers: implicit endpoints
+// (source 0 -> beat 0) and (source 1 -> beat totalBeats) plus every marker, sorted by source and
+// clamped so both source and beat strictly increase (a warp map can never run time backwards).
+inline std::vector<WarpMarker> warpControlPoints(const std::vector<WarpMarker>& markers, double totalBeats)
+{
+    std::vector<WarpMarker> pts;
+    pts.push_back({ 0.0, 0.0 });
+    for (const auto& m : markers)
+        if (m.sourceRatio > 1.0e-6 && m.sourceRatio < 1.0 - 1.0e-6)
+            pts.push_back({ juce::jlimit(0.0, 1.0, m.sourceRatio), juce::jmax(0.0, m.beat) });
+    pts.push_back({ 1.0, juce::jmax(1.0e-6, totalBeats) });
+    std::sort(pts.begin(), pts.end(), [](const auto& a, const auto& b) { return a.sourceRatio < b.sourceRatio; });
+    for (std::size_t i = 1; i < pts.size(); ++i)
+        pts[i].beat = juce::jmax(pts[i].beat, pts[i - 1].beat + 1.0e-6);
+    return pts;
+}
+
+// Piecewise-linear map source ratio [0,1] -> warped beat.
+inline double warpSourceRatioToBeat(const std::vector<WarpMarker>& markers, double totalBeats, double sourceRatio)
+{
+    const auto pts = warpControlPoints(markers, totalBeats);
+    sourceRatio = juce::jlimit(0.0, 1.0, sourceRatio);
+    for (std::size_t i = 1; i < pts.size(); ++i)
+    {
+        if (sourceRatio <= pts[i].sourceRatio)
+        {
+            const auto span = juce::jmax(1.0e-9, pts[i].sourceRatio - pts[i - 1].sourceRatio);
+            const auto t = (sourceRatio - pts[i - 1].sourceRatio) / span;
+            return pts[i - 1].beat + t * (pts[i].beat - pts[i - 1].beat);
+        }
+    }
+    return pts.back().beat;
+}
+
+// Piecewise-linear map warped beat -> source ratio [0,1] (inverse of the above).
+inline double warpBeatToSourceRatio(const std::vector<WarpMarker>& markers, double totalBeats, double beat)
+{
+    const auto pts = warpControlPoints(markers, totalBeats);
+    beat = juce::jlimit(0.0, pts.back().beat, beat);
+    for (std::size_t i = 1; i < pts.size(); ++i)
+    {
+        if (beat <= pts[i].beat)
+        {
+            const auto span = juce::jmax(1.0e-9, pts[i].beat - pts[i - 1].beat);
+            const auto t = (beat - pts[i - 1].beat) / span;
+            return pts[i - 1].sourceRatio + t * (pts[i].sourceRatio - pts[i - 1].sourceRatio);
+        }
+    }
+    return pts.back().sourceRatio;
+}
+
 struct TimelineClip
 {
     juce::String name;
@@ -127,6 +189,9 @@ struct TimelineClip
     // Transient compatibility flag for older in-memory drops that queued gain analysis.
     // New drops keep imported audio at unity and do not auto-normalise. Not serialized.
     bool gainNormalizationPending { false };
+    // Piecewise warp control points (empty = plain linear warp). Kept sorted by source position.
+    // At the end of the struct so positional aggregate initialisers elsewhere stay valid.
+    std::vector<WarpMarker> warpMarkers;
 };
 
 // Maps a linear fade progress t in [0,1] (0 = silent end, 1 = full level) to a

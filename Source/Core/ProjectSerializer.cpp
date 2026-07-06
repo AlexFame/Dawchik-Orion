@@ -94,6 +94,16 @@ juce::var timelineClipToVar(const orion::TimelineClip& clip)
         slides.add(pitchSlideToVar(slide));
 
     object->setProperty("pitchSlides", juce::var(slides));
+
+    juce::Array<juce::var> warpMarkers;
+    for (const auto& m : clip.warpMarkers)
+    {
+        auto* wm = new juce::DynamicObject();
+        wm->setProperty("sourceRatio", m.sourceRatio);
+        wm->setProperty("beat", m.beat);
+        warpMarkers.add(juce::var(wm));
+    }
+    object->setProperty("warpMarkers", juce::var(warpMarkers));
     return juce::var(object);
 }
 
@@ -303,6 +313,12 @@ orion::TimelineClip timelineClipFromVar(const juce::var& value)
     if (auto* slides = obj->getProperty("pitchSlides").getArray())
         for (const auto& slideVar : *slides)
             clip.pitchSlides.push_back(pitchSlideFromVar(slideVar));
+
+    if (auto* markers = obj->getProperty("warpMarkers").getArray())
+        for (const auto& mVar : *markers)
+            if (auto* mObj = mVar.getDynamicObject())
+                clip.warpMarkers.push_back({ getDouble(*mObj, "sourceRatio", 0.0),
+                                             getDouble(*mObj, "beat", 0.0) });
 
     return clip;
 }

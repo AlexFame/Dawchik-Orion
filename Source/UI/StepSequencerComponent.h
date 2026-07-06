@@ -75,6 +75,8 @@ private:
     // rather than a plain single-pitch step pattern — then we draw a note preview, not steps.
     bool rowIsMelodic(int trackIndex) const;
 
+    // Header "16 / 32" step-count toggle (32 steps = 2 bars of 16). Returns the two clickable halves.
+    std::pair<juce::Rectangle<int>, juce::Rectangle<int>> stepCountToggleBounds() const;
     juce::Rectangle<int> gridArea() const;        // below the header
     juce::Rectangle<int> rowBounds(int row) const;
     juce::Rectangle<int> nameBounds(int row) const;
