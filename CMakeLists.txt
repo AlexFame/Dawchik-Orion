@@ -65,6 +65,7 @@ target_sources(
         Source/Analysis/SampleEmbedding.cpp
         Source/Analysis/AppleSoundClassifier.mm
         Source/Audio/AudioInputRecorder.cpp
+        Source/Audio/AudioRenderPool.cpp
         Source/Audio/ChordDetector.cpp
         Source/Audio/ExportService.cpp
         Source/Audio/OrionStretchEngine.cpp

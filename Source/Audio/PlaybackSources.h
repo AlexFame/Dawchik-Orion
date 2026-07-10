@@ -24,6 +24,7 @@
  #include <sys/qos.h>
 #endif
 
+#include "../Audio/AudioRenderPool.h"
 #include "../Audio/TransportEngine.h"
 #include "../Audio/WarpEngine.h"
 #include "../Core/ProjectState.h"
@@ -506,6 +507,11 @@ public:
 
         // Pre-allocate the metering scratch buffer so the audio callback never reallocates.
         samplerMeterScratch.setSize(2, preparedBlockSize, false, false, true);
+
+        // Spin up (or resize) the parallel instrument-render workers for this block size.
+        renderPool.setBlockTiming(outputSampleRate, preparedBlockSize);
+        renderPool.setNumThreads(multiCoreRenderEnabled ? AudioRenderPool::recommendedThreadCount() : 1);
+        instrumentJobs.reserve(maxMeterTracks);   // so pass 1 never allocates on the audio thread
 
         const juce::ScopedLock sl(instrumentLock);
         for (auto& [trackIndex, slot] : instruments)
@@ -2362,7 +2368,21 @@ private:
         juce::MidiMessageCollector liveCollector;
         juce::MidiBuffer pendingLiveMidi;
         juce::AudioBuffer<float> scratch;
+        juce::MidiBuffer midiScratch;   // this block's notes, built before the parallel pass
         int pendingPanicBlocks { 0 };
+    };
+
+    // One instrument's share of a block: everything the parallel processBlock pass
+    // and the serial mix-down pass need, resolved once on the audio thread.
+    struct InstrumentRenderJob
+    {
+        InstrumentSlot* slot { nullptr };
+        int trackIndex { 0 };
+        bool audible { false };
+        bool panicActive { false };
+        float gainL { 0.0f };       // trackGain * pan, per channel
+        float gainR { 0.0f };
+        float gainOther { 0.0f };   // channels beyond stereo take the gain unpanned
     };
 
     // Snapshot the set of track indices that currently host an instrument, so
@@ -2430,6 +2450,10 @@ private:
         if (includeClipNotes)
             chaseNotesAtStart = false;
 
+        // Pass 1 (serial): work out each instrument's MIDI for this block. Cheap, and
+        // it reads shared state (project tracks, the live-note queues), so it stays here.
+        instrumentJobs.clear();
+
         for (auto& [trackIndex, slot] : instruments)
         {
             if (slot == nullptr || slot->instance == nullptr)
@@ -2440,7 +2464,8 @@ private:
             const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
             auto* inst = slot->instance.get();
 
-            juce::MidiBuffer midi;
+            auto& midi = slot->midiScratch;
+            midi.clear();
             const bool panicActive = slot->pendingPanicBlocks > 0;
 
             if (panicActive)
@@ -2633,26 +2658,44 @@ private:
             slot->scratch.setSize(chans, numSamples, false, false, true);
             slot->scratch.clear();
 
-            inst->processBlock(slot->scratch, midi);
-
-            if (panicActive || ! trackAudible)
-                continue;
-
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb + track.trackGainDb));
             float panL = 1.0f, panR = 1.0f;
             panToGains(track.pan, panL, panR);
 
+            instrumentJobs.push_back({ slot.get(), trackIndex, trackAudible, panicActive,
+                                       panL * trackGain, panR * trackGain, trackGain });
+        }
+
+        // Pass 2 (parallel): the expensive part. Each plugin renders into its own
+        // scratch buffer from its own MIDI buffer, so the jobs share nothing. This is
+        // what puts the other cores to work — a serial loop here was pinning one core
+        // at 100% with 40 instruments loaded while seven cores idled.
+        renderPool.runParallel(static_cast<int>(instrumentJobs.size()), [this](int i)
+        {
+            auto& job = instrumentJobs[static_cast<std::size_t>(i)];
+            job.slot->instance->processBlock(job.slot->scratch, job.slot->midiScratch);
+        });
+
+        // Pass 3 (serial): sum into the shared mix buffer and publish the meters.
+        for (const auto& job : instrumentJobs)
+        {
+            if (job.panicActive || ! job.audible)
+                continue;
+
+            auto& scratch = job.slot->scratch;
             float instPeakL = 0.0f, instPeakR = 0.0f;
+
             for (int ch = 0; ch < targetBuffer.getNumChannels(); ++ch)
             {
-                const auto pg = (ch == 0 ? panL : (ch == 1 ? panR : 1.0f)) * trackGain;
-                const auto srcCh = juce::jmin(ch, slot->scratch.getNumChannels() - 1);
-                const auto mag = slot->scratch.getMagnitude(srcCh, 0, numSamples) * pg;
+                const auto pg = (ch == 0 ? job.gainL : (ch == 1 ? job.gainR : job.gainOther));
+                const auto srcCh = juce::jmin(ch, scratch.getNumChannels() - 1);
+                const auto mag = scratch.getMagnitude(srcCh, 0, numSamples) * pg;
                 if (ch == 0)      instPeakL = juce::jmax(instPeakL, mag);
                 else if (ch == 1) instPeakR = juce::jmax(instPeakR, mag);
-                targetBuffer.addFrom(ch, startSample, slot->scratch, srcCh, 0, numSamples, pg);
+                targetBuffer.addFrom(ch, startSample, scratch, srcCh, 0, numSamples, pg);
             }
-            accumulateTrackPeakStereo(trackIndex, instPeakL, instPeakR);
+
+            accumulateTrackPeakStereo(job.trackIndex, instPeakL, instPeakR);
         }
     }
 
@@ -2807,6 +2850,13 @@ private:
 
     juce::CriticalSection instrumentLock;
     std::map<int, std::unique_ptr<InstrumentSlot>> instruments;
+
+    // Multi-core instrument rendering. Disable with ORION_SINGLE_CORE=1 to get the
+    // old serial loop back (useful when a plugin misbehaves off the audio thread).
+    const bool multiCoreRenderEnabled { juce::SystemStats::getEnvironmentVariable("ORION_SINGLE_CORE", "0") != "1" };
+    AudioRenderPool renderPool;
+    std::vector<InstrumentRenderJob> instrumentJobs;   // reused every block, never grown on the audio thread
+
     // Parked (still-alive) instruments from deleted tracks, kept so undo can re-home the exact
     // same instance instantly instead of reinstantiating. Bounded by trimInstrumentStash().
     std::vector<std::unique_ptr<InstrumentSlot>> instrumentStash;
