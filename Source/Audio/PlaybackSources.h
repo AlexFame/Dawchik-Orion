@@ -537,10 +537,23 @@ public:
         }
     }
 
+    // Called from the message thread, and on stop it runs AFTER the transport has already
+    // rewound to 0. Two things must not happen here: eating the audio thread's falling edge
+    // (which is what arms the fade-out tail), and moving the playhead out from under a tail
+    // that is already rendering. Both cut the mix dead mid-waveform.
     void syncToTransportPosition() noexcept
     {
-        currentTimelineBeat = transport.getPlayheadBeat();
-        wasPlaying = false;
+        if (wasPlaying)
+        {
+            // Hand the audio thread the beat we actually stopped at, so its tail keeps
+            // rendering the audio you were hearing rather than restarting from the top.
+            declickStartBeat.store(currentTimelineBeat, std::memory_order_relaxed);
+            declickArmed.store(true, std::memory_order_release);
+            wasPlaying = false;
+        }
+
+        if (declickRemaining <= 0)
+            currentTimelineBeat = transport.getPlayheadBeat();
     }
 
     void setClipEditorPreviewTrim(int trackIndex, int clipIndex, double anchorBeat, double startRatio, double endRatio) noexcept
@@ -1058,9 +1071,17 @@ public:
             const auto beatsPerSecondStopped = project.getTempoBpm() / 60.0;
 
             // Falling edge: start a short fade-out tail from the last playing position so the
-            // arrangement audio doesn't cut with a click.
-            if (wasPlaying)
+            // arrangement audio doesn't cut with a click. The edge arrives either here (we saw
+            // the transport stop first) or from syncToTransportPosition() on the message thread,
+            // which gets there first whenever the user hits Stop. Whoever sees it, the tail must
+            // resume from the beat playback actually reached.
+            const bool armedFromMessageThread = declickArmed.exchange(false, std::memory_order_acquire);
+
+            if (wasPlaying || armedFromMessageThread)
             {
+                if (! wasPlaying)
+                    currentTimelineBeat = declickStartBeat.load(std::memory_order_relaxed);
+
                 declickRemaining = juce::jmax(1, static_cast<int>(outputSampleRate * 0.006));
                 declickTotal = declickRemaining;
                 wasPlaying = false;
@@ -1092,6 +1113,7 @@ public:
             return;
         }
         declickRemaining = 0;   // playing again — cancel any pending fade tail
+        declickArmed.store(false, std::memory_order_relaxed);   // ...and any tail that was armed but never rendered
 
         const auto beatsPerSecond = project.getTempoBpm() / 60.0;
         if (beatsPerSecond <= 0.0)
@@ -2743,6 +2765,10 @@ private:
     // Short fade-out tail rendered when playback stops, so the arrangement doesn't click.
     int declickRemaining { 0 };
     int declickTotal { 1 };
+    // Stop arrives on the message thread, which sees the falling edge before the audio thread
+    // does. It parks the edge (and the beat to fade out from) here for the next audio block.
+    std::atomic<bool> declickArmed { false };
+    std::atomic<double> declickStartBeat { 0.0 };
     std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
     // Full decoded source files are also real memory (a few long stereo files quickly become GB).
