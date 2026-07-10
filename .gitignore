@@ -20,6 +20,7 @@
 
 # Local build/checkpoint artifacts
 /build-local/
+/build-tsan/
 /backups/
 cmake-build-*/
 CMakeFiles/

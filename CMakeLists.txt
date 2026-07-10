@@ -307,3 +307,10 @@ target_link_libraries(
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+juce_add_console_app(OrionRenderPoolTest PRODUCT_NAME "Orion Render Pool Test")
+target_sources(OrionRenderPoolTest PRIVATE Source/Tools/RenderPoolTest.cpp Source/Audio/AudioRenderPool.cpp)
+target_compile_definitions(OrionRenderPoolTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(OrionRenderPoolTest
+    PRIVATE juce::juce_core
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
