@@ -68,6 +68,7 @@ target_sources(
         Source/Audio/AudioRenderPool.cpp
         Source/Audio/ChordDetector.cpp
         Source/Audio/ExportService.cpp
+        Source/Audio/LoudnessMeter.cpp
         Source/Audio/OrionStretchEngine.cpp
         Source/Audio/StemSeparator.cpp
         Source/Audio/TransportController.cpp
@@ -313,4 +314,11 @@ target_sources(OrionRenderPoolTest PRIVATE Source/Tools/RenderPoolTest.cpp Sourc
 target_compile_definitions(OrionRenderPoolTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
 target_link_libraries(OrionRenderPoolTest
     PRIVATE juce::juce_core
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+juce_add_console_app(OrionLoudnessTest PRODUCT_NAME "Orion Loudness Test")
+target_sources(OrionLoudnessTest PRIVATE Source/Tools/LoudnessTest.cpp Source/Audio/LoudnessMeter.cpp)
+target_compile_definitions(OrionLoudnessTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(OrionLoudnessTest
+    PRIVATE juce::juce_audio_basics juce::juce_core
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)

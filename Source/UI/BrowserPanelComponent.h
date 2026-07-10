@@ -46,6 +46,8 @@ public:
     std::function<void()>                   onCloseRequested;
     // Footer transport: fired when the play/stop button in the preview bar is clicked.
     std::function<void()>                   onTogglePreviewPlayback;
+    // Footer waveform: move the preview transport to a normalised position (0..1).
+    std::function<void(float)>               onSeekPreview;
     // Fired when the user starts dragging an item to the playlist — caller stops the preview.
     std::function<void()>                   onDragStarted;
     // Fired when the SYNC toggle is clicked — caller should reload the preview buffer.
@@ -159,6 +161,12 @@ private:
     // into its tags + subtitle when it arrives. Deduped/cached by AudioTagger.
     void requestSoundTags(int itemIndex);
 
+    // Live drag thumbnail: JUCE lets us replace the image while a drag is active, so the
+    // browser can give the sample a small momentum-driven tilt instead of a static label.
+    juce::DragAndDropContainer* dragVisualContainer { nullptr };
+    std::optional<BrowserItem> dragVisualItem;
+    std::vector<float> dragVisualPeaks;
+
     // "Find similar sounds" (Ableton-style): rank the current folder's files by timbral similarity to a
     // chosen query. Enter via the row context menu; exit via the header chip / search / navigation.
     void enterSimilarMode(const juce::File& query);
@@ -227,8 +235,10 @@ private:
     juce::String        previewName;
     std::vector<float>  previewPeaks;          // normalised 0..1 magnitudes
     bool                previewPlaying { false };
-    bool                previewArmed { false };   // quantized, waiting for the next beat
+    bool                previewArmed { false };   // quantized, waiting for the next bar
     float               previewPositionRatio { 0.0f };
-    bool                previewBpmSync { false };
+    // On by default, matching Ableton, whose Raw switch (the inverse of this) is off by default:
+    // previews warp to the project tempo, loop, and launch on the next bar.
+    bool                previewBpmSync { true };
 };
 }  // namespace orion

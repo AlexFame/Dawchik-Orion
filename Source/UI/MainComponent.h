@@ -188,6 +188,23 @@ private:
     bool setClipEditorPreviewPlaybackPosition(double sourceRatio);
     void rebuildClipEditorWaveform(const juce::String& sourcePath);
     void normalizeSelectedAudioClip();
+    // Peak magnitude and integrated loudness of the region the clip actually plays (its trim).
+    struct ClipLevels
+    {
+        float peak { -1.0f };            // <0 = unreadable
+        double lufs { 0.0 };             // -inf = silent / too short to gate
+    };
+    ClipLevels measureClipLevels(const TimelineClip& clip);
+    // Peak magnitude of the region the clip actually plays (its trim), or -1 if unreadable.
+    float measureClipPeak(const TimelineClip& clip);
+    // Bring every selected clip up (or down) to the loudness of the loudest one, by LUFS rather
+    // than by peak, capping each gain so nothing is pushed into clipping.
+    void matchClipLoudness(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection);
+    // Normalize a whole selection. relativeToLoudest applies ONE shared offset, derived from the
+    // loudest clip, so the clips keep their balance against each other; otherwise each clip is
+    // brought to the target on its own.
+    void normalizeClips(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection, bool relativeToLoudest);
+    void setClipsGainDb(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection, double gainDb);
     void setClipInspectorVisible(bool shouldShow);
     void applyGainFromInspectorText();
     void applyTempoFromTransportText();
@@ -446,7 +463,7 @@ private:
     // the whole group via the existing bus engine.
     void syncFoldersToBuses();
     juce::File getAudioRecordingDirectory() const;
-    int browserPanelWidth { 300 };
+    int browserPanelWidth { 360 };
     int exportSampleRate { 44100 };
     // When false the browser panel is hidden and the playlist expands to fill the window.
     bool browserPanelVisible { true };

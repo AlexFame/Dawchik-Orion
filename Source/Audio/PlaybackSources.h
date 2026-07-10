@@ -53,31 +53,75 @@ public:
     {
         info.clearActiveBufferRegion();
 
-        if (buffer.getNumSamples() == 0 || info.numSamples <= 0)
-            return;
-
-        const auto remaining = juce::jmax(0, buffer.getNumSamples() - static_cast<int>(positionSamples));
-        const auto samplesToCopy = juce::jmin(info.numSamples, remaining);
-        if (samplesToCopy <= 0)
-            return;
-
-        for (int channel = 0; channel < info.buffer->getNumChannels(); ++channel)
+        // A seek can arrive from the UI thread while the audio callback is rendering. Apply it
+        // here, then ramp the new position in briefly so a discontinuity never becomes a click.
+        const auto requested = requestedPosition.exchange(-1, std::memory_order_acq_rel);
+        if (requested >= 0)
         {
-            const auto sourceChannel = juce::jmin(channel, buffer.getNumChannels() - 1);
-            info.buffer->copyFrom(channel, info.startSample, buffer, sourceChannel, static_cast<int>(positionSamples), samplesToCopy);
+            positionSamples = juce::jlimit<juce::int64>(0, buffer.getNumSamples(), requested);
+            seekFadeSamplesRemaining = seekFadeLength;
         }
 
-        positionSamples += samplesToCopy;
+        const auto total = buffer.getNumSamples();
+        if (total == 0 || info.numSamples <= 0)
+            return;
+
+        // Fill the block, wrapping back to the start as many times as it takes when looping.
+        // A tempo-fitted loop is often shorter than one block at high tempi, so a single wrap
+        // per block is not enough.
+        int written = 0;
+        while (written < info.numSamples)
+        {
+            const auto remaining = juce::jmax(0, total - static_cast<int>(positionSamples));
+            if (remaining <= 0)
+            {
+                if (! looping)
+                    break;
+
+                positionSamples = 0;
+                continue;
+            }
+
+            const auto samplesToCopy = juce::jmin(info.numSamples - written, remaining);
+
+            for (int channel = 0; channel < info.buffer->getNumChannels(); ++channel)
+            {
+                const auto sourceChannel = juce::jmin(channel, buffer.getNumChannels() - 1);
+                info.buffer->copyFrom(channel, info.startSample + written, buffer, sourceChannel,
+                                      static_cast<int>(positionSamples), samplesToCopy);
+            }
+
+            if (seekFadeSamplesRemaining > 0)
+            {
+                const auto samplesToFade = juce::jmin(samplesToCopy, seekFadeSamplesRemaining);
+                for (int sample = 0; sample < samplesToFade; ++sample)
+                {
+                    const auto gain = 1.0f - static_cast<float>(seekFadeSamplesRemaining - sample)
+                                             / static_cast<float>(seekFadeLength);
+                    for (int channel = 0; channel < info.buffer->getNumChannels(); ++channel)
+                        info.buffer->getWritePointer(channel, info.startSample + written + sample)[0] *= gain;
+                }
+                seekFadeSamplesRemaining -= samplesToFade;
+            }
+
+            positionSamples += samplesToCopy;
+            written += samplesToCopy;
+        }
     }
+
+    // Ableton previews loops when Raw is off. Off by default so every other caller is unchanged.
+    void setLooping(bool shouldLoop) noexcept { looping = shouldLoop; }
 
     void setNextReadPosition(juce::int64 newPosition) override
     {
-        positionSamples = juce::jlimit<juce::int64>(0, buffer.getNumSamples(), newPosition);
+        requestedPosition.store(juce::jlimit<juce::int64>(0, buffer.getNumSamples(), newPosition),
+                                std::memory_order_release);
     }
 
     juce::int64 getNextReadPosition() const override
     {
-        return positionSamples;
+        const auto requested = requestedPosition.load(std::memory_order_acquire);
+        return requested >= 0 ? requested : positionSamples.load(std::memory_order_acquire);
     }
 
     juce::int64 getTotalLength() const override
@@ -87,7 +131,7 @@ public:
 
     bool isLooping() const override
     {
-        return false;
+        return looping;   // AudioTransportSource checks this before deciding we ran off the end
     }
 
     double getSampleRate() const noexcept
@@ -98,7 +142,11 @@ public:
 private:
     juce::AudioBuffer<float> buffer;
     double sampleRate { 44100.0 };
-    juce::int64 positionSamples { 0 };
+    std::atomic<juce::int64> positionSamples { 0 };
+    std::atomic<juce::int64> requestedPosition { -1 };
+    static constexpr int seekFadeLength = 96;
+    int seekFadeSamplesRemaining { 0 };
+    bool looping { false };
 };
 
 // Instant, length-independent clip-editor preview: time-stretches (and optionally
@@ -1925,6 +1973,18 @@ private:
                     const auto i2 = juce::jmin(sourceIndex + 1, lastSample);
                     const auto i3 = juce::jmin(sourceIndex + 2, lastSample);
 
+                    // A warp buffer is already stretched to the clip's exact playback length. When
+                    // the device runs at the buffer's own sample rate, the intended read is 1:1, so
+                    // the fractional index only ever drifts by float rounding. Interpolating it with
+                    // cubic Hermite then lowpasses the material a SECOND time — audibly softening
+                    // drum transients that RubberBand already worked to keep sharp. Snap to the
+                    // nearest true sample instead: no second filtering pass, sub-sample drift is
+                    // inaudible. Non-warp reads (real pitch/rate change, one-shots) keep the cubic.
+                    const bool lockedOneToOne = needsPitchRender && ! useClipEditorPreview
+                                                && std::abs(audioData->sampleRate - renderSampleRate) < 0.5;
+                    const auto nearestIndex = juce::jlimit(0, lastSample,
+                                                           static_cast<int>(std::lround(sourceSamplePosition)));
+
                     // Fade in/out envelope (linear), based on position within the clip.
                     float fadeGain = 1.0f;
                     if (! useClipEditorPreview)
@@ -1938,11 +1998,20 @@ private:
                     for (int channel = 0; channel < targetBuffer.getNumChannels(); ++channel)
                     {
                         const auto sourceChannel = juce::jmin(channel, audioData->buffer.getNumChannels() - 1);
-                        const auto y0 = audioData->buffer.getSample(sourceChannel, i0);
-                        const auto y1 = audioData->buffer.getSample(sourceChannel, i1);
-                        const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
-                        const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
-                        const auto sampleValue = cubicHermite(sourceFraction, y0, y1, y2, y3) * linearGain;
+                        float raw;
+                        if (lockedOneToOne)
+                        {
+                            raw = audioData->buffer.getSample(sourceChannel, nearestIndex);
+                        }
+                        else
+                        {
+                            const auto y0 = audioData->buffer.getSample(sourceChannel, i0);
+                            const auto y1 = audioData->buffer.getSample(sourceChannel, i1);
+                            const auto y2 = audioData->buffer.getSample(sourceChannel, i2);
+                            const auto y3 = audioData->buffer.getSample(sourceChannel, i3);
+                            raw = cubicHermite(sourceFraction, y0, y1, y2, y3);
+                        }
+                        const auto sampleValue = raw * linearGain;
                         const auto outputValue = sampleValue * fadeGain * panForChannel(channel);
                         targetBuffer.addSample(channel, startSample + sampleIndex, outputValue);
                     }
@@ -2241,7 +2310,8 @@ private:
             if (! stl.isLocked())
                 return nullptr;   // a build is in progress — this block plays the fallback
             const auto it = warpedAudioCache.find(key);
-            if (it == warpedAudioCache.end()) return nullptr;
+            if (it == warpedAudioCache.end())
+                return nullptr;
             it->second->lastUsedMs = juce::Time::getMillisecondCounter();   // mark playing → LRU won't evict it
             return it->second.get();
         }

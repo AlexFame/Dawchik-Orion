@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../Audio/AudioInputRecorder.h"
+#include "../Audio/LoudnessMeter.h"
 #include "../Audio/OrionStretchEngine.h"
 #include "../Audio/PlaybackSources.h"
 #include "../Audio/WarpEngine.h"
@@ -36,8 +37,20 @@ constexpr int minBrowserPanelWidth = 220;
 constexpr int maxBrowserPanelWidth = 520;
 constexpr int browserResizeHandleWidth = 10;
 constexpr int transportShelfHeight = orion::TransportBarComponent::preferredHeight;
-// Browser preview plays this much below unity so dropping a sample into the playlist
-// (which plays at true level) gives the Ableton-style "louder when dropped" jump.
+// The transport panel is already vertically centred inside the shelf with an 8 px inset.
+// Keep the workspace flush to the shelf so the panel has the same visual air above and below.
+constexpr int workspaceTopGap = 0;
+// Browser previews play this far below unity, so a sample gets louder the moment it is dropped
+// into the playlist (where it plays at its true level).
+//
+// This matches Live, but not because Live has a rule about preview headroom — it doesn't. Live
+// routes previews through a separate Preview/Cue Volume control on the Main track, bypassing the
+// track fader and the main fader entirely, and that control ships set to -6.0 dB (verified in
+// Live 12: Main row shows main volume 0.0 and cue volume -6.0 out of the box). The famous
+// "louder when you drop it" jump is just those two independent gain paths, 6 dB apart.
+//
+// We hard-code the same 6 dB. If it ever needs to be user-adjustable, a Preview Volume control
+// mirroring Live's Cue Volume is the honest way to do it.
 constexpr double browserPreviewHeadroomDb = -6.0;
 constexpr int transportBrandWidth = 210;
 constexpr int transportClusterWidth = 264;
@@ -644,6 +657,11 @@ MainComponent::MainComponent()
 {
     setWantsKeyboardFocus(true);
 
+    // Keep painted labels and JUCE-native controls on the same macOS typeface. Without this,
+    // browser rows use Avenir Next while TextEditor/TextButton fall back to another sans-serif.
+    getLookAndFeel().setDefaultSansSerifTypefaceName("Avenir Next");
+    transportButtonLookAndFeel.setDefaultSansSerifTypefaceName("Avenir Next");
+
     headerLabel.setText("ORION", juce::dontSendNotification);
     headerLabel.setFont(juce::FontOptions(27.0f, juce::Font::bold));
     headerLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.96f));
@@ -1052,6 +1070,19 @@ MainComponent::MainComponent()
                                           static_cast<juce::Component*>(&meterValueLabel),
                                           static_cast<juce::Component*>(&meterCaptionLabel) })
         legacyTransportControl->setVisible(false);
+
+    arrangementTimeline.onNormalizeClips = [this](const std::vector<ArrangementTimelineComponent::SelectedClip>& sel, bool relativeToLoudest)
+    {
+        normalizeClips(sel, relativeToLoudest);
+    };
+    arrangementTimeline.onSetClipsGainDb = [this](const std::vector<ArrangementTimelineComponent::SelectedClip>& sel, double gainDb)
+    {
+        setClipsGainDb(sel, gainDb);
+    };
+    arrangementTimeline.onMatchClipLoudness = [this](const std::vector<ArrangementTimelineComponent::SelectedClip>& sel)
+    {
+        matchClipLoudness(sel);
+    };
 
     transportBar.onPlay = [this]() { toggleTransportFromUi(); };
     transportBar.onStop = [this]() { stopTransportFromUi(); };
@@ -1641,6 +1672,20 @@ MainComponent::MainComponent()
         else if (previewBufferSource != nullptr)
         {
             armOrStartBrowserPreview();
+        }
+    };
+    browserPanel.onSeekPreview = [this](float ratio)
+    {
+        if (previewBufferSource == nullptr)
+            return;
+
+        pendingBrowserPreviewStart = false;
+        browserPanel.setPreviewArmed(false);
+        const auto length = previewTransportSource.getLengthInSeconds();
+        if (length > 0.0)
+        {
+            previewTransportSource.setPosition(static_cast<double>(juce::jlimit(0.0f, 1.0f, ratio)) * length);
+            browserPanel.setPreviewPlayback(previewTransportSource.isPlaying(), ratio);
         }
     };
     browserPanel.onDragStarted = [this]
@@ -2500,7 +2545,7 @@ void MainComponent::paint(juce::Graphics& g)
     // Horizontal extents MUST match resized() (which works off getLocalBounds().reduced(8)),
     // otherwise the painted panel card sits 8px off from where the component is positioned —
     // which made the browser's internal padding asymmetric (24px left vs 8px right).
-    auto workArea = bounds.reduced(8, 0).withTrimmedTop(2);
+    auto workArea = bounds.reduced(8, 0).withTrimmedTop(workspaceTopGap);
     workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 2);
     juce::Rectangle<int> browserPanelBounds;
     if (browserPanelShown())
@@ -2582,7 +2627,9 @@ void MainComponent::resized()
     transportBar.toFront(false);
     cachedKeyCardBounds = transportBar.getKeyBounds().translated(transportBar.getX(), transportBar.getY());
     // Reduced padding for a sleeker edge-to-edge floating layout
-    auto bounds = getLocalBounds().reduced(8);
+    // Keep the horizontal inset while letting the vertical rhythm be controlled explicitly by
+    // workspaceTopGap; reducing the whole rectangle here used to cancel that gap later on.
+    auto bounds = getLocalBounds().withTrimmedLeft(8).withTrimmedRight(8);
     auto topStrip = bounds.removeFromTop(transportShelfHeight).reduced(18, 10);
     bounds.setBottom(getLocalBounds().getBottom());
     const auto contentWidth = transportBrandWidth + transportClusterWidth + transportTempoWidth + transportModeWidth
@@ -2673,8 +2720,7 @@ void MainComponent::resized()
 
     // Use the full window width so the timeline reaches the right edge (no dead strip).
     // Only the left/top insets come from `bounds`; right/bottom go flush to the window.
-    auto workArea = bounds.withTrimmedTop(2);
-    workArea.setTop(juce::jmax(0, workArea.getY() - 8));
+    auto workArea = bounds.withTrimmedTop(workspaceTopGap);
     workArea.setRight(getLocalBounds().getRight());
     auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth);
     sidebarNav.setBounds(sidebarBounds);
@@ -3924,15 +3970,26 @@ void MainComponent::armOrStartBrowserPreview()
 {
     previewTransportSource.setPosition(0.0);
 
-    // Launch quantize (Ableton-style): only when synced to project tempo AND the transport
-    // is actually running — without a moving playhead there's no beat to lock onto.
-    if (browserPanel.isPreviewBpmSyncEnabled() && transportEngine.isPlaying())
+    const auto synced = browserPanel.isPreviewBpmSyncEnabled();
+
+    // Ableton: "Audio previews are looped when Raw is deactivated and unlooped when Raw is
+    // enabled." Synced here is the inverse of Raw, so a synced preview loops.
+    if (previewBufferSource != nullptr)
+        previewBufferSource->setLooping(synced);
+
+    // Launch quantize: only when synced to project tempo AND the transport is actually
+    // running — without a moving playhead there's no beat to lock onto.
+    if (synced && transportEngine.isPlaying())
     {
         const auto currentBeat = transportEngine.getPlayheadBeat();
+        // Ableton starts the preview "at the beginning of the next bar", not the next beat, so
+        // the loop lands on the downbeat and you hear it against the arrangement in phase.
+        const auto beatsPerBar = juce::jmax(1.0, static_cast<double>(projectState.getNumerator()));
+        const auto barIndex = std::floor((currentBeat + 1.0e-4) / beatsPerBar);
+
         pendingBrowserPreviewStart = true;
         pendingBrowserPreviewGeneration = previewRequestGeneration.load();
-        // Next whole beat. The tiny epsilon avoids "already past it" when we're a hair early.
-        pendingBrowserPreviewStartBeat = std::floor(currentBeat + 1.0e-4) + 1.0;
+        pendingBrowserPreviewStartBeat = (barIndex + 1.0) * beatsPerBar;
         pendingBrowserPreviewLastBeat = currentBeat;
         browserPanel.setPreviewArmed(true);
     }
@@ -6608,49 +6665,251 @@ void MainComponent::rebuildClipEditorWaveform(const juce::String& sourcePath)
     clipEditorWaveformCache.emplace(key, std::move(waveform));
 }
 
-void MainComponent::normalizeSelectedAudioClip()
+namespace
 {
-    auto* clip = getSelectedTimelineClip();
-    if (clip == nullptr || clip->type != ClipType::audio || clip->sourcePath.isEmpty())
-        return;
+// Peak target. Just under 0 dBFS: high enough that already-mastered loops (which peak around
+// -0.1 dB) are left where they are instead of being pulled down, low enough to leave room for
+// the inter-sample peaks that lossy encoders push above full scale. The old -3.0 quietly
+// attenuated every commercial loop by ~3 dB.
+constexpr double normalizeTargetDb = -0.3;
+constexpr double clipGainMinDb = -24.0;
+constexpr double clipGainMaxDb = 12.0;
+}
 
-    const auto sourceFile = juce::File(clip->sourcePath);
-    std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(sourceFile));
+float MainComponent::measureClipPeak(const TimelineClip& clip)
+{
+    return measureClipLevels(clip).peak;
+}
+
+MainComponent::ClipLevels MainComponent::measureClipLevels(const TimelineClip& clip)
+{
+    ClipLevels levels;
+    levels.lufs = orion::LoudnessMeter::silence();
+
+    if (clip.type != ClipType::audio || clip.sourcePath.isEmpty())
+        return levels;
+
+    std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(juce::File(clip.sourcePath)));
     if (reader == nullptr || reader->lengthInSamples <= 0)
+        return levels;
+
+    // Only the trimmed region is audible, so only it decides the peak. Scanning the whole file
+    // let a loud transient outside the trim hold the clip down.
+    const auto total = reader->lengthInSamples;
+    const auto ratioToSample = [total] (double r)
     {
-        statusLabel.setText("Normalize failed: can't read clip", juce::dontSendNotification);
-        return;
-    }
+        return juce::jlimit<juce::int64>(0, total, static_cast<juce::int64>(std::llround(juce::jlimit(0.0, 1.0, r) * static_cast<double>(total))));
+    };
+
+    auto position = ratioToSample(clip.sampleStartRatio);
+    const auto end = juce::jmax(position + 1, ratioToSample(clip.sampleEndRatio));
 
     constexpr int chunkSize = 16384;
-    juce::AudioBuffer<float> buffer(static_cast<int>(reader->numChannels), chunkSize);
+    const auto numChannels = static_cast<int>(reader->numChannels);
+    juce::AudioBuffer<float> buffer(numChannels, chunkSize);
+    orion::LoudnessMeter meter(reader->sampleRate, numChannels);
     float peak = 0.0f;
-    juce::int64 position = 0;
 
-    while (position < reader->lengthInSamples)
+    // One pass for both: the file read dominates, and the K-weighting is cheap next to it.
+    while (position < end)
     {
-        const auto samplesToRead = static_cast<int>(juce::jmin<juce::int64>(chunkSize, reader->lengthInSamples - position));
+        const auto samplesToRead = static_cast<int>(juce::jmin<juce::int64>(chunkSize, end - position));
         buffer.clear();
         reader->read(&buffer, 0, samplesToRead, position, true, true);
         for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
             peak = juce::jmax(peak, buffer.getMagnitude(channel, 0, samplesToRead));
+        meter.process(buffer, 0, samplesToRead);
         position += samplesToRead;
     }
 
-    if (peak <= 0.000001f)
+    levels.peak = peak;
+    levels.lufs = meter.getIntegratedLufs();
+    return levels;
+}
+
+void MainComponent::matchClipLoudness(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection)
+{
+    auto& tracks = projectState.getTracks();
+
+    struct Entry { TimelineClip* clip; ClipLevels levels; };
+    std::vector<Entry> entries;
+
+    for (const auto& sel : selection)
     {
-        statusLabel.setText("Normalize skipped: silent clip", juce::dontSendNotification);
+        if (sel.trackIndex < 0 || sel.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        auto& trackClips = tracks[static_cast<std::size_t>(sel.trackIndex)].clips;
+        if (sel.clipIndex < 0 || sel.clipIndex >= static_cast<int>(trackClips.size()))
+            continue;
+
+        auto& clip = trackClips[static_cast<std::size_t>(sel.clipIndex)];
+        if (clip.type != ClipType::audio || clip.sourcePath.isEmpty())
+            continue;
+
+        const auto levels = measureClipLevels(clip);
+        if (levels.peak <= 0.000001f || ! std::isfinite(levels.lufs))
+            continue;   // unreadable, silent, or shorter than one 400ms gating block
+
+        entries.push_back({ &clip, levels });
+    }
+
+    if (entries.size() < 2)
+    {
+        statusLabel.setText(entries.empty() ? "Match loudness: no measurable audio clips"
+                                            : "Match loudness needs two or more clips",
+                            juce::dontSendNotification);
         return;
     }
 
-    constexpr double normalizeTargetDb = -3.0;
-    const auto peakDb = static_cast<double>(juce::Decibels::gainToDecibels(peak, -60.0f));
-    const auto gainDb = juce::jlimit(-24.0, 12.0, normalizeTargetDb - peakDb);
-    clip->gainDb = gainDb;
-    statusLabel.setText("Normalized clip: " + juce::String(gainDb, 1) + " dB", juce::dontSendNotification);
+    // The loudest clip is the reference and keeps its current gain; everything else moves to it.
+    const auto reference = std::max_element(entries.begin(), entries.end(),
+        [](const Entry& a, const Entry& b) { return a.levels.lufs < b.levels.lufs; })->levels.lufs;
+
+    int clipped = 0;
+
+    for (auto& e : entries)
+    {
+        const auto wanted = reference - e.levels.lufs;
+
+        // Loudness says how much to lift; the peak says how much we can lift before clipping.
+        // Take the smaller. A dense loop can be quiet in LUFS yet already near full scale.
+        const auto peakDb = static_cast<double>(juce::Decibels::gainToDecibels(e.levels.peak, -60.0f));
+        const auto headroom = normalizeTargetDb - peakDb;
+
+        const auto applied = juce::jlimit(clipGainMinDb, clipGainMaxDb, juce::jmin(wanted, headroom));
+        if (applied < wanted - 0.05)
+            ++clipped;
+
+        e.clip->gainDb = applied;
+    }
+
+    auto message = "Matched " + juce::String(entries.size()) + " clips to "
+                 + juce::String(reference, 1) + " LUFS";
+    if (clipped > 0)
+        message += " (" + juce::String(clipped) + " capped at the clipping ceiling)";
+
+    statusLabel.setText(message, juce::dontSendNotification);
     refreshClipInspector();
     refreshClipEditor();
     arrangementTimeline.repaint();
+}
+
+void MainComponent::normalizeClips(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection,
+                                   bool relativeToLoudest)
+{
+    auto& tracks = projectState.getTracks();
+
+    std::vector<TimelineClip*> clips;
+    std::vector<float> peaks;
+
+    for (const auto& sel : selection)
+    {
+        if (sel.trackIndex < 0 || sel.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        auto& trackClips = tracks[static_cast<std::size_t>(sel.trackIndex)].clips;
+        if (sel.clipIndex < 0 || sel.clipIndex >= static_cast<int>(trackClips.size()))
+            continue;
+
+        auto& clip = trackClips[static_cast<std::size_t>(sel.clipIndex)];
+        if (clip.type != ClipType::audio || clip.sourcePath.isEmpty())
+            continue;
+
+        const auto peak = measureClipPeak(clip);
+        if (peak <= 0.000001f)   // unreadable or silent: leave it alone
+            continue;
+
+        clips.push_back(&clip);
+        peaks.push_back(peak);
+    }
+
+    if (clips.empty())
+    {
+        statusLabel.setText("Normalize skipped: no readable audio clips", juce::dontSendNotification);
+        return;
+    }
+
+    if (relativeToLoudest)
+    {
+        // One offset for everyone, set by the loudest clip. Quiet clips stay quiet relative to
+        // it — the point is to lift the group without flattening the balance inside it.
+        const auto loudest = *std::max_element(peaks.begin(), peaks.end());
+        const auto offsetDb = juce::jlimit(clipGainMinDb, clipGainMaxDb,
+                                           normalizeTargetDb - static_cast<double>(juce::Decibels::gainToDecibels(loudest, -60.0f)));
+
+        for (auto* clip : clips)
+            clip->gainDb = offsetDb;
+
+        statusLabel.setText("Normalized " + juce::String(clips.size()) + " clips to loudest: "
+                                + juce::String(offsetDb, 1) + " dB",
+                            juce::dontSendNotification);
+    }
+    else
+    {
+        for (std::size_t i = 0; i < clips.size(); ++i)
+        {
+            const auto peakDb = static_cast<double>(juce::Decibels::gainToDecibels(peaks[i], -60.0f));
+            clips[i]->gainDb = juce::jlimit(clipGainMinDb, clipGainMaxDb, normalizeTargetDb - peakDb);
+        }
+
+        statusLabel.setText(clips.size() == 1
+                                ? "Normalized clip: " + juce::String(clips.front()->gainDb, 1) + " dB"
+                                : "Normalized " + juce::String(clips.size()) + " clips individually",
+                            juce::dontSendNotification);
+    }
+
+    refreshClipInspector();
+    refreshClipEditor();
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::setClipsGainDb(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection, double gainDb)
+{
+    auto& tracks = projectState.getTracks();
+    const auto clamped = juce::jlimit(clipGainMinDb, clipGainMaxDb, gainDb);
+    int changed = 0;
+
+    for (const auto& sel : selection)
+    {
+        if (sel.trackIndex < 0 || sel.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        auto& trackClips = tracks[static_cast<std::size_t>(sel.trackIndex)].clips;
+        if (sel.clipIndex < 0 || sel.clipIndex >= static_cast<int>(trackClips.size()))
+            continue;
+
+        auto& clip = trackClips[static_cast<std::size_t>(sel.clipIndex)];
+        if (clip.type != ClipType::audio)
+            continue;
+
+        clip.gainDb = clamped;
+        ++changed;
+    }
+
+    if (changed > 0)
+    {
+        statusLabel.setText("Clip gain: " + juce::String(clamped, 1) + " dB ("
+                                + juce::String(changed) + (changed == 1 ? " clip)" : " clips)"),
+                            juce::dontSendNotification);
+        refreshClipInspector();
+        refreshClipEditor();
+        arrangementTimeline.repaint();
+    }
+}
+
+void MainComponent::normalizeSelectedAudioClip()
+{
+    // Clip-editor button: the one clip the editor is showing, routed through normalizeClips()
+    // so it picks up the trim-aware peak too.
+    if (! selectedArrangementClip.has_value())
+    {
+        statusLabel.setText("Normalize skipped: no clip selected", juce::dontSendNotification);
+        return;
+    }
+
+    const auto [trackIndex, clipIndex] = *selectedArrangementClip;
+    normalizeClips({ { trackIndex, clipIndex } }, false);
 }
 
 void MainComponent::refreshClipInspector()

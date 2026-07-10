@@ -72,7 +72,7 @@ public:
     void paint(juce::Graphics& g) override
     {
         g.setColour(orion::theme::surface::panel);
-        g.fillRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
+        g.fillRoundedRectangle(getLocalBounds().toFloat(), orion::theme::metrics::panelRadius);
     }
 
     void resized() override
@@ -673,7 +673,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto trackCount = static_cast<int>(project.getTracks().size());
     g.setColour(juce::Colours::black.withAlpha(0.04f));
-    g.fillRoundedRectangle(getLocalBounds().toFloat(), 18.0f);
+    g.fillRoundedRectangle(getLocalBounds().toFloat(), orion::theme::metrics::panelRadius);
 
     const auto beatsPerBar = static_cast<double>(project.getNumerator());
     const auto totalBeats = getTimelineEndBeats();
@@ -689,9 +689,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     const auto addTrackButton = getAddTrackButtonBounds().toFloat();
     g.setColour(theme::surface::primary.withAlpha(0.34f));
-    g.fillRoundedRectangle(addTrackButton, 7.0f);
+    g.fillRoundedRectangle(addTrackButton, orion::theme::metrics::controlRadius);
     g.setColour(theme::warm::red.withAlpha(0.62f));
-    g.drawRoundedRectangle(addTrackButton.reduced(0.5f), 7.0f, 1.2f);
+    g.drawRoundedRectangle(addTrackButton.reduced(0.5f), orion::theme::metrics::controlRadius, 1.2f);
     auto plus = addTrackButton.reduced(8.0f);
     g.setColour(theme::text::primary.withAlpha(0.90f));
     g.drawLine(plus.getCentreX(), plus.getY(), plus.getCentreX(), plus.getBottom(), 2.0f);
@@ -701,9 +701,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     const auto chordBtn = getChordLaneToggleBounds().toFloat();
     const bool chordOn = project.isChordLaneVisible();
     g.setColour(chordOn ? theme::cool::cyan.withAlpha(0.85f) : theme::surface::primary.withAlpha(0.34f));
-    g.fillRoundedRectangle(chordBtn, 7.0f);
+    g.fillRoundedRectangle(chordBtn, orion::theme::metrics::controlRadius);
     g.setColour(chordOn ? theme::cool::cyan : juce::Colours::white.withAlpha(0.18f));
-    g.drawRoundedRectangle(chordBtn.reduced(0.5f), 7.0f, 1.2f);
+    g.drawRoundedRectangle(chordBtn.reduced(0.5f), orion::theme::metrics::controlRadius, 1.2f);
     g.setColour(chordOn ? juce::Colours::black.withAlpha(0.9f) : theme::text::primary.withAlpha(0.9f));
     g.setFont(juce::Font(13.0f, juce::Font::bold));
     g.drawText("Ch", chordBtn, juce::Justification::centred);
@@ -1178,7 +1178,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 juce::ColourGradient body(gradTop, clipBounds.getX(), clipBounds.getY(),
                                           gradBottom, clipBounds.getX(), clipBounds.getBottom(), false);
                 g.setGradientFill(body);
-                g.fillRoundedRectangle(clipBounds, 10.0f);
+                g.fillRoundedRectangle(clipBounds, orion::theme::metrics::controlRadius);
             }
 
             // Studio One-style header strip: a darker band at the top where the clip
@@ -1559,7 +1559,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             if (clip.muted)
             {
                 g.setColour(theme::states::mutedClipOverlay);
-                g.fillRoundedRectangle(clipBounds, 10.0f);
+            g.fillRoundedRectangle(clipBounds, orion::theme::metrics::controlRadius);
             }
 
             // Clip gain handle (Studio One-style): a dot at the top-centre of the clip,
@@ -2923,14 +2923,45 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
                 {
                     const auto& clip = clips[static_cast<std::size_t>(hit->clipIndex)];
                     const bool on = clip.followsChordLane;
+
+                    // Gain/normalize act on the selection when the clicked clip is part of it —
+                    // right-clicking an unselected clip shouldn't silently retarget the menu.
+                    const bool clickedIsSelected = std::any_of(selectedClips.begin(), selectedClips.end(),
+                        [&] (const SelectedClip& s) { return s.trackIndex == hit->trackIndex && s.clipIndex == hit->clipIndex; });
+                    const std::vector<SelectedClip> gainTargets = clickedIsSelected && selectedClips.size() > 1
+                        ? selectedClips
+                        : std::vector<SelectedClip>{ { hit->trackIndex, hit->clipIndex } };
+                    const bool multi = gainTargets.size() > 1;
+                    const auto suffix = multi ? " (" + juce::String(gainTargets.size()) + " clips)" : juce::String();
+
                     juce::PopupMenu menu;
                     menu.addItem(2, "Analyze chords");   // Logic-style: (re)detect this loop's progression
                     menu.addItem(3, "Separate stems (6)", orion::stems::isAvailable() && ! stemRunning, false);
                     menu.addItem(1, "Follow chord lane (re-harmonise)", true, on);
+                    menu.addSeparator();
+                    menu.addItem(7, "Match loudness to loudest" + suffix, multi, false);
+                    menu.addItem(4, "Normalize peaks" + suffix);
+                    menu.addItem(5, "Normalize peaks, keep balance" + suffix, multi, false);
+                    menu.addItem(6, "Reset gain" + suffix);
                     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this)
                                            .withTargetScreenArea({ event.getScreenX(), event.getScreenY(), 1, 1 }),
-                                       [this, ti = hit->trackIndex, ci = hit->clipIndex](int r)
+                                       [this, ti = hit->trackIndex, ci = hit->clipIndex, gainTargets](int r)
                                        {
+                                           if (r == 4 || r == 5)
+                                           {
+                                               if (onNormalizeClips) onNormalizeClips(gainTargets, r == 5);
+                                               return;
+                                           }
+                                           if (r == 6)
+                                           {
+                                               if (onSetClipsGainDb) onSetClipsGainDb(gainTargets, 0.0);
+                                               return;
+                                           }
+                                           if (r == 7)
+                                           {
+                                               if (onMatchClipLoudness) onMatchClipLoudness(gainTargets);
+                                               return;
+                                           }
                                            if (r != 1 && r != 2 && r != 3) return;
                                            auto& t = project.getTracks();
                                            if (ti >= static_cast<int>(t.size()) || ci >= static_cast<int>(t[static_cast<std::size_t>(ti)].clips.size()))

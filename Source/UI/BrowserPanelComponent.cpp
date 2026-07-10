@@ -11,24 +11,161 @@ namespace
 {
 namespace th = orion::theme;
 const auto mutedText          = th::text::muted;
-const auto rowBackground      = juce::Colours::white.withAlpha(0.035f);
-const auto rowHover           = juce::Colours::white.withAlpha(0.06f);
+const auto rowBackground      = juce::Colours::transparentBlack;
+const auto rowHover           = juce::Colours::white.withAlpha(0.055f);
 const auto rowSelected        = juce::Colours::white.withAlpha(0.09f);
 const auto buttonColour       = th::surface::primary;
 const auto buttonOutlineColour = th::line::normal.withAlpha(0.6f);
-constexpr int rowHeight = 46;
-constexpr int rowGap = 7;
+constexpr int rowHeight = 56;
+constexpr int rowGap = th::metrics::rowGap;
+// Browser entries are list rows, not floating cards. Their selection frame therefore uses
+// square corners; rounded geometry is reserved for controls and the preview surface.
+constexpr float rowCornerRadius = 0.0f;
 constexpr int dragThresholdPx = 5;
-constexpr int headerHeight = 130; // title + gap + subtitle + gap + search + gap + sections + gap
-constexpr int previewBarHeight = 64; // bottom preview card (waveform + play + name)
-constexpr int previewSyncRowHeight = 24; // SYNC toggle row, sits below the preview card
-constexpr int tagsRowHeight = 28; // "Tags:" chips row for the selected sample, above the preview
+constexpr int headerHeight = 144; // title + search + type filters
+constexpr int browserSectionGap = th::metrics::gridUnit * 2;
+constexpr int listTopPadding = th::metrics::gridUnit * 3;
+constexpr int previewBarHeight = 72; // bottom preview card (waveform + play + name)
+constexpr int previewSyncRowHeight = 28; // SYNC toggle row, sits below the preview card
+constexpr int tagsRowHeight = 34; // "Tags:" chips row for the selected sample, above the preview
 constexpr int contentPadX = 4; // uniform horizontal inset so left/right padding stays symmetric
 constexpr float horizontalSwipeThreshold = 0.14f;
 constexpr int horizontalSwipeLockMs = 320;
 const juce::String mountedDevicesHubName = "Mounted Devices";
 const auto bpmBadgeColour = th::surface::panel;
 const auto keyBadgeColour = th::surface::hover;
+
+juce::Font browserFont(float size, bool bold = false)
+{
+    auto font = bold
+        ? juce::Font(juce::FontOptions("Avenir Next", size, juce::Font::bold))
+        : juce::Font(juce::FontOptions("Avenir Next", "Medium", size));
+    // UI copy stays compact; tracking is reserved for branding, not every browser label.
+    font.setExtraKerningFactor(bold ? 0.004f : 0.0f);
+    return font;
+}
+
+class BrowserButtonLookAndFeel final : public juce::LookAndFeel_V4
+{
+public:
+    void drawButtonBackground(juce::Graphics& g, juce::Button& button,
+                              const juce::Colour&, bool isMouseOverButton,
+                              bool isButtonDown) override
+    {
+        auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
+        const auto active = button.getToggleState();
+        const auto radius = th::metrics::controlRadius;
+        auto fill = active ? th::accent::brandCyan.withAlpha(0.18f)
+                           : th::surface::elevated.withAlpha(isMouseOverButton ? 0.78f : 0.46f);
+        if (isButtonDown)
+            fill = active ? th::accent::brandCyan.withAlpha(0.28f)
+                          : th::surface::hover.withAlpha(0.92f);
+        g.setColour(fill);
+        g.fillRoundedRectangle(bounds, radius);
+
+        const auto outline = active ? th::accent::brandCyan.withAlpha(0.86f)
+                                    : th::line::normal.withAlpha(isMouseOverButton ? 0.92f : 0.72f);
+        g.setColour(outline);
+        g.drawRoundedRectangle(bounds, radius, active ? 1.2f : 1.0f);
+        if (active)
+        {
+            g.setColour(th::accent::brandCyan);
+            g.fillRoundedRectangle(bounds.withTrimmedTop(bounds.getHeight() - 2.0f), 1.0f);
+        }
+    }
+
+    void drawButtonText(juce::Graphics& g, juce::TextButton& button, bool, bool) override
+    {
+        g.setColour(button.getToggleState() ? th::text::primary : th::text::secondary);
+        g.setFont(browserFont(14.0f, true));
+        g.drawText(button.getButtonText(), button.getLocalBounds().reduced(8, 0),
+                   juce::Justification::centred, true);
+    }
+};
+
+BrowserButtonLookAndFeel browserButtonLookAndFeel;
+
+std::vector<float> readDragWaveform(const juce::File& file, int pointCount)
+{
+    std::vector<float> peaks;
+    if (! file.existsAsFile())
+        return peaks;
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+    if (reader == nullptr || reader->lengthInSamples <= 0)
+        return peaks;
+
+    peaks.resize(static_cast<std::size_t>(pointCount), 0.0f);
+    juce::AudioBuffer<float> buffer(1, 4096);
+    for (int i = 0; i < pointCount; ++i)
+    {
+        const auto start = static_cast<int64_t>(i) * reader->lengthInSamples / pointCount;
+        const auto count = static_cast<int>(juce::jmin<int64_t>(buffer.getNumSamples(),
+                                                                 reader->lengthInSamples - start));
+        if (count <= 0)
+            break;
+        buffer.clear();
+        reader->read(&buffer, 0, count, start, true, true);
+        peaks[static_cast<std::size_t>(i)] = juce::jlimit(0.0f, 1.0f,
+                                                          buffer.getMagnitude(0, 0, count));
+    }
+    return peaks;
+}
+
+juce::Image makeDragClip(const orion::BrowserItem& item, const std::vector<float>& peaks)
+{
+    constexpr int width = 286;
+    constexpr int height = 56;
+    juce::Image image(juce::Image::ARGB, width, height, true);
+    juce::Graphics graphics(image);
+    const auto card = image.getBounds().toFloat().reduced(1.0f);
+    const auto variant = th::tracks::variantsFor(item.colour);
+    juce::ColourGradient body(variant.gradientTop, card.getX(), card.getY(),
+                              variant.gradientBottom, card.getX(), card.getBottom(), false);
+    graphics.setGradientFill(body);
+    graphics.fillRoundedRectangle(card, th::metrics::controlRadius);
+
+    juce::Path headerPath;
+    headerPath.addRoundedRectangle(card.getX(), card.getY(), card.getWidth(), 18.0f,
+                                   th::metrics::controlRadius, th::metrics::controlRadius,
+                                   true, true, false, false);
+    graphics.setColour(variant.gradientBottom.darker(0.30f).withAlpha(0.92f));
+    graphics.fillPath(headerPath);
+
+    graphics.setColour(juce::Colours::white.withAlpha(0.92f));
+    graphics.setFont(browserFont(14.0f, juce::Font::bold));
+    graphics.drawText(item.name, juce::Rectangle<int>(10, 5, width - 20, 17),
+                      juce::Justification::centredLeft, true);
+
+    if (peaks.empty())
+        return image;
+
+    const auto waveArea = juce::Rectangle<float>(10.0f, 22.0f, width - 20.0f, 26.0f);
+    const auto centreY = waveArea.getCentreY();
+    const auto amplitude = waveArea.getHeight() * 0.48f;
+    juce::Path wave;
+    wave.startNewSubPath(waveArea.getX(), centreY);
+    for (int i = 0; i < static_cast<int>(peaks.size()); ++i)
+    {
+        const auto x = static_cast<float>(i) / static_cast<float>(juce::jmax(1, static_cast<int>(peaks.size()) - 1))
+                       * waveArea.getWidth() + waveArea.getX();
+        wave.lineTo(x, centreY - peaks[static_cast<std::size_t>(i)] * amplitude);
+    }
+    for (int i = static_cast<int>(peaks.size()) - 1; i >= 0; --i)
+    {
+        const auto x = static_cast<float>(i) / static_cast<float>(juce::jmax(1, static_cast<int>(peaks.size()) - 1))
+                       * waveArea.getWidth() + waveArea.getX();
+        wave.lineTo(x, centreY + peaks[static_cast<std::size_t>(i)] * amplitude);
+    }
+    wave.closeSubPath();
+    graphics.setColour(variant.waveform.withAlpha(0.92f));
+    graphics.fillPath(wave);
+    graphics.setColour(variant.waveform.withAlpha(0.86f));
+    graphics.drawRoundedRectangle(card.reduced(0.5f), th::metrics::controlRadius, 1.0f);
+    return image;
+}
 
 juce::File getMacBrowseRoot()
 {
@@ -129,9 +266,9 @@ void drawBadge(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::Strin
         return;
 
     g.setColour(colour.withAlpha(0.70f));
-    g.fillRoundedRectangle(bounds.toFloat(), 5.0f);
+    g.fillRoundedRectangle(bounds.toFloat(), th::metrics::smallRadius);
     g.setColour(th::text::secondary.withAlpha(0.80f));
-    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+    g.setFont(browserFont(13.0f, juce::Font::bold));
     g.drawText(text, bounds.reduced(6, 0), juce::Justification::centred, true);
 }
 
@@ -408,25 +545,29 @@ BrowserPanelComponent::BrowserPanelComponent()
     // focused button (the "Add Folder" button used to grab Enter and pop the folder chooser).
     setWantsKeyboardFocus(true);
 
-    chooseFolderButton.setWantsKeyboardFocus(false);   // never steal Enter
-    chooseFolderButton.setColour(juce::TextButton::buttonColourId, buttonColour);
-    chooseFolderButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff26313b));
-    chooseFolderButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    chooseFolderButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    chooseFolderButton.setWantsKeyboardFocus(false);   // legacy hidden control; folders are added from the left rail
+    chooseFolderButton.setColour(juce::TextButton::buttonColourId, th::surface::elevated);
+    chooseFolderButton.setColour(juce::TextButton::buttonOnColourId, th::surface::hover);
+    chooseFolderButton.setColour(juce::TextButton::textColourOffId, th::text::secondary);
+    chooseFolderButton.setColour(juce::TextButton::textColourOnId, th::text::primary);
     chooseFolderButton.setColour(juce::ComboBox::outlineColourId, buttonOutlineColour);
     chooseFolderButton.addListener(this);
     addAndMakeVisible(chooseFolderButton);
+    chooseFolderButton.setVisible(false);
 
     // (Close button removed — toggling the browser is the toolbar's BROWSER button.)
     closeButton.setVisible(false);
 
-    searchEditor.setTextToShowWhenEmpty("Search...", juce::Colours::white.withAlpha(0.58f));
-    searchEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff141c24));
-    searchEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    searchEditor.setTextToShowWhenEmpty("Search sounds, folders...", th::text::muted);
+    // The rounded field is painted by BrowserPanelComponent so the search control shares the
+    // same geometry as the browser pills instead of using the square native TextEditor surface.
+    searchEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
+    searchEditor.setColour(juce::TextEditor::textColourId, th::text::primary);
     searchEditor.setColour(juce::TextEditor::highlightColourId, juce::Colours::white.withAlpha(0.20f));
-    searchEditor.setColour(juce::TextEditor::outlineColourId, buttonOutlineColour);
-    searchEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a8cff));
-    searchEditor.setFont(juce::FontOptions(13.0f, juce::Font::plain));
+    searchEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    searchEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    searchEditor.setIndents(32, 0);
+    searchEditor.setFont(browserFont(16.0f));
     searchEditor.setReturnKeyStartsNewLine(false);
     searchEditor.onTextChange = [this]
     {
@@ -446,10 +587,11 @@ BrowserPanelComponent::BrowserPanelComponent()
     {
         button.setClickingTogglesState(false);
         button.setWantsKeyboardFocus(false);   // never steal Enter from the list
-        button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff151b21));
-        button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff26313b));
-        button.setColour(juce::TextButton::textColourOffId, mutedText);
-        button.setColour(juce::TextButton::textColourOnId, juce::Colours::white.withAlpha(0.94f));
+        button.setLookAndFeel(&browserButtonLookAndFeel);
+        button.setColour(juce::TextButton::buttonColourId, th::surface::elevated);
+        button.setColour(juce::TextButton::buttonOnColourId, th::surface::hover);
+        button.setColour(juce::TextButton::textColourOffId, th::text::secondary);
+        button.setColour(juce::TextButton::textColourOnId, th::text::primary);
         button.addListener(this);
         addAndMakeVisible(button);
     };
@@ -506,15 +648,46 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
 
-    auto titleArea = bounds.removeFromTop(32);
-    g.setColour(juce::Colours::white.withAlpha(0.92f));
-    g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    auto header = bounds.removeFromTop(headerHeight);
+    g.setColour(th::core::studio);
+    g.fillRect(header);
+    g.setColour(th::line::subtle);
+    g.fillRect(header.removeFromBottom(1));
+
+    auto titleArea = header.removeFromTop(40);
+    g.setColour(th::text::primary);
+    g.setFont(browserFont(22.0f, juce::Font::bold));
     g.drawText("Browser", titleArea, juce::Justification::centredLeft);
 
-    bounds.removeFromTop(4);  // gap between title and subtitle
-    g.setColour(mutedText);
-    g.setFont(juce::FontOptions(12.5f, juce::Font::plain));
-    g.drawText("Folders and audio files for drag to playlist", bounds.removeFromTop(18), juce::Justification::centredLeft);
+    // The current folder is intentionally omitted here. The list already communicates the
+    // location, while a path under the title made the browser header feel like a debug readout.
+
+    // Search field background and icon are painted here; the transparent TextEditor above it
+    // provides text editing while this keeps the field visually native to Orion.
+    const auto searchBounds = searchEditor.getBounds().toFloat();
+    g.setColour(th::surface::elevated.withAlpha(0.82f));
+    g.fillRoundedRectangle(searchBounds, th::metrics::controlRadius);
+    g.setColour(searchEditor.hasKeyboardFocus(true) ? th::accent::brandCyan.withAlpha(0.9f)
+                                                     : th::line::normal.withAlpha(0.82f));
+    g.drawRoundedRectangle(searchBounds.reduced(0.5f), th::metrics::controlRadius,
+                           searchEditor.hasKeyboardFocus(true) ? 1.25f : 1.0f);
+    const auto searchIcon = searchBounds.withX(searchBounds.getX() + 11.0f)
+                                       .withY(searchBounds.getCentreY() - 6.0f)
+                                       .withSize(12.0f, 12.0f);
+    g.setColour(th::text::tertiary);
+    g.drawEllipse(searchIcon.reduced(1.5f), 1.35f);
+    g.drawLine(searchIcon.getRight() - 2.0f, searchIcon.getBottom() - 2.0f,
+               searchIcon.getRight() + 2.0f, searchIcon.getBottom() + 2.0f, 1.35f);
+
+    const auto filterGroup = loopsSectionButton.getBounds().getUnion(oneShotsSectionButton.getBounds()).toFloat()
+                                     .expanded(4.0f, 3.0f);
+    g.setColour(th::core::voidBlack.withAlpha(0.34f));
+    g.fillRoundedRectangle(filterGroup, th::metrics::controlRadius + 1.0f);
+    g.setColour(th::line::subtle.withAlpha(0.68f));
+    g.drawRoundedRectangle(filterGroup.reduced(0.5f), th::metrics::controlRadius + 1.0f, 1.0f);
+
+    g.setColour(th::line::subtle.withAlpha(0.72f));
+    g.fillRect(header.getX(), header.getBottom() - 1, header.getWidth(), 1);
 
     const auto listViewport = getListViewportBounds();
     g.saveState();
@@ -543,24 +716,25 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 
         // Row card. Selected rows get a faint tint in the entry's own colour so the
         // selection reads as "this one" rather than a flat grey.
-        g.setColour(selected ? item.colour.withAlpha(0.18f) : (hovered ? rowHover : rowBackground));
-        g.fillRoundedRectangle(row.toFloat(), 10.0f);
+        g.setColour(selected ? item.colour.withAlpha(0.20f) : (hovered ? rowHover : rowBackground));
+        g.fillRoundedRectangle(row.toFloat(), rowCornerRadius);
         if (selected)
         {
-            g.setColour(item.colour.withAlpha(0.55f));
-            g.drawRoundedRectangle(row.toFloat().reduced(0.5f), 10.0f, 1.0f);
+            g.setColour(th::accent::infoBlue.withAlpha(0.92f));
+            g.drawRoundedRectangle(row.toFloat().reduced(0.5f), rowCornerRadius, 1.2f);
+            g.fillRoundedRectangle(row.removeFromLeft(3.0f).toFloat(), 1.5f);
         }
 
         // Icon box on the left: tinted rounded square + folder/waveform/up-arrow glyph.
         auto iconBox = row.removeFromLeft(rowHeight).toFloat().reduced(9.0f);
         g.setColour(item.colour.withAlpha(0.20f));
-        g.fillRoundedRectangle(iconBox, 7.0f);
+        g.fillRoundedRectangle(iconBox, th::metrics::controlRadius);
         g.setColour(item.colour.brighter(0.45f).withAlpha(0.95f));
         drawBrowserEntryIcon(g, iconBox.reduced(5.0f), item.isDirectory, item.isParentLink);
         row.removeFromLeft(10);
 
         g.setColour(juce::Colours::white.withAlpha(0.9f));
-        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.setFont(browserFont(17.0f, selected ? juce::Font::bold : juce::Font::plain));
         g.drawText(item.name, row.removeFromTop(19), juce::Justification::centredLeft, true);
 
         if (! item.isDirectory)
@@ -585,7 +759,7 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         }
 
         g.setColour(mutedText);
-        g.setFont(juce::FontOptions(12.0f, juce::Font::plain));
+        g.setFont(browserFont(15.0f));
         g.drawText(item.subtitle, row, juce::Justification::centredLeft, true);
     }
 
@@ -601,7 +775,7 @@ void BrowserPanelComponent::paintTagsRow(juce::Graphics& g)
     auto row = area.reduced(2, 4);
 
     g.setColour(th::text::secondary.withAlpha(0.72f));
-    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.setFont(browserFont(14.0f, juce::Font::bold));
     g.drawText("Tags", row.removeFromLeft(38), juce::Justification::centredLeft);
 
     const orion::BrowserItem* sel = nullptr;
@@ -616,7 +790,7 @@ void BrowserPanelComponent::paintTagsRow(juce::Graphics& g)
         return;   // nothing to show yet — just the label, no placeholder text
 
     // Chips for each tag of the selected sample.
-    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.setFont(browserFont(14.0f, juce::Font::bold));
     int x = row.getX();
     for (const auto& tag : sel->tags)
     {
@@ -625,9 +799,9 @@ void BrowserPanelComponent::paintTagsRow(juce::Graphics& g)
             break;
         juce::Rectangle<int> chip(x, row.getY(), chipW, row.getHeight());
         g.setColour(th::cool::turquoise.withAlpha(0.18f));
-        g.fillRoundedRectangle(chip.toFloat(), 5.0f);
+        g.fillRoundedRectangle(chip.toFloat(), th::metrics::controlRadius);
         g.setColour(th::cool::turquoise.withAlpha(0.35f));
-        g.drawRoundedRectangle(chip.toFloat().reduced(0.5f), 5.0f, 1.0f);
+        g.drawRoundedRectangle(chip.toFloat().reduced(0.5f), th::metrics::controlRadius, 1.0f);
         g.setColour(juce::Colours::white.withAlpha(0.88f));
         g.drawText(tag, chip, juce::Justification::centred);
         x += chipW + 5;
@@ -645,22 +819,19 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     }
 
     const auto bar = getPreviewBarBounds();
-    const auto accent = th::cool::turquoise;
+    // Preview gets a restrained slate-blue utility accent: distinct from selection cyan,
+    // but quiet enough to remain part of the browser surface.
+    const auto accent = th::accent::previewSlate;
 
-    // Clean Studio One card: a solid dark vertical-gradient body with a simple border.
-    // No glass, no sweep, no glow.
+    // Keep the preview as a quiet utility surface. The selected waveform and play state carry
+    // the emphasis; the container itself should not compete with the browser list.
     const auto cardF = bar.toFloat().reduced(2.0f);
-    const auto cardR = 10.0f;
+    const auto cardR = th::metrics::controlRadius;
     {
-        const auto tint = accent.withMultipliedSaturation(1.05f);
-        juce::ColourGradient body(tint.withMultipliedBrightness(0.34f),
-                                  cardF.getX(), cardF.getY(),
-                                  tint.withMultipliedBrightness(0.20f),
-                                  cardF.getX(), cardF.getBottom(), false);
-        g.setGradientFill(body);
+        g.setColour(th::surface::elevated);
         g.fillRoundedRectangle(cardF, cardR);
 
-        g.setColour(juce::Colours::white.withAlpha(0.12f));
+        g.setColour(th::line::normal.withAlpha(0.82f));
         g.drawRoundedRectangle(cardF.reduced(0.5f), cardR, 1.0f);
     }
 
@@ -668,11 +839,11 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     {
         const auto syncBtn = getPreviewSyncButtonBounds();
         g.setColour(previewBpmSync ? accent.withAlpha(0.85f) : juce::Colours::white.withAlpha(0.06f));
-        g.fillRoundedRectangle(syncBtn.toFloat(), 6.0f);
+        g.fillRoundedRectangle(syncBtn.toFloat(), th::metrics::controlRadius);
         g.setColour(previewBpmSync ? accent.withAlpha(0.9f) : juce::Colours::white.withAlpha(0.16f));
-        g.drawRoundedRectangle(syncBtn.toFloat().reduced(0.5f), 6.0f, 1.0f);
+        g.drawRoundedRectangle(syncBtn.toFloat().reduced(0.5f), th::metrics::controlRadius, 1.0f);
         g.setColour(previewBpmSync ? juce::Colour(0xff10141a) : juce::Colours::white.withAlpha(0.72f));
-        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.setFont(browserFont(14.0f, juce::Font::bold));
         g.drawText(previewBpmSync ? "SYNC TO PROJECT BPM  -  ON" : "SYNC TO PROJECT BPM  -  OFF",
                    syncBtn, juce::Justification::centred);
     }
@@ -681,7 +852,7 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     const auto btn = getPreviewPlayButtonBounds();
     if (previewArmed)
     {
-        // Quantized & waiting for the next beat: pulse the button so it reads as "queued".
+        // Quantized & waiting for the next bar: pulse the button so it reads as "queued".
         const auto phase = std::sin(static_cast<float>(juce::Time::getMillisecondCounter() % 600) / 600.0f * juce::MathConstants<float>::twoPi);
         const auto pulse = 0.45f + 0.45f * (0.5f + 0.5f * phase);
         g.setColour(accent.withAlpha(pulse));
@@ -690,7 +861,7 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     {
         g.setColour(accent.withAlpha(previewPeaks.empty() ? 0.25f : 0.9f));
     }
-    g.fillRoundedRectangle(btn.toFloat(), 10.0f);
+        g.fillRoundedRectangle(btn.toFloat(), th::metrics::controlRadius);
     g.setColour(th::core::voidBlack);
     const auto gi = btn.toFloat().reduced(btn.getWidth() * 0.3f, btn.getHeight() * 0.26f);
     if (previewPlaying)
@@ -714,7 +885,7 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     if (previewPeaks.empty())
     {
         g.setColour(juce::Colours::white.withAlpha(0.62f));
-        g.setFont(juce::FontOptions(12.0f));
+        g.setFont(browserFont(15.0f));
         g.drawText("Select a sample to preview", wave, juce::Justification::centred);
         return;
     }
@@ -723,7 +894,7 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
     auto waveBox = wave;
     auto nameRow = waveBox.removeFromTop(15);
     g.setColour(juce::Colours::white.withAlpha(0.80f));
-    g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+    g.setFont(browserFont(14.0f, juce::Font::bold));
     g.drawText(previewName, nameRow, juce::Justification::centredLeft, true);
 
     // Waveform: vertical mirrored bars.
@@ -736,16 +907,19 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
         const auto idx = juce::jlimit(0, n - 1, static_cast<int>(static_cast<float>(x) / waveBox.getWidth() * n));
         const auto h = juce::jmax(1.0f, previewPeaks[static_cast<std::size_t>(idx)] * halfH);
         const auto px = waveBox.getX() + x;
-        g.setColour(px <= playedX ? accent.interpolatedWith(juce::Colours::white, 0.6f).withAlpha(0.95f)
-                                  : juce::Colours::white.withAlpha(0.5f));
+        // Make playback progress readable at a glance: the completed waveform is vivid,
+        // while the upcoming portion recedes into the preview surface.
+        g.setColour(px <= playedX ? accent.brighter(0.42f).withAlpha(1.0f)
+                                  : th::text::muted.withAlpha(0.48f));
         g.fillRect(static_cast<float>(px), midY - h, 1.0f, h * 2.0f);
     }
 
     // Playhead line while playing.
     if (previewPlaying)
     {
-        g.setColour(juce::Colours::white.withAlpha(0.7f));
-        g.fillRect(playedX, static_cast<float>(waveBox.getY()), 1.0f, static_cast<float>(waveBox.getHeight()));
+        g.setColour(accent.brighter(0.55f).withAlpha(0.98f));
+        g.fillRect(playedX - 1.0f, static_cast<float>(waveBox.getY()), 2.0f,
+                   static_cast<float>(waveBox.getHeight()));
     }
 }
 
@@ -769,22 +943,20 @@ void BrowserPanelComponent::resized()
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
 
-    // Row 1: title row — Add Folder (right). Match paint()'s titleArea height exactly.
-    auto titleRow = bounds.removeFromTop(32);
+    // Row 1: title row. Folder roots are managed from the left navigation rail.
+    auto titleRow = bounds.removeFromTop(40);
     closeButton.setBounds({});
-    chooseFolderButton.setBounds(titleRow.removeFromRight(104).withSizeKeepingCentre(104, 26));
+    chooseFolderButton.setBounds({});
 
-    bounds.removeFromTop(4);   // gap between title and subtitle
-    bounds.removeFromTop(18);  // subtitle text
-    bounds.removeFromTop(6);   // gap before search
-    searchEditor.setBounds(bounds.removeFromTop(28).reduced(0, 2));
+    bounds.removeFromTop(browserSectionGap * 2); // clean air below the title
+    bounds.removeFromTop(browserSectionGap);  // gap before search
+    searchEditor.setBounds(bounds.removeFromTop(th::metrics::controlHeight));
 
-    bounds.removeFromTop(6);
-    auto sectionRow = bounds.removeFromTop(24);
-    // Equal-width filter pills — pick the wider label as the common size.
+    bounds.removeFromTop(browserSectionGap * 2); // clear separation between search and filters
+    auto sectionRow = bounds.removeFromTop(th::metrics::controlHeight);
     constexpr int pillW = 88;
     loopsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
-    sectionRow.removeFromLeft(6);
+    sectionRow.removeFromLeft(browserSectionGap);
     oneShotsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
 }
 
@@ -803,10 +975,25 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
     // Preview card play/stop button.
     if (getPreviewBarBounds().contains(event.getPosition()))
     {
+        if (getPreviewWaveformBounds().contains(event.getPosition()) && onSeekPreview && ! previewPeaks.empty())
+        {
+            const auto wave = getPreviewWaveformBounds();
+            const auto ratio = juce::jlimit(0.0f, 1.0f,
+                                            static_cast<float>(event.position.x - wave.getX())
+                                                / static_cast<float>(juce::jmax(1, wave.getWidth())));
+            onSeekPreview(ratio);
+            return;
+        }
+
         if (getPreviewPlayButtonBounds().contains(event.getPosition()) && onTogglePreviewPlayback)
             onTogglePreviewPlayback();
         return;
     }
+
+    // Tags are display-only for now. Consume clicks in this strip so they cannot fall through
+    // to the list row underneath and accidentally trigger a sample preview.
+    if (getTagsRowBounds().contains(event.getPosition()))
+        return;
 
     // Right-click (or ctrl-click) a row → context menu.
     if (event.mods.isPopupMenu())
@@ -972,19 +1159,20 @@ void BrowserPanelComponent::mouseDrag(const juce::MouseEvent& event)
     payloadObject->setProperty("lengthBeats", item.defaultClipLengthInBeats);
     payloadObject->setProperty("path", item.file.getFullPathName());
 
-    auto dragImage = juce::Image(juce::Image::ARGB, 188, 32, true);
-    juce::Graphics g(dragImage);
-    g.setColour(item.colour.withAlpha(0.95f));
-    g.fillRoundedRectangle(dragImage.getBounds().toFloat(), 8.0f);
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText(item.name, dragImage.getBounds().reduced(10, 0), juce::Justification::centredLeft, true);
+    auto dragPeaks = readDragWaveform(item.file, 220);
+    if (dragPeaks.empty() && previewName == item.name)
+        dragPeaks = previewPeaks;
+    auto dragImage = makeDragClip(item, dragPeaks);
 
     // Stop the browser preview the moment a drag begins — the sample shouldn't keep playing
     // while it's being dragged onto the playlist.
     if (onDragStarted)
         onDragStarted();
 
+    dragVisualContainer = dragContainer;
+    dragVisualItem = item;
+    dragVisualPeaks = std::move(dragPeaks);
+    startTimer(1200);
     dragContainer->startDragging(payload, this, juce::ScaledImage(dragImage), true, nullptr, &event.source);
     dragIndex.reset();
 }
@@ -1122,7 +1310,14 @@ bool BrowserPanelComponent::keyPressed(const juce::KeyPress& key)
     }
 
     if (key.getKeyCode() != juce::KeyPress::returnKey)
+    {
+        if (key.getKeyCode() == juce::KeyPress::spaceKey && onTogglePreviewPlayback)
+        {
+            onTogglePreviewPlayback();
+            return true;
+        }
         return false;
+    }
 
     if (! selectedIndex.has_value())
         return false;
@@ -1158,6 +1353,23 @@ void BrowserPanelComponent::timerCallback()
 {
     if (! isShowing())
         return;
+
+    if (dragVisualContainer != nullptr)
+    {
+        if (! dragVisualContainer->isDragAndDropActive() || ! dragVisualItem.has_value())
+        {
+            dragVisualContainer = nullptr;
+            dragVisualItem.reset();
+            dragVisualPeaks.clear();
+            startTimer(1200);
+        }
+        else
+        {
+            // The drag image is intentionally static: the complete clip follows the cursor
+            // through JUCE's drag container without a second animation layer.
+            startTimer(1200);
+        }
+    }
 
     if (similarDirty && ! similarRanked)   // rank once when the pool + query embedding are ready, then freeze
         rebuildSimilarItems();
@@ -1867,6 +2079,7 @@ juce::Rectangle<int> BrowserPanelComponent::getListViewportBounds() const noexce
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
     bounds.removeFromTop(headerHeight);
+    bounds.removeFromTop(listTopPadding);
     bounds.removeFromBottom(previewBarHeight + previewSyncRowHeight + 3 + tagsRowHeight);   // card + sync + border + tags
     return bounds;
 }

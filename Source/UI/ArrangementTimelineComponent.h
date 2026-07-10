@@ -71,6 +71,22 @@ public:
     // Fired when the chord lane changes, so the host can re-render re-harmonised audio clips.
     std::function<void()> onChordLaneChanged;
 
+    // Public so the host can be handed a set of clips to act on (clip gain / normalize).
+    struct SelectedClip
+    {
+        int trackIndex { -1 };
+        int clipIndex { -1 };
+    };
+
+    // Clip gain / normalize. The target set is resolved at right-click time: the whole selection
+    // when the clicked clip belongs to it, otherwise just the clicked clip.
+    std::function<void(const std::vector<SelectedClip>&, bool relativeToLoudest)> onNormalizeClips;
+    std::function<void(const std::vector<SelectedClip>&, double gainDb)> onSetClipsGainDb;
+    // Match every selected clip to the loudness (LUFS, not peak) of the loudest one.
+    std::function<void(const std::vector<SelectedClip>&)> onMatchClipLoudness;
+
+    const std::vector<SelectedClip>& getSelectedClips() const noexcept { return selectedClips; }
+
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -143,12 +159,6 @@ public:
     void clearLiveRecordingWaveform();
 
 private:
-    struct SelectedClip
-    {
-        int trackIndex { -1 };
-        int clipIndex { -1 };
-    };
-
     // Visible tool palette (top-left corner).
     enum class ToolMode
     {
