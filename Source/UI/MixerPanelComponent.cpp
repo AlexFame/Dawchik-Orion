@@ -829,11 +829,18 @@ void MixerPanelComponent::resized()
 
 void MixerPanelComponent::timerCallback()
 {
+    // Hidden mixers have no visible meters or controls to refresh. The next tick after
+    // opening will resync the complete state, so this avoids a permanent background redraw.
+    if (! isVisible())
+        return;
+
+    bool visualStateChanged = false;
     if (static_cast<int>(project.getTracks().size()) != builtTrackCount
         || static_cast<int>(project.getBuses().size()) != builtBusCount)
     {
         rebuildStrips();
         resized();
+        visualStateChanged = true;
     }
     else
     {
@@ -847,6 +854,13 @@ void MixerPanelComponent::timerCallback()
         const auto db = lin > 0.0f ? juce::Decibels::gainToDecibels(lin, static_cast<float>(minGainDb)) : static_cast<float>(minGainDb);
         return juce::jlimit(0.0f, 1.0f, juce::jmap(db, static_cast<float>(minGainDb), 0.0f, 0.0f, 1.0f));
     };
+    const auto changed = [](float previous, float next)
+    {
+        return std::abs(previous - next) > 0.0025f;
+    };
+    const auto previousMasterL = masterMeterDisplayL;
+    const auto previousMasterR = masterMeterDisplayR;
+    const auto previousMasterDb = masterLevelDb;
     if (onRequestMasterLevelStereo)
     {
         const auto s = onRequestMasterLevelStereo();
@@ -864,6 +878,9 @@ void MixerPanelComponent::timerCallback()
     for (auto& strip : strips)
     {
         if (strip == nullptr) continue;
+        const auto previousL = strip->meterDisplayL;
+        const auto previousR = strip->meterDisplayR;
+        const auto previousDb = strip->levelDbDisplay;
         if (strip->isBus)
         {
             if (onRequestBusLevelStereo)
@@ -888,9 +905,20 @@ void MixerPanelComponent::timerCallback()
             }
             strip->levelDbDisplay = onRequestTrackLevelDb ? onRequestTrackLevelDb(strip->trackIndex) : -100.0f;
         }
+
+        visualStateChanged = visualStateChanged
+            || changed(previousL, strip->meterDisplayL)
+            || changed(previousR, strip->meterDisplayR)
+            || changed(previousDb, strip->levelDbDisplay);
     }
 
-    repaint();
+    visualStateChanged = visualStateChanged
+        || changed(previousMasterL, masterMeterDisplayL)
+        || changed(previousMasterR, masterMeterDisplayR)
+        || changed(previousMasterDb, masterLevelDb);
+
+    if (visualStateChanged)
+        repaint();
 }
 
 void MixerPanelComponent::drawStereoMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float levelL, float levelR) const

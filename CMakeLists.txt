@@ -62,10 +62,13 @@ target_sources(
         Source/App/MainWindow.cpp
         Source/App/OrionApplication.cpp
         Source/Analysis/AudioTagger.cpp
+        Source/Analysis/SampleEmbedding.cpp
         Source/Analysis/AppleSoundClassifier.mm
         Source/Audio/AudioInputRecorder.cpp
+        Source/Audio/ChordDetector.cpp
         Source/Audio/ExportService.cpp
         Source/Audio/OrionStretchEngine.cpp
+        Source/Audio/StemSeparator.cpp
         Source/Audio/TransportController.cpp
         Source/Audio/TransportEngine.cpp
         Source/Audio/WarpEngine.cpp
@@ -77,6 +80,7 @@ target_sources(
         Source/UI/ArrangementTimelineComponent.cpp
         Source/UI/BottomStatusBarComponent.cpp
         Source/UI/BrowserPanelComponent.cpp
+        Source/UI/ChordSelectorComponent.cpp
         Source/UI/ClipEditorComponent.cpp
         Source/UI/MainComponent.cpp
         Source/UI/MidiEditorOverlayComponent.cpp
@@ -171,6 +175,49 @@ add_custom_command(
 )
 
 if(APPLE)
+    # Bundle the self-contained Chordino chord-detection helper into the app (BEFORE signing, so the
+    # --deep codesign pass below also signs the helper binary + its dylibs).
+    add_custom_command(
+        TARGET Orion
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_CURRENT_SOURCE_DIR}/Resources/chorddetect
+                $<TARGET_BUNDLE_DIR:Orion>/Contents/Resources/chorddetect
+        COMMENT "Bundling Chordino chord-detection helper into Orion.app"
+        VERBATIM
+    )
+
+    # Bundle the self-contained Demucs stem-separation helper + 6-source model (same pre-sign ordering).
+    add_custom_command(
+        TARGET Orion
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_CURRENT_SOURCE_DIR}/Resources/stemsplit
+                $<TARGET_BUNDLE_DIR:Orion>/Contents/Resources/stemsplit
+        COMMENT "Bundling Demucs stem-splitter helper into Orion.app"
+        VERBATIM
+    )
+
+    # Make the app SELF-CONTAINED so it runs on any Mac (no Homebrew needed): copy every non-system
+    # dylib the main binary pulls in (RubberBand + its libsamplerate, etc.) into Contents/Frameworks
+    # and rewrite the load paths to @executable_path/../Frameworks. Runs BEFORE the codesign pass so
+    # the bundled dylibs get signed too. Needs `dylibbundler` (brew install dylibbundler).
+    find_program(DYLIBBUNDLER_EXE dylibbundler)
+    if(DYLIBBUNDLER_EXE)
+        add_custom_command(
+            TARGET Orion
+            POST_BUILD
+            COMMAND ${DYLIBBUNDLER_EXE} -od -b -cd
+                    -x $<TARGET_BUNDLE_DIR:Orion>/Contents/MacOS/Orion
+                    -d $<TARGET_BUNDLE_DIR:Orion>/Contents/Frameworks
+                    -p @executable_path/../Frameworks
+            COMMENT "Bundling non-system dylibs (RubberBand, libsamplerate…) into Orion.app for portability"
+            VERBATIM
+        )
+    else()
+        message(WARNING "dylibbundler not found — Orion.app will depend on Homebrew dylibs and won't run on other Macs. Run: brew install dylibbundler")
+    endif()
+
     # Sign with a STABLE code-signing identity (not ad-hoc) so macOS privacy (TCC)
     # remembers folder-access grants across rebuilds instead of re-prompting every time.
     # Defaults to the local Apple Development cert; override with -DORION_CODESIGN_IDENTITY=...
@@ -223,6 +270,20 @@ target_link_libraries(
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+juce_add_console_app(OrionChordTest PRODUCT_NAME "Orion Chord Test")
+target_sources(OrionChordTest PRIVATE Source/Tools/ChordTest.cpp Source/Audio/ChordDetector.cpp)
+target_compile_definitions(OrionChordTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(OrionChordTest
+    PRIVATE juce::juce_audio_basics juce::juce_audio_formats juce::juce_core juce::juce_graphics
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+juce_add_console_app(OrionSimTest PRODUCT_NAME "Orion Similarity Test")
+target_sources(OrionSimTest PRIVATE Source/Tools/SimTest.cpp Source/Analysis/SampleEmbedding.cpp)
+target_compile_definitions(OrionSimTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(OrionSimTest
+    PRIVATE juce::juce_audio_basics juce::juce_audio_formats juce::juce_core juce::juce_dsp juce::juce_events
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
 juce_add_console_app(OrionKeyTest PRODUCT_NAME "Orion Key Test")
 

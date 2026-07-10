@@ -1081,51 +1081,33 @@ MainComponent::MainComponent()
         juce::PopupMenu menu;
         const auto withMetro = projectState.isRecordWithMetronome();
         const auto withPrecount = projectState.isRecordWithCountIn();
-        menu.addItem(1, "Record with metronome", true, withMetro && ! withPrecount);
-        menu.addItem(2, "Record without metronome", true, ! withMetro && ! withPrecount);
-        menu.addItem(3, "4-count before recording", true, withPrecount);
+        // INDEPENDENT toggles — previously "4-count" forcibly turned the metronome OFF, so you could
+        // never have a count-in AND the click running through the whole take.
+        menu.addItem(1, "Metronome (whole take)", true, withMetro);
+        menu.addItem(2, "4-count before recording", true, withPrecount);
         menu.showMenuAsync(juce::PopupMenu::Options{}
                                 .withTargetComponent(&transportBar)
                                 .withTargetScreenArea(transportBar.localAreaToGlobal(transportBar.getRecordOptionsBounds())),
-            [this](int result)
+            [this, withMetro, withPrecount](int result)
             {
                 if (result == 1)
                 {
-                    projectState.setRecordWithMetronome(true);
-                    projectState.setRecordWithCountIn(false);
-                    metronomeButton.setToggleState(true, juce::dontSendNotification);
-                    countInButton.setToggleState(false, juce::dontSendNotification);
+                    projectState.setRecordWithMetronome(! withMetro);
+                    metronomeButton.setToggleState(! withMetro, juce::dontSendNotification);
                 }
                 else if (result == 2)
                 {
-                    projectState.setRecordWithMetronome(false);
-                    projectState.setRecordWithCountIn(false);
-                    metronomeButton.setToggleState(false, juce::dontSendNotification);
-                    countInButton.setToggleState(false, juce::dontSendNotification);
-                }
-                else if (result == 3)
-                {
-                    projectState.setRecordWithMetronome(false);
-                    projectState.setRecordWithCountIn(true);
-                    metronomeButton.setToggleState(false, juce::dontSendNotification);
-                    countInButton.setToggleState(true, juce::dontSendNotification);
+                    projectState.setRecordWithCountIn(! withPrecount);
+                    countInButton.setToggleState(! withPrecount, juce::dontSendNotification);
                 }
                 updateTransportLabels();
             });
     };
     transportBar.onMetronomeChanged = [this](bool enabled)
     {
+        // Metronome and count-in are independent: turning the click on must not cancel the count-in.
         metronomeButton.setToggleState(enabled, juce::dontSendNotification);
-        if (enabled)
-        {
-            projectState.setRecordWithMetronome(true);
-            projectState.setRecordWithCountIn(false);
-            countInButton.setToggleState(false, juce::dontSendNotification);
-        }
-        else
-        {
-            projectState.setRecordWithMetronome(false);
-        }
+        projectState.setRecordWithMetronome(enabled);
         updateTransportLabels();
     };
     transportBar.onLoopChanged = [this](bool enabled)
@@ -1210,6 +1192,31 @@ MainComponent::MainComponent()
     addAndMakeVisible(sidebarNav);
     loadSidebarBrowserFolders();
     addAndMakeVisible(browserPanel);
+
+    // Draggable browser/timeline splitter (sits above both so the gesture is reachable).
+    browserResizeBar.setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+    browserResizeBar.setRepaintsOnMouseActivity(true);
+    browserResizeBar.onDown = [this](const juce::MouseEvent& e)
+    {
+        isResizingBrowserPanel = true;
+        browserResizeStartWidth = browserPanelWidth;
+        browserResizeStartX = e.getEventRelativeTo(this).getPosition().x;
+    };
+    browserResizeBar.onDrag = [this](const juce::MouseEvent& e)
+    {
+        if (! isResizingBrowserPanel)
+            return;
+        const auto x = e.getEventRelativeTo(this).getPosition().x;
+        browserPanelWidth = juce::jlimit(minBrowserPanelWidth, maxBrowserPanelWidth,
+                                         browserResizeStartWidth + (x - browserResizeStartX));
+        resized();
+        repaint();
+    };
+    browserResizeBar.onUp = [this](const juce::MouseEvent&)
+    {
+        isResizingBrowserPanel = false;
+    };
+    addAndMakeVisible(browserResizeBar);
     addAndMakeVisible(midiEditorOverlay);
     addChildComponent(clipEditorPanel);
     addAndMakeVisible(samplerPanel);
@@ -1463,6 +1470,15 @@ MainComponent::MainComponent()
         refreshClipEditor();
         if (clipEditorPreviewTransportSource.isPlaying())
             startClipEditorPreview();
+        // Stage 2: rebuild the arrangement's piecewise warp cache off the message thread so the marker
+        // change is heard in the arrangement too (not just the clip-editor preview). Coalesced.
+        if (arrangementPlaybackSource != nullptr && ! warpRebuildRunning.exchange(true))
+            juce::Thread::launch([this]
+            {
+                if (arrangementPlaybackSource != nullptr)
+                    arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+                warpRebuildRunning = false;
+            });
     };
     clipEditorPanel.onWarpMarkerAdded = [this, applyWarpMarkerChange](double sourceRatio, double beat)
     {
@@ -1657,6 +1673,7 @@ MainComponent::MainComponent()
         {
             sidebarBrowserFolders.push_back(folder);
             sidebarNav.setCustomFolders(sidebarBrowserFolders);
+            browserPanel.setLibraryRoots(sidebarBrowserFolders);
             saveSidebarBrowserFolders();
         }
 
@@ -2010,6 +2027,33 @@ MainComponent::MainComponent()
         if (selectedArrangementClip.has_value())
             liveMidiNoteOff(selectedArrangementClip->first, midiNote);
     };
+    arrangementTimeline.onChordAudition = [this](const std::vector<int>& pitches) { auditionArrangementChord(pitches); };
+
+    arrangementTimeline.onChordLaneChanged = [this]()
+    {
+        if (arrangementPlaybackSource == nullptr)
+            return;
+        // Invalidate cached re-harmonised renders and rebuild them OFF the message thread so
+        // editing/moving chords never stalls the UI. Coalesce rapid edits with a running flag.
+        arrangementPlaybackSource->bumpChordGeneration();
+        if (reharmRebuildRunning.exchange(true))
+            return;
+        juce::Thread::launch([this]
+        {
+            // Keep rebuilding until the cache catches up with the latest chord edit.
+            int built = -1;
+            while (arrangementPlaybackSource != nullptr)
+            {
+                const int gen = arrangementPlaybackSource->chordGenerationValue();
+                if (gen == built) break;
+                built = gen;
+                arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
+                juce::MessageManager::callAsync([this] { arrangementTimeline.repaint(); });
+            }
+            reharmRebuildRunning = false;
+        });
+    };
+
     midiEditorOverlay.onPreviewChordRetrigger = [this]()
     {
         if (arrangementPlaybackSource != nullptr)
@@ -2072,6 +2116,13 @@ MainComponent::MainComponent()
         projectState.setChordModeEnabled(enabled);
         syncChordModeToSurfaces();
     };
+    midiEditorOverlay.onChordSizeChanged = [this](int size)
+    {
+        projectState.setChordSizeNotes(size);
+        syncChordModeToSurfaces();
+    };
+    // Share the audio-edit lock so the piano roll's note/slide edits can't race the audio render thread.
+    midiEditorOverlay.setAudioEditLock(&projectState.getAudioEditLock());
     arrangementTimeline.onClipWarpEdited = [this]()
     {
         if (arrangementPlaybackSource == nullptr)
@@ -2666,10 +2717,17 @@ void MainComponent::resized()
         auto browserInner = browserPanelBounds.withTrimmedTop(16).withTrimmedBottom(16);
         browserPanel.setBounds(browserInner);
         browserPanel.setVisible(true);
+        // The draggable splitter sits ON TOP of both panels, right on the actual browser/timeline seam.
+        const int seamX = browserPanelBounds.getRight();
+        browserResizeBar.setBounds(seamX - browserResizeHandleWidth / 2, browserPanelBounds.getY(),
+                                   browserResizeHandleWidth, browserPanelBounds.getHeight());
+        browserResizeBar.setVisible(browserPanelVisible);
+        browserResizeBar.toFront(false);
     }
     else
     {
         browserPanel.setVisible(false);
+        browserResizeBar.setVisible(false);
     }
 
     tempoLabel.setBounds({});
@@ -2734,34 +2792,23 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
         juce::PopupMenu menu;
         const auto withMetro = projectState.isRecordWithMetronome();
         const auto withPrecount = projectState.isRecordWithCountIn();
-        menu.addItem(1, "Record with metronome", true, withMetro && ! withPrecount);
-        menu.addItem(2, "Record without metronome", true, ! withMetro && ! withPrecount);
-        menu.addItem(3, "4-count before recording", true, withPrecount);
+        // Independent toggles (same as the transport-bar record options).
+        menu.addItem(1, "Metronome (whole take)", true, withMetro);
+        menu.addItem(2, "4-count before recording", true, withPrecount);
         menu.showMenuAsync(juce::PopupMenu::Options{}
                                 .withTargetComponent(&recordButton)
                                 .withTargetScreenArea(recordButton.localAreaToGlobal(recordButton.getLocalBounds())),
-            [this](int result)
+            [this, withMetro, withPrecount](int result)
             {
                 if (result == 1)
                 {
-                    projectState.setRecordWithMetronome(true);
-                    projectState.setRecordWithCountIn(false);
-                    metronomeButton.setToggleState(true, juce::dontSendNotification);
-                    countInButton.setToggleState(false, juce::dontSendNotification);
+                    projectState.setRecordWithMetronome(! withMetro);
+                    metronomeButton.setToggleState(! withMetro, juce::dontSendNotification);
                 }
                 else if (result == 2)
                 {
-                    projectState.setRecordWithMetronome(false);
-                    projectState.setRecordWithCountIn(false);
-                    metronomeButton.setToggleState(false, juce::dontSendNotification);
-                    countInButton.setToggleState(false, juce::dontSendNotification);
-                }
-                else if (result == 3)
-                {
-                    projectState.setRecordWithMetronome(false);
-                    projectState.setRecordWithCountIn(true);
-                    metronomeButton.setToggleState(false, juce::dontSendNotification);
-                    countInButton.setToggleState(true, juce::dontSendNotification);
+                    projectState.setRecordWithCountIn(! withPrecount);
+                    countInButton.setToggleState(! withPrecount, juce::dontSendNotification);
                 }
                 updateTransportLabels();
             });
@@ -2870,7 +2917,8 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     }
 
     if (key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0))
-        return arrangementTimeline.duplicateSelectedClip();
+        return arrangementTimeline.duplicateSelectedChords()   // chords first, then clips
+            || arrangementTimeline.duplicateSelectedClip();
 
     if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier, 0))
         return arrangementTimeline.selectAllClips();
@@ -3189,7 +3237,11 @@ void MainComponent::timerCallback()
     if (arrangementPlaybackSource != nullptr && arrangementPlaybackSource->isRealtimeWarpEnabled()
         && ! transportEngine.isPlaying() && ! transportEngine.isCountInActive())
         arrangementPlaybackSource->prepareWarpStreams();
-    if (clipEditorPanel.isVisible())
+    // State changes call refreshClipEditor() directly from their handlers. On the timer, only
+    // refresh while a playhead can move; rebuilding the editor state while stopped did work
+    // with no visible result.
+    if (clipEditorPanel.isVisible()
+        && (transportEngine.isPlaying() || clipEditorPreviewTransportSource.isPlaying()))
         refreshClipEditor();
 
     // While recording, drive the live UI feedback:
@@ -3337,26 +3389,11 @@ void MainComponent::buttonClicked(juce::Button* button)
         toggleLoopFromUi();
     else if (button == &metronomeButton || button == &countInButton)
     {
+        // Independent: the click can run through the whole take AND you can still have a count-in.
         if (button == &metronomeButton)
-        {
-            const auto enabled = metronomeButton.getToggleState();
-            projectState.setRecordWithMetronome(enabled);
-            if (enabled)
-            {
-                projectState.setRecordWithCountIn(false);
-                countInButton.setToggleState(false, juce::dontSendNotification);
-            }
-        }
+            projectState.setRecordWithMetronome(metronomeButton.getToggleState());
         else
-        {
-            const auto enabled = countInButton.getToggleState();
-            projectState.setRecordWithCountIn(enabled);
-            if (enabled)
-            {
-                projectState.setRecordWithMetronome(false);
-                metronomeButton.setToggleState(false, juce::dontSendNotification);
-            }
-        }
+            projectState.setRecordWithCountIn(countInButton.getToggleState());
         updateTransportLabels();
     }
     else if (button == &browserButton || button == &browserCollapseArrow)
@@ -3419,6 +3456,14 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
         const auto note     = message.getNoteNumber();
         const auto velocity = juce::jlimit(1, 127, static_cast<int>(message.getVelocity()));
 
+        // Sampler open → route through it so hardware MIDI maps slices + highlights the key,
+        // exactly like the on-screen/typing keyboard (its onNoteOn callback plays + records).
+        if (samplerPanel.isVisible())
+        {
+            samplerPanel.externalMidiNoteOn(note, velocity);
+            return;
+        }
+
         // Step-write into the MIDI editor when it's armed for it. It returns true
         // only when it consumed the note, in which case it has already previewed
         // the (possibly scale-snapped) pitch — so don't also play it directly.
@@ -3444,6 +3489,12 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
     if (message.isNoteOff())
     {
         const auto note = message.getNoteNumber();
+
+        if (samplerPanel.isVisible())
+        {
+            samplerPanel.externalMidiNoteOff(note);
+            return;
+        }
 
         const bool consumedByEditor = midiEditorOverlay.isVisible()
                                       && midiEditorOverlay.stepWriteMidiNoteOff(note);
@@ -3634,6 +3685,31 @@ void MainComponent::liveMidiNoteOff(int trackIndex, int midiNote)
                                                   samplerTrackGatesByNoteLength(trackIndex));
 }
 
+void MainComponent::auditionArrangementChord(const std::vector<int>& pitches)
+{
+    stopArrangementChordAudition();
+    if (pitches.empty() || arrangementPlaybackSource == nullptr)
+        return;
+
+    // Play through the built-in chord preview synth so it's always audible, regardless of tracks.
+    for (int p : pitches)
+    {
+        const int note = juce::jlimit(0, 127, p);
+        arrangementPlaybackSource->chordPreviewNoteOn(note, 0.85f);
+        activeChordAuditionNotes.emplace_back(-1, note);
+    }
+    const int gen = ++chordAuditionGeneration;
+    juce::Timer::callAfterDelay(750, [this, gen] { if (gen == chordAuditionGeneration) stopArrangementChordAudition(); });
+}
+
+void MainComponent::stopArrangementChordAudition()
+{
+    if (arrangementPlaybackSource != nullptr)
+        for (auto& [t, p] : activeChordAuditionNotes)
+            arrangementPlaybackSource->chordPreviewNoteOff(p);
+    activeChordAuditionNotes.clear();
+}
+
 void MainComponent::refreshMidiInputDevices()
 {
     const auto devices = juce::MidiInput::getAvailableDevices();
@@ -3650,61 +3726,66 @@ void MainComponent::refreshMidiInputDevices()
         }
     }
 
-    // Attach our note callback to every enabled device, and drop it from any that
-    // became disabled or were unplugged.
+    // Open each enabled device DIRECTLY (AudioDeviceManager registered the callback but never
+    // delivered messages on this macOS). juce::MidiInput::openDevice + start() is the reliable path.
     for (const auto& d : devices)
     {
-        const bool enabled  = audioDeviceManager.isMidiInputDeviceEnabled(d.identifier);
-        const bool attached = activeMidiInputDeviceIds.contains(d.identifier);
+        const bool enabled = audioDeviceManager.isMidiInputDeviceEnabled(d.identifier);
+        const bool opened  = directMidiInputs.count(d.identifier) > 0;
 
-        if (enabled && ! attached)
+        if (enabled && ! opened)
         {
-            audioDeviceManager.addMidiInputDeviceCallback(d.identifier, this);
-            activeMidiInputDeviceIds.add(d.identifier);
+            if (auto input = juce::MidiInput::openDevice(d.identifier, this))
+            {
+                input->start();
+                directMidiInputs[d.identifier] = std::move(input);
+            }
         }
-        else if (! enabled && attached)
+        else if (! enabled && opened)
         {
-            audioDeviceManager.removeMidiInputDeviceCallback(d.identifier, this);
-            activeMidiInputDeviceIds.removeString(d.identifier);
+            directMidiInputs.erase(d.identifier);   // unique_ptr dtor stops + closes
         }
     }
 
-    // Detach from devices that have disappeared entirely (unplugged).
-    for (int i = activeMidiInputDeviceIds.size(); --i >= 0;)
+    // Close devices that were unplugged.
+    for (auto it = directMidiInputs.begin(); it != directMidiInputs.end();)
     {
-        const auto& id = activeMidiInputDeviceIds[i];
         const bool stillPresent = std::any_of(devices.begin(), devices.end(),
-                                              [&](const auto& d) { return d.identifier == id; });
-        if (! stillPresent)
-        {
-            audioDeviceManager.removeMidiInputDeviceCallback(id, this);
-            activeMidiInputDeviceIds.remove(i);
-        }
+                                              [&](const auto& d) { return d.identifier == it->first; });
+        it = stillPresent ? std::next(it) : directMidiInputs.erase(it);
     }
 }
 
 void MainComponent::updateTransportLabels()
 {
+    const auto setLabelTextIfChanged = [](juce::Label& label, const juce::String& text)
+    {
+        if (label.getText() != text)
+            label.setText(text, juce::dontSendNotification);
+    };
+
     if (! bpmEditor.isVisible())
     {
-        bpmValueLabel.setText(juce::String(projectState.getTempoBpm(), 2), juce::dontSendNotification);
+        setLabelTextIfChanged(bpmValueLabel, juce::String(projectState.getTempoBpm(), 2));
         bpmValueLabel.setVisible(false);
-        repaint();
+        // NB: do NOT repaint() the whole window here — this runs every 60 Hz tick and was redrawing the
+        // ENTIRE UI (arrangement + all its text) continuously → ~40% CPU on the software renderer for
+        // nothing. Labels repaint themselves on setText; the transport bar updates via setState below.
     }
 
     if (transportEngine.isCountInActive())
-        meterValueLabel.setText("COUNT", juce::dontSendNotification);
+        setLabelTextIfChanged(meterValueLabel, "COUNT");
     else
-        meterValueLabel.setText(juce::String(projectState.getNumerator()) + "/" + juce::String(projectState.getDenominator()), juce::dontSendNotification);
+        setLabelTextIfChanged(meterValueLabel, juce::String(projectState.getNumerator()) + "/" + juce::String(projectState.getDenominator()));
 
     if (transportEngine.isCountInActive())
-        meterCaptionLabel.setText("COUNT-IN", juce::dontSendNotification);
+        setLabelTextIfChanged(meterCaptionLabel, "COUNT-IN");
     else if (transportEngine.isPlaying())
-        meterCaptionLabel.setText("RUNNING", juce::dontSendNotification);
+        setLabelTextIfChanged(meterCaptionLabel, "RUNNING");
     else if (transportEngine.isPaused())
-        meterCaptionLabel.setText("PAUSED", juce::dontSendNotification);
+        setLabelTextIfChanged(meterCaptionLabel, "PAUSED");
     else
-        meterCaptionLabel.setText("STOPPED", juce::dontSendNotification);
+        setLabelTextIfChanged(meterCaptionLabel, "STOPPED");
 
     const auto clipPreviewPlaying = clipEditorPreviewTransportSource.isPlaying();
     playButton.setToggleState(transportEngine.isPlaying() || transportEngine.isCountInActive() || clipPreviewPlaying,
@@ -3715,9 +3796,9 @@ void MainComponent::updateTransportLabels()
     countInButton.setToggleState(projectState.isRecordWithCountIn(), juce::dontSendNotification);
     undoButton.setEnabled(arrangementTimeline.canUndo());
     redoButton.setEnabled(arrangementTimeline.canRedo());
-    tempoLabel.setText("Tempo: " + juce::String(projectState.getTempoBpm(), 0) + " BPM", juce::dontSendNotification);
-    meterLabel.setText("Meter: " + juce::String(projectState.getNumerator()) + "/" + juce::String(projectState.getDenominator()), juce::dontSendNotification);
-    playheadLabel.setText("Playhead: beat " + juce::String(transportEngine.getPlayheadBeat(), 2), juce::dontSendNotification);
+    setLabelTextIfChanged(tempoLabel, "Tempo: " + juce::String(projectState.getTempoBpm(), 0) + " BPM");
+    setLabelTextIfChanged(meterLabel, "Meter: " + juce::String(projectState.getNumerator()) + "/" + juce::String(projectState.getDenominator()));
+    setLabelTextIfChanged(playheadLabel, "Playhead: beat " + juce::String(transportEngine.getPlayheadBeat(), 2));
 
     TransportBarState transportState;
     transportState.tempoBpm = projectState.getTempoBpm();
@@ -3750,7 +3831,25 @@ void MainComponent::updateTransportLabels()
     transportState.stepSequencerOpen = stepSequencer.isVisible();
     transportBar.setState(transportState);
 
-    menuItemsChanged();
+    // menuItemsChanged() triggers an async menu-bar rebuild; calling it every 60 Hz tick churned the
+    // menu model needlessly. Only rebuild when a menu-relevant state actually changed.
+    const unsigned menuHash =
+          (arrangementTimeline.canUndo()            ? 1u   : 0u)
+        | (arrangementTimeline.canRedo()            ? 2u   : 0u)
+        | (transportEngine.isPlaying()              ? 4u   : 0u)
+        | (transportEngine.isCountInActive()        ? 8u   : 0u)
+        | (transportEngine.isRecordArmed()          ? 16u  : 0u)
+        | (transportEngine.isLoopEnabled()          ? 32u  : 0u)
+        | (projectState.isRecordWithMetronome()     ? 64u  : 0u)
+        | (projectState.isRecordWithCountIn()       ? 128u : 0u)
+        | (mixerPanel.isVisible()                   ? 256u : 0u)
+        | (clipEditorPanel.isVisible()              ? 512u : 0u)
+        | (stepSequencer.isVisible()                ? 1024u: 0u);
+    if (menuHash != lastMenuStateHash)
+    {
+        lastMenuStateHash = menuHash;
+        menuItemsChanged();
+    }
 }
 
 void MainComponent::playBrowserPreview(const BrowserItem& item)
@@ -5320,6 +5419,7 @@ void MainComponent::recordNoteOff(int pitch)
         if (recordingSession->clipIndex < static_cast<int>(clips.size()))
         {
             auto& clip = clips[static_cast<std::size_t>(recordingSession->clipIndex)];
+            const juce::ScopedLock sl(projectState.getAudioEditLock());
             clip.midiNotes.push_back(MidiNote { pitch, it->second.startBeatInClip, lengthBeats, it->second.velocity });
             if (endBeatInClip + 0.5 > clip.lengthInBeats)
                 clip.lengthInBeats = std::ceil(endBeatInClip + 0.25); // expand to next quarter
@@ -5344,6 +5444,7 @@ void MainComponent::finalizeRecordingClip()
         if (recordingSession->clipIndex < static_cast<int>(clips.size()))
         {
             auto& clip = clips[static_cast<std::size_t>(recordingSession->clipIndex)];
+            const juce::ScopedLock sl(projectState.getAudioEditLock());
             for (const auto& [pitch, pending] : recordingSession->pendingNotes)
             {
                 const auto endBeatInClip = juce::jmax(pending.startBeatInClip + 0.05,
@@ -5841,6 +5942,7 @@ void MainComponent::loadSidebarBrowserFolders()
     }
 
     sidebarNav.setCustomFolders(sidebarBrowserFolders);
+    browserPanel.setLibraryRoots(sidebarBrowserFolders);   // similarity search spans all added folders
 }
 
 void MainComponent::saveSidebarBrowserFolders() const
@@ -6404,10 +6506,7 @@ void MainComponent::refreshClipEditor()
             rebuildClipEditorWaveform(clip->sourcePath);
             const auto key = clip->sourcePath.toStdString();
             if (const auto it = clipEditorWaveformCache.find(key); it != clipEditorWaveformCache.end())
-            {
-                editorState.waveformMin = it->second.first;
-                editorState.waveformMax = it->second.second;
-            }
+                editorState.waveform = it->second;
         }
 
         if (selectedArrangementClip.has_value())
@@ -6473,8 +6572,9 @@ void MainComponent::rebuildClipEditorWaveform(const juce::String& sourcePath)
     const auto bucketCount = static_cast<int>((totalSamples + samplesPerBucket - 1) / samplesPerBucket);
     const auto channelCount = static_cast<int>(reader->numChannels);
 
-    std::vector<float> minVals(static_cast<std::size_t>(bucketCount), 0.0f);
-    std::vector<float> maxVals(static_cast<std::size_t>(bucketCount), 0.0f);
+    auto waveform = std::make_shared<ClipEditorWaveform>();
+    waveform->minValues.assign(static_cast<std::size_t>(bucketCount), 0.0f);
+    waveform->maxValues.assign(static_cast<std::size_t>(bucketCount), 0.0f);
 
     constexpr int chunkSize = 8192;
     juce::AudioBuffer<float> chunk(channelCount, chunkSize);
@@ -6497,15 +6597,15 @@ void MainComponent::rebuildClipEditorWaveform(const juce::String& sourcePath)
                 value += chunk.getSample(channel, sample);
             value /= static_cast<float>(channelCount);
 
-            auto& minValue = minVals[static_cast<std::size_t>(bucket)];
-            auto& maxValue = maxVals[static_cast<std::size_t>(bucket)];
+            auto& minValue = waveform->minValues[static_cast<std::size_t>(bucket)];
+            auto& maxValue = waveform->maxValues[static_cast<std::size_t>(bucket)];
             minValue = juce::jmin(minValue, value);
             maxValue = juce::jmax(maxValue, value);
         }
         processed += toRead;
     }
 
-    clipEditorWaveformCache.emplace(key, std::make_pair(std::move(minVals), std::move(maxVals)));
+    clipEditorWaveformCache.emplace(key, std::move(waveform));
 }
 
 void MainComponent::normalizeSelectedAudioClip()

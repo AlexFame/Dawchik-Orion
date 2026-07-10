@@ -69,6 +69,16 @@ juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce
                                                                       const juce::String& sourcePath = {},
                                                                       double pitchScale = 1.0);
 
+// Piecewise (variable-ratio) warp render for Ableton-style warp markers: the stretch ratio varies
+// along the sample so each control point's source position lands on its target beat. `warpPointsOutIn`
+// are (outputRatio, inputRatio) pairs spanning (0,0)..(1,1); empty falls back to a linear stretch.
+// Offline (message/build thread) — used to fill the arrangement warp cache for marker'd clips.
+juce::AudioBuffer<float> stretchBufferPiecewiseWarp(const juce::AudioBuffer<float>& source,
+                                                    int outputSamples,
+                                                    double sampleRate,
+                                                    const std::vector<std::pair<double, double>>& warpPointsOutIn,
+                                                    double pitchScale = 1.0);
+
 // Fast signalsmith-only stretch (real-time grade) for INSTANT previews. Optionally
 // pitch-shifts by `pitchScale`. Dramatically faster than the RubberBand backend, so
 // playback can start immediately; a high-quality render can swap in afterwards.

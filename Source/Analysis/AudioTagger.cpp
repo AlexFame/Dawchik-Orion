@@ -5,6 +5,8 @@
 #include <juce_events/juce_events.h>
 
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace orion
 {
@@ -13,6 +15,7 @@ namespace
 constexpr double kMaxAnalysisSeconds = 4.0;    // only the head of the file is analysed
 constexpr int    kFftOrder = 11;               // 2048-point FFT
 constexpr int    kFftSize = 1 << kFftOrder;
+constexpr int    kMaxIndexedTagFilesPerRun = 4000;
 
 struct Features
 {
@@ -182,15 +185,132 @@ juce::StringArray classify(const Features& f)
 }
 }  // namespace
 
+constexpr int kTagIndexVersion = 1;   // bump when tag logic changes → stale disk cache dropped
+
 AudioTagger::AudioTagger()
 {
     formatManager.registerBasicFormats();
+    loadIndex();
 }
 
 AudioTagger::~AudioTagger()
 {
+    indexerStop = true;
+    if (indexerThread.joinable()) indexerThread.join();
     // Finish/stop background jobs while cache + mutex are still alive.
     pool.removeAllJobs(true, 4000);
+    saveIndex();
+}
+
+juce::File AudioTagger::indexFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+             .getChildFile("Orion").getChildFile("tag_index.dat");
+}
+
+void AudioTagger::loadIndex()
+{
+    const auto f = indexFile();
+    if (! f.existsAsFile())
+        return;
+    juce::FileInputStream in(f);
+    if (! in.openedOk() || in.readInt() != kTagIndexVersion)
+        return;
+    const int count = in.readInt();
+    const std::lock_guard<std::mutex> lock(cacheMutex);
+    for (int i = 0; i < count && ! in.isExhausted(); ++i)
+    {
+        const int plen = in.readInt();
+        if (plen <= 0 || plen > 8192) break;
+        juce::MemoryBlock pb;
+        in.readIntoMemoryBlock(pb, plen);
+        std::string path(static_cast<const char*>(pb.getData()), (std::size_t) plen);
+        const int ntags = in.readInt();
+        if (ntags < 0 || ntags > 64) break;
+        juce::StringArray tags;
+        for (int t = 0; t < ntags; ++t)
+        {
+            const int tlen = in.readInt();
+            if (tlen < 0 || tlen > 256) { tags.clear(); break; }
+            juce::MemoryBlock tb;
+            in.readIntoMemoryBlock(tb, tlen);
+            tags.add(juce::String::fromUTF8(static_cast<const char*>(tb.getData()), tlen));
+        }
+        cache.emplace(std::move(path), std::move(tags));
+    }
+}
+
+void AudioTagger::saveIndex()
+{
+    const auto f = indexFile();
+    f.getParentDirectory().createDirectory();
+    juce::TemporaryFile tmp(f);
+    {
+        juce::FileOutputStream out(tmp.getFile());
+        if (! out.openedOk())
+            return;
+        const std::lock_guard<std::mutex> lock(cacheMutex);
+        out.writeInt(kTagIndexVersion);
+        out.writeInt((int) cache.size());
+        for (const auto& [path, tags] : cache)
+        {
+            out.writeInt((int) path.size());
+            out.write(path.data(), path.size());
+            out.writeInt(tags.size());
+            for (const auto& t : tags)
+            {
+                const auto u = t.toRawUTF8();
+                const int len = (int) std::strlen(u);
+                out.writeInt(len);
+                out.write(u, (std::size_t) len);
+            }
+        }
+    }
+    tmp.overwriteTargetFileWithTemporary();
+    unsaved = 0;
+}
+
+void AudioTagger::indexFolders(const std::vector<juce::File>& roots)
+{
+    if (indexerRunning.exchange(true))
+        return;
+    if (indexerThread.joinable())
+        indexerThread.join();
+    indexerStop = false;
+
+    std::vector<juce::File> r = roots;
+    indexerThread = std::thread([this, r]
+    {
+        int indexedThisRun = 0;
+        for (const auto& root : r)
+        {
+            if (indexerStop.load() || ! root.isDirectory())
+                continue;
+
+            for (const auto& entry : juce::RangedDirectoryIterator(root, true, "*", juce::File::findFiles))
+            {
+                if (indexerStop.load())
+                    break;
+
+                const auto file = entry.getFile();
+                if (! file.hasFileExtension("wav;wave;aif;aiff;mp3;flac;ogg"))
+                    continue;
+
+                const auto key = file.getFullPathName().toStdString();
+                { const std::lock_guard<std::mutex> lock(cacheMutex); if (cache.count(key)) continue; }
+                auto tags = analyseFile(file);
+                { const std::lock_guard<std::mutex> lock(cacheMutex); cache[key] = std::move(tags); }
+                if (++unsaved >= 300) saveIndex();
+                if (++indexedThisRun >= kMaxIndexedTagFilesPerRun)
+                    break;
+            }
+
+            if (indexerStop.load() || indexedThisRun >= kMaxIndexedTagFilesPerRun)
+                break;
+        }
+        if (unsaved.load() > 0) saveIndex();
+        indexerRunning = false;
+    });
 }
 
 std::optional<juce::StringArray> AudioTagger::cachedTags(const juce::File& file) const

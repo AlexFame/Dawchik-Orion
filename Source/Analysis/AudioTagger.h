@@ -2,12 +2,15 @@
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace orion
 {
@@ -32,8 +35,15 @@ public:
     // Non-blocking cache peek (message thread). nullopt = not analysed yet.
     std::optional<juce::StringArray> cachedTags(const juce::File& file) const;
 
+    // Pre-tag every audio file under `roots` on a low-priority background thread when a library folder
+    // is added — so tags are ready (not popping in while you scroll). Persisted to disk (computed once).
+    void indexFolders(const std::vector<juce::File>& roots);
+
 private:
     juce::StringArray analyseFile(const juce::File& file);   // background thread
+    void loadIndex();
+    void saveIndex();
+    juce::File indexFile() const;
 
     juce::AudioFormatManager formatManager;
     juce::ThreadPool pool { 1 };
@@ -41,6 +51,11 @@ private:
     mutable std::mutex cacheMutex;
     std::map<std::string, juce::StringArray> cache;   // path -> tags
     std::set<std::string> pending;                    // in-flight paths
+    std::atomic<int> unsaved { 0 };
+
+    std::thread indexerThread;
+    std::atomic<bool> indexerStop { false };
+    std::atomic<bool> indexerRunning { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioTagger)
 };

@@ -33,3 +33,7 @@ Makefile
 *.dylib
 *.so
 *.app/
+
+# ...but the bundled helper libraries ARE part of the app (copied into
+# Orion.app/Contents/Resources), so they must be tracked.
+!Resources/chorddetect/libs/*.dylib

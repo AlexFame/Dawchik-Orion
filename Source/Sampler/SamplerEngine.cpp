@@ -17,6 +17,7 @@ constexpr int kSamplerSliceEndFadeSamples = 384;
 constexpr int kSamplerRetriggerFadeSamples = 480;   // ~10 ms — matches FL's default "Out only" declick
 constexpr int kSamplerMaxLiveVoices = 24;
 constexpr int kSamplerMidiTriggerReleaseSamples = 384;
+constexpr juce::int64 kSamplerAutoPrewarmMaxBytes = 384LL * 1024 * 1024;
 
 float smoothRamp(float value) noexcept
 {
@@ -992,6 +993,20 @@ void SamplerEngine::prewarmWarp(const juce::String& path, double sourceBpm, doub
     // the warped buffer is cached before the user can trigger a note.
     warpPool.addJob([this, path, sourceBpm, projectTempoBpm]
     {
+        juce::File file(path);
+        std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(file));
+        if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels <= 0)
+            return;
+
+        const auto decodedBytes = static_cast<juce::int64>(reader->lengthInSamples)
+            * static_cast<juce::int64>(reader->numChannels)
+            * static_cast<juce::int64>(sizeof(float));
+        const auto tempoRatio = sourceBpm / projectTempoBpm;
+        const auto warpedBytes = static_cast<juce::int64>(std::ceil(static_cast<double>(decodedBytes)
+                                                                    * juce::jmax(0.01, tempoRatio)));
+        if (decodedBytes + warpedBytes > kSamplerAutoPrewarmMaxBytes)
+            return;
+
         if (const auto* sd = getSampleData(path); sd != nullptr)
             getWarpedSampleData(path, *sd, sourceBpm, projectTempoBpm, /*allowBlocking*/ true);
     });

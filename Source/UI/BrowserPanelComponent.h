@@ -4,6 +4,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "../Analysis/AudioTagger.h"
+#include "../Analysis/SampleEmbedding.h"
 
 #include <atomic>
 #include <functional>
@@ -54,6 +55,21 @@ public:
     bool isPreviewBpmSyncEnabled() const noexcept { return previewBpmSync; }
 
     std::optional<BrowserItem> getSelectedItem() const;
+    // The user's added library folders — "find similar" spans ALL of these, not just the open folder.
+    // Pre-indexes them in the background (Ableton-style) so search results are ready + stable.
+    void setLibraryRoots(std::vector<juce::File> roots)
+    {
+        juce::String signature;
+        for (const auto& root : roots)
+            signature << root.getFullPathName() << "\n";
+        if (signature == libraryRootsSignature)
+            return;
+
+        libraryRootsSignature = signature;
+        libraryRoots = std::move(roots);
+        recursiveScanValid = false;   // library changed → global search cache is stale
+        sampleEmbedding.indexFolders(libraryRoots);   // incremental, persisted, skips cached files
+    }
     void chooseRootFolder();
     void openFolder(const juce::File& directory);
     void showRootLocations();
@@ -143,7 +159,22 @@ private:
     // into its tags + subtitle when it arrives. Deduped/cached by AudioTagger.
     void requestSoundTags(int itemIndex);
 
+    // "Find similar sounds" (Ableton-style): rank the current folder's files by timbral similarity to a
+    // chosen query. Enter via the row context menu; exit via the header chip / search / navigation.
+    void enterSimilarMode(const juce::File& query);
+    void exitSimilarMode();
+    void rebuildSimilarItems();          // rank cached embeddings → items (called as embeddings arrive)
+    bool inSimilarMode() const noexcept { return similarQuery.has_value(); }
+
     AudioTagger audioTagger;
+    SampleEmbedding sampleEmbedding;
+    std::vector<juce::File>   libraryRoots;
+    juce::String              libraryRootsSignature;
+    std::optional<juce::File> similarQuery;
+    std::vector<float>        similarQueryEmb;
+    std::vector<juce::File>   similarFiles;              // whole-library candidate pool (audio files)
+    bool                      similarDirty { false };   // re-rank pending (coalesced in timerCallback)
+    bool                      similarRanked { false };  // frozen once ranked (no visible reshuffle)
 
     std::vector<BrowserItem> items;
     std::optional<int> selectedIndex;
@@ -181,15 +212,16 @@ private:
     // filters in memory instead of re-scanning the disk on every keystroke. Rebuilt only when
     // the folder changes or its contents are modified.
     std::vector<BrowserItem> recursiveScanItems;
-    juce::File recursiveScanDir;
+    juce::String recursiveScanScope;   // identifies what the cache covers (folder path, or "*library*")
     bool recursiveScanValid { false };
     // The recursive disk scan runs on this background pool so a search on a big folder never
     // freezes the UI (it used to block ~10s). While it runs, a "Searching…" row is shown.
     juce::ThreadPool scanPool { 1 };
     std::atomic<int> scanGeneration { 0 };
-    juce::File scanPendingDir;
+    juce::String scanPendingScope;
     bool recursiveScanPending { false };
-    void beginRecursiveScan(const juce::File& directory);
+    // Scan `roots` recursively (whole library when searching globally); `scopeKey` tags the cache.
+    void beginRecursiveScan(std::vector<juce::File> roots, const juce::String& scopeKey);
 
     // Bottom preview bar state (fed by MainComponent's preview transport).
     juce::String        previewName;

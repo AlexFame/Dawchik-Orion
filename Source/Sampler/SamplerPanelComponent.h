@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <atomic>
 #include <array>
 #include <functional>
 #include <map>
@@ -42,6 +43,9 @@ public:
     // Silences any audition note and clears the waveform playhead indicators. Called
     // when the transport stops so the simpler preview stops with it.
     void stopPreviewPlayback();
+    // External (hardware) MIDI → same slice mapping + on-screen highlight + onNoteOn as the typing keyboard.
+    void externalMidiNoteOn(int midiNote, int velocity);
+    void externalMidiNoteOff(int midiNote);
     bool isArmed() const noexcept { return activeTrack != nullptr || activeTrackIndex >= 0; }
     // Index of the track currently bound to the typing keyboard (-1 if none).
     int getActiveTrackIndex() const noexcept { return activeTrackIndex; }
@@ -97,8 +101,10 @@ private:
     int activeTrackIndex { -1 };
     juce::AudioFormatManager waveformFormatManager;
     WaveformPeaks waveformPeaks;
+    std::atomic<int> waveformBuildGeneration { 0 };
     std::set<int> activeNotes;
     std::map<int, int> activeNotePitches;
+    std::map<int, int> externalNoteIdentity;   // hardware MIDI note -> our activeNotes identity
     std::set<int> activeSliceIndices;
     std::optional<int> playbackSliceIndex;
     double playbackSliceStartedMs { 0.0 };

@@ -92,7 +92,8 @@ void ClipEditorComponent::setState(const ClipEditorState& newState)
         stopTimer();
     }
     // Recompute onsets when the displayed source changes (waveform arrives via setState).
-    const bool needTransients = sourceChanged || (transientRatios.empty() && ! newState.waveformMax.empty());
+    const bool needTransients = sourceChanged
+        || (transientRatios.empty() && newState.waveform != nullptr && ! newState.waveform->maxValues.empty());
 
     // Fast path when nothing that affects the WAVEFORM changed (source/trim/warp/markers). The playhead
     // and the control readouts (gain/pitch) can still differ — those get cheap targeted repaints, never
@@ -435,7 +436,7 @@ void ClipEditorComponent::mouseDrag(const juce::MouseEvent& event)
             }
             state.warpMarkers[static_cast<std::size_t>(activeWarpMarker)].beat = juce::jlimit(lo, juce::jmax(lo, hi), beat);
             rebuildWarpMap();   // live: waveform + grid restretch under the drag
-            repaint();
+            repaint(lastWaveformBounds.expanded(18, 28));
         }
         return;
     }
@@ -518,7 +519,7 @@ void ClipEditorComponent::mouseWheelMove(const juce::MouseEvent& event, const ju
     if (std::abs(panDelta) < 0.001f)
         return;
     waveformViewStart = clampWaveViewStart(waveformViewStart - static_cast<double>(panDelta) * visibleWaveSpan());
-    repaint();
+    repaint(lastWaveformBounds.expanded(18, 28));
 }
 
 void ClipEditorComponent::mouseMagnify(const juce::MouseEvent& event, float scaleFactor)
@@ -561,7 +562,7 @@ void ClipEditorComponent::timerCallback()
         waveformZoom += diff * 0.30;
     }
     waveformViewStart = clampWaveViewStart(zoomAnchorRatio - zoomAnchorLocalX * visibleWaveSpan());
-    repaint();
+    repaint(lastWaveformBounds.expanded(18, 28));
 }
 
 juce::String ClipEditorComponent::formatBeat(double beat)
@@ -591,10 +592,12 @@ void ClipEditorComponent::drawWaveformPreview(juce::Graphics& g, juce::Rectangle
     const auto visibleStart = waveformViewStart;
     const auto visibleSpan = visibleWaveSpan();
 
-    if (! state.waveformMin.empty() && state.waveformMin.size() == state.waveformMax.size())
+    if (state.waveform != nullptr
+        && ! state.waveform->minValues.empty()
+        && state.waveform->minValues.size() == state.waveform->maxValues.size())
     {
         const auto halfH = juce::jmax(2.0f, static_cast<float>(waveform.getHeight()) * 0.46f);
-        const auto bucketCount = static_cast<int>(state.waveformMin.size());
+        const auto bucketCount = static_cast<int>(state.waveform->minValues.size());
         g.setColour(accent.withAlpha(0.82f));
         for (int px = 0; px < width; ++px)
         {
@@ -609,8 +612,8 @@ void ClipEditorComponent::drawWaveformPreview(juce::Graphics& g, juce::Rectangle
             float maxVal = 0.0f;
             for (int b = bStart; b < bEnd && b < bucketCount; ++b)
             {
-                minVal = juce::jmin(minVal, state.waveformMin[static_cast<std::size_t>(b)]);
-                maxVal = juce::jmax(maxVal, state.waveformMax[static_cast<std::size_t>(b)]);
+                minVal = juce::jmin(minVal, state.waveform->minValues[static_cast<std::size_t>(b)]);
+                maxVal = juce::jmax(maxVal, state.waveform->maxValues[static_cast<std::size_t>(b)]);
             }
 
             const auto x = waveform.getX() + px;
@@ -955,8 +958,11 @@ int ClipEditorComponent::warpMarkerAtX(int x) const noexcept
 void ClipEditorComponent::recomputeTransients()
 {
     transientRatios.clear();
-    const auto& mx = state.waveformMax;
-    const auto& mn = state.waveformMin;
+    if (state.waveform == nullptr)
+        return;
+
+    const auto& mx = state.waveform->maxValues;
+    const auto& mn = state.waveform->minValues;
     const int n = static_cast<int>(std::min(mx.size(), mn.size()));
     if (n < 8)
         return;

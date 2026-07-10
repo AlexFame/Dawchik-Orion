@@ -40,6 +40,8 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDrag(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
     void mouseMove(const juce::MouseEvent& event) override;
     void mouseExit(const juce::MouseEvent& event) override;
     void visibilityChanged() override;
@@ -68,6 +70,8 @@ private:
     int  findPatternClip(int trackIndex, bool createIfMissing);
     bool stepActive(int trackIndex, int step) const;
     void toggleStep(int trackIndex, int step);
+    bool stepIsOn(int trackIndex, int step) const;
+    void setStep(int trackIndex, int step, bool on);   // idempotent set, used by click-drag painting
 
     // The bar-0 MIDI clip that a channel row reflects (nullptr if none).
     const TimelineClip* rowClip(int trackIndex) const;
@@ -92,6 +96,13 @@ private:
     int  bars { 1 };
     int  hoveredRow { -1 };
     int  hoveredStep { -1 };
+
+    // Click-drag step painting: the first click decides whether we're painting steps on or erasing,
+    // then dragging across the row applies that same value (FL-style).
+    bool stepPaintActive { false };
+    bool stepPaintValue { true };
+    int  stepPaintTrack { -1 };
+    int  stepPaintLastStep { -1 };
     bool dragOver { false };
     // Signal indicator next to each channel name: lights when the playhead hits an active step
     // on that channel and decays. Keyed by track index; value = trigger time (ms).

@@ -4,14 +4,20 @@
 
 #include <array>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
 #include "../Core/ProjectState.h"
+#include "ChordSelectorComponent.h"
+
+#include <memory>
 
 namespace orion
 {
 class MidiEditorOverlayComponent final : public juce::Component,
+                                         public juce::DragAndDropContainer,
+                                         public juce::DragAndDropTarget,
                                          private juce::Timer,
                                          private juce::Button::Listener
 {
@@ -27,6 +33,8 @@ public:
     void setScaleLockExternally(bool enabled);
     // Chord mode synced from the project (shared with sampler / track header / hardware MIDI).
     void setChordModeExternally(bool enabled, int chordSize);
+    // Lock taken around note/slide vector edits so the audio thread never reads them mid-reallocation.
+    void setAudioEditLock(juce::CriticalSection* lock) noexcept { audioEditLock = lock; }
     void closeEditor();
     std::function<void()> onClose;
     std::function<void()> onTogglePlayback;
@@ -35,6 +43,7 @@ public:
     std::function<bool()> onRequestPlayingState;
     std::function<void(bool)> onScaleLockChanged; // fired when the in-editor toggle is flipped
     std::function<void(bool)> onChordModeChanged; // fired when the in-editor Chord toggle is flipped
+    std::function<void(int)> onChordSizeChanged;  // fired when the chord size (3/7/9/11/13) is picked
     std::function<void(int, int)> onPreviewNoteOn;
     std::function<void(int)> onPreviewNoteOff;
     std::function<void()> onPreviewChordRetrigger;
@@ -60,6 +69,12 @@ public:
     void mouseUp(const juce::MouseEvent& event) override;
     void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
     void mouseMagnify(const juce::MouseEvent& event, float scaleFactor) override;
+
+    // DragAndDropTarget: receive a chord dragged out of the chord selector.
+    bool isInterestedInDragSource(const SourceDetails& details) override;
+    void itemDragMove(const SourceDetails& details) override;
+    void itemDragExit(const SourceDetails& details) override;
+    void itemDropped(const SourceDetails& details) override;
 
 private:
     void timerCallback() override;
@@ -245,6 +260,10 @@ private:
     bool splitNoteAtPoint(juce::Point<int> position);
     bool auditionNoteAtPoint(juce::Point<int> position);
     void setPianoRollTool(PianoRollTool tool);
+    void activateToolByIndex(int index);   // shared by toolbar clicks and 1..9 number-key shortcuts
+    // FL-style tool cursors: the pointer becomes the active tool's glyph over the grid. Built lazily & cached.
+    const juce::MouseCursor& toolCursor(PianoRollTool tool);
+    std::map<PianoRollTool, juce::MouseCursor> toolCursorCache;
     bool updateLiveKeyboardPitches();
     bool updateStepWriteKeyboardPitches();
     void commitStepWritePendingChord();
@@ -326,10 +345,25 @@ private:
     juce::ToggleButton scaleLockToggle;
     juce::TextButton chordToggle;
     juce::Label scaleLockLabel;
+    std::unique_ptr<ChordSelectorComponent> chordSelector;   // opened from the Chord button
+    void openChordSelector();
+    void closeChordSelector();
+    void auditionChord(const std::vector<int>& pitches);
+    void releaseChordPreview();
+    std::vector<int> chordPreviewPitches;
+    double chordPreviewOffMs { 0.0 };
+    // Drag a chord out of the selector and drop it on the grid to place its notes.
+    void beginChordDrag(const std::vector<int>& pitches);
+    void placeChordNotes(const std::vector<int>& pitches, juce::Point<int> gridPos);
+    std::vector<int> pendingChordDrag;
+    std::optional<juce::Point<int>> chordDropPreviewPos;
+    juce::CriticalSection* audioEditLock { nullptr };   // guards note/slide edits vs the audio thread
     double horizontalZoom { 1.0 };
     double verticalZoom { 1.0 };
     double scrollX { 0.0 };
     double scrollY { 0.0 };
+    std::optional<int> lastTimerPlayheadX;
+    std::set<int> lastTimerActivePlaybackPitches;
     // Smooth (FL-style) zoom + scroll: gestures set targets and a pinned focus; the 120 Hz timer eases
     // the actual values toward them, so panning and zooming glide instead of snapping frame to frame.
     double targetHorizontalZoom { 1.0 };

@@ -162,7 +162,7 @@ void SamplerPanelComponent::openTrack(TrackState& trackState)
     activeTrackIndex = -1;
     setVisible(true);
     toFront(true);
-    startTimerHz(90);
+    startTimerHz(60);
     pushSlicePointsToEngine();
     grabKeyboardFocus();
     repaint();
@@ -176,7 +176,7 @@ void SamplerPanelComponent::openTrackIndex(int trackIndex)
     activeTrackIndex = trackIndex;
     setVisible(true);
     toFront(true);
-    startTimerHz(90);
+    startTimerHz(60);
     pushSlicePointsToEngine();
     grabKeyboardFocus();
     repaint();
@@ -189,6 +189,10 @@ void SamplerPanelComponent::closePanel()
     // after the visible panel goes away. Notes only get released when another
     // track is opened or when the user explicitly disarms the keyboard.
     setVisible(false);
+
+    // Keep the typing keyboard armed, but it does not need a 60 Hz poll while the panel
+    // itself is hidden and cannot animate.
+    startTimerHz(30);
 
     if (onClose)
         onClose();
@@ -500,7 +504,7 @@ void SamplerPanelComponent::paint(juce::Graphics& g)
     topKnobs.removeFromLeft(6);
     gainKnobBounds = topKnobs.removeFromLeft(78);
     drawKnob(g, gainKnobBounds, "Gain", gainText,
-             juce::jmap(static_cast<float>(gainVal), -60.0f, 6.0f, 0.0f, 1.0f),
+             juce::jmap(static_cast<float>(gainVal), -24.0f, 12.0f, 0.0f, 1.0f),   // match the track fader range
              selectedKnob == Knob::gain, editingKnob == Knob::gain);
 
     controlGrid.removeFromTop(18);
@@ -552,71 +556,86 @@ void SamplerPanelComponent::ensureWaveformPeaksFor(const juce::String& sourcePat
 
     waveformPeaks = {};
     waveformPeaks.sourcePath = sourcePath;
+    const auto buildGeneration = ++waveformBuildGeneration;
+    const auto safeThis = juce::Component::SafePointer<SamplerPanelComponent>(this);
 
-    const juce::File sourceFile(sourcePath);
-    std::unique_ptr<juce::AudioFormatReader> reader(waveformFormatManager.createReaderFor(sourceFile));
-
-    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels == 0)
-        return;
-
-    constexpr int bucketCount = 720;
-    constexpr int maxReadBlock = 4096;
-    const auto totalSamples = reader->lengthInSamples;
-    const auto channelCount = static_cast<int>(reader->numChannels);
-
-    waveformPeaks.minValues.assign(bucketCount, 0.0f);
-    waveformPeaks.maxValues.assign(bucketCount, 0.0f);
-
-    juce::AudioBuffer<float> block(channelCount, maxReadBlock);
-    float globalPeak = 1.0e-6f;
-
-    for (int bucket = 0; bucket < bucketCount; ++bucket)
+    // Decoding a long sample here used to run from paint(), freezing the entire app on
+    // the first Sampler open. Build the display peaks off the message thread instead.
+    juce::Thread::launch([safeThis, sourcePath, buildGeneration]()
     {
-        const auto bucketStart = (totalSamples * bucket) / bucketCount;
-        const auto bucketEnd = (totalSamples * (bucket + 1)) / bucketCount;
-        float minValue = 0.0f;
-        float maxValue = 0.0f;
-        bool hasSamples = false;
+        WaveformPeaks peaks;
+        peaks.sourcePath = sourcePath;
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(sourcePath)));
 
-        for (auto readPosition = bucketStart; readPosition < bucketEnd; readPosition += maxReadBlock)
+        if (reader != nullptr && reader->lengthInSamples > 0 && reader->numChannels > 0)
         {
-            const auto samplesToRead = static_cast<int>(juce::jmin<juce::int64>(maxReadBlock, bucketEnd - readPosition));
-            block.clear();
-            reader->read(&block, 0, samplesToRead, readPosition, true, true);
+            constexpr int bucketCount = 720;
+            constexpr int maxReadBlock = 4096;
+            const auto totalSamples = reader->lengthInSamples;
+            const auto channelCount = static_cast<int>(reader->numChannels);
+            peaks.minValues.assign(bucketCount, 0.0f);
+            peaks.maxValues.assign(bucketCount, 0.0f);
 
-            for (int sample = 0; sample < samplesToRead; ++sample)
+            juce::AudioBuffer<float> block(channelCount, maxReadBlock);
+            float globalPeak = 1.0e-6f;
+
+            for (int bucket = 0; bucket < bucketCount; ++bucket)
             {
-                float monoSample = 0.0f;
+                const auto bucketStart = (totalSamples * bucket) / bucketCount;
+                const auto bucketEnd = (totalSamples * (bucket + 1)) / bucketCount;
+                float minValue = 0.0f;
+                float maxValue = 0.0f;
+                bool hasSamples = false;
 
-                for (int channel = 0; channel < channelCount; ++channel)
-                    monoSample += block.getSample(channel, sample);
-
-                monoSample /= static_cast<float>(channelCount);
-
-                if (! hasSamples)
+                for (auto readPosition = bucketStart; readPosition < bucketEnd; readPosition += maxReadBlock)
                 {
-                    minValue = monoSample;
-                    maxValue = monoSample;
-                    hasSamples = true;
+                    const auto samplesToRead = static_cast<int>(juce::jmin<juce::int64>(maxReadBlock, bucketEnd - readPosition));
+                    block.clear();
+                    reader->read(&block, 0, samplesToRead, readPosition, true, true);
+
+                    for (int sample = 0; sample < samplesToRead; ++sample)
+                    {
+                        float monoSample = 0.0f;
+                        for (int channel = 0; channel < channelCount; ++channel)
+                            monoSample += block.getSample(channel, sample);
+                        monoSample /= static_cast<float>(channelCount);
+
+                        if (! hasSamples)
+                        {
+                            minValue = monoSample;
+                            maxValue = monoSample;
+                            hasSamples = true;
+                        }
+                        else
+                        {
+                            minValue = juce::jmin(minValue, monoSample);
+                            maxValue = juce::jmax(maxValue, monoSample);
+                        }
+                    }
                 }
-                else
-                {
-                    minValue = juce::jmin(minValue, monoSample);
-                    maxValue = juce::jmax(maxValue, monoSample);
-                }
+
+                peaks.minValues[static_cast<std::size_t>(bucket)] = minValue;
+                peaks.maxValues[static_cast<std::size_t>(bucket)] = maxValue;
+                globalPeak = juce::jmax(globalPeak, std::abs(minValue), std::abs(maxValue));
             }
+
+            for (auto& value : peaks.minValues)
+                value /= globalPeak;
+            for (auto& value : peaks.maxValues)
+                value /= globalPeak;
         }
 
-        waveformPeaks.minValues[static_cast<std::size_t>(bucket)] = minValue;
-        waveformPeaks.maxValues[static_cast<std::size_t>(bucket)] = maxValue;
-        globalPeak = juce::jmax(globalPeak, std::abs(minValue), std::abs(maxValue));
-    }
-
-    for (auto& value : waveformPeaks.minValues)
-        value /= globalPeak;
-
-    for (auto& value : waveformPeaks.maxValues)
-        value /= globalPeak;
+        juce::MessageManager::callAsync([safeThis, peaks = std::move(peaks), buildGeneration]() mutable
+        {
+            if (safeThis == nullptr || safeThis->waveformBuildGeneration.load() != buildGeneration
+                || safeThis->waveformPeaks.sourcePath != peaks.sourcePath)
+                return;
+            safeThis->waveformPeaks = std::move(peaks);
+            safeThis->repaint(safeThis->waveformBounds.expanded(8, 8));
+        });
+    });
 }
 
 void SamplerPanelComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<int> waveInner, const TrackState* track)
@@ -1055,7 +1074,7 @@ void SamplerPanelComponent::commitKnobTextEntry()
                     track->samplerRootMidiNote = *note;
                 break;
             case Knob::gain:
-                track->volumeDb = juce::jlimit(-60.0, 6.0, text.getDoubleValue());
+                track->volumeDb = juce::jlimit(-24.0, 12.0, text.getDoubleValue());
                 break;
             case Knob::attack:   // typed in milliseconds
                 track->samplerAmpAttackSeconds = juce::jlimit(0.0, kMaxEnvSeconds, text.getDoubleValue() / 1000.0);
@@ -1141,8 +1160,8 @@ void SamplerPanelComponent::mouseDrag(const juce::MouseEvent& event)
                 static_cast<int>(std::round(knobDragStartValue + steps)));
             break;
         case Knob::gain:
-            getActiveTrack()->volumeDb = juce::jlimit(-60.0, 6.0,
-                knobDragStartValue + steps * 0.5);  // 0.5 dB per step
+            getActiveTrack()->volumeDb = juce::jlimit(-24.0, 12.0,
+                knobDragStartValue + steps * 0.5);  // 0.5 dB per step, same range as the track fader
             break;
         case Knob::attack:
             getActiveTrack()->samplerAmpAttackSeconds = juce::jlimit(0.0, kMaxEnvSeconds,
@@ -1329,6 +1348,15 @@ void SamplerPanelComponent::visibilityChanged()
 
 void SamplerPanelComponent::timerCallback()
 {
+    const auto repaintWaveformOnly = [this]
+    {
+        const auto dirty = waveformBounds.expanded(8, 8).getIntersection(getLocalBounds());
+        if (dirty.isEmpty())
+            repaint();
+        else
+            repaint(dirty);
+    };
+
     // Always poll the keyboard while a track is armed, regardless of panel
     // visibility — so the user can play notes from anywhere in the app.
     if (getActiveTrack() != nullptr)
@@ -1340,7 +1368,7 @@ void SamplerPanelComponent::timerCallback()
         if (playbackSliceDurationMs <= 0.0 || elapsedMs >= playbackSliceDurationMs)
             playbackSliceIndex.reset();
 
-        repaint();
+        repaintWaveformOnly();
     }
 
     if (isVisible() && padFlashSliceIndex.has_value())
@@ -1349,7 +1377,7 @@ void SamplerPanelComponent::timerCallback()
         if (elapsedMs >= padFlashDurationMs)
             padFlashSliceIndex.reset();
 
-        repaint();
+        repaintWaveformOnly();
     }
 
     if (isVisible() && playbackLinearStartedMs.has_value())
@@ -1358,7 +1386,7 @@ void SamplerPanelComponent::timerCallback()
         if (playbackLinearDurationMs <= 0.0 || elapsedMs >= playbackLinearDurationMs)
             playbackLinearStartedMs.reset();
 
-        repaint();
+        repaintWaveformOnly();
     }
 }
 
@@ -1720,6 +1748,68 @@ void SamplerPanelComponent::triggerSlicePad(int sliceIndex)
                  track->samplerWarpEnabled, track->samplerSourceBpm);
 
     startSlicePlaybackIndicator(sliceIndex);  // lights the pad (auto-clears on timer)
+    repaint();
+}
+
+void SamplerPanelComponent::externalMidiNoteOn(int midiNote, int velocity)
+{
+    auto* track = getActiveTrack();
+    if (track == nullptr || track->samplerSourcePath.isEmpty())
+        return;
+
+    int sliceIndex = 0;
+    // Apply the panel's octave/transpose so the ←/→ octave control works for hardware MIDI too.
+    int playablePitch = juce::jlimit(0, 127,
+                                     midiNote + track->samplerKeyboardOctaveOffset * 12 + track->samplerTransposeSemitones);
+    int noteIdentity = playablePitch;   // pitched modes highlight the on-screen keyboard by pitch
+
+    if (track->samplerMode == SamplerPlaybackMode::slice)
+    {
+        // Chromatic slice map. Anchor to a LOW octave (~C2) so a typical MIDI controller's range
+        // lands on slices 0..N instead of clamping to 0 when it plays below the sample root (C3+).
+        const int sliceCount = juce::jlimit(1, 64, track->samplerSliceCount);
+        int base = track->samplerRootMidiNote;
+        while (base > 36) base -= 12;                 // bring the anchor down to ~C2
+        while (midiNote < base && base >= 12) base -= 12;   // and below the played note if it's lower
+        sliceIndex = juce::jlimit(0, sliceCount - 1, midiNote - base);
+        playablePitch = juce::jlimit(0, 127, track->samplerRootMidiNote + sliceIndex);
+        noteIdentity = 20000 + midiNote;   // slice mode lights the pad, not the keyboard
+        activeSliceIndices.insert(sliceIndex);
+    }
+
+    externalNoteIdentity[midiNote] = noteIdentity;
+    if (! activeNotes.contains(noteIdentity))
+    {
+        activeNotes.insert(noteIdentity);
+        activeNotePitches[noteIdentity] = playablePitch;
+        if (onNoteOn)
+            onNoteOn(track->samplerSourcePath, playablePitch, juce::jlimit(1, 127, velocity),
+                     track->samplerRootMidiNote, track->volumeDb, track->samplerMode,
+                     sliceIndex, track->samplerSliceCount, track->samplerWarpEnabled, track->samplerSourceBpm);
+
+        if (track->samplerMode == SamplerPlaybackMode::slice)
+        { startSlicePlaybackIndicator(sliceIndex); padBank = sliceIndex / 16; }
+        else
+            startLinearPlaybackIndicator(playablePitch);
+    }
+    repaint();
+}
+
+void SamplerPanelComponent::externalMidiNoteOff(int midiNote)
+{
+    auto* track = getActiveTrack();
+    const auto it = externalNoteIdentity.find(midiNote);
+    if (it == externalNoteIdentity.end())
+        return;
+    const int noteIdentity = it->second;
+    externalNoteIdentity.erase(it);
+
+    const auto pitchIt = activeNotePitches.find(noteIdentity);
+    const int releasedPitch = pitchIt != activeNotePitches.end() ? pitchIt->second : midiNote;
+    activeNotes.erase(noteIdentity);
+    activeNotePitches.erase(noteIdentity);
+    if (onNoteOff)
+        onNoteOff(releasedPitch, track != nullptr ? track->samplerMode : SamplerPlaybackMode::classic);
     repaint();
 }
 

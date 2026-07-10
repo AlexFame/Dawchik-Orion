@@ -431,6 +431,13 @@ BrowserPanelComponent::BrowserPanelComponent()
     searchEditor.onTextChange = [this]
     {
         searchQuery = searchEditor.getText().trim();
+        if (inSimilarMode() && searchQuery.isNotEmpty())   // typing a query leaves similar mode
+        {
+            similarQuery.reset();
+            similarQueryEmb.clear();
+            similarDirty = false;
+            entrySignature.clear();
+        }
         refreshEntries();
     };
     addAndMakeVisible(searchEditor);
@@ -819,6 +826,7 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
             menu.addItem(3, "Add to playlist");                  // sampler track + clip
             menu.addItem(2, "Open in sampler");                  // sampler track only
             menu.addItem(4, "Replace selected track's sample");
+            menu.addItem(5, "Find similar sounds");              // timbral similarity ranking
             menu.addSeparator();
         }
         menu.addItem(1, "Open in Finder");
@@ -840,6 +848,8 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
                                    safeThis->onAddItemToPlaylist(activated);   // sampler track + clip
                                else if (result == 4 && safeThis->onReplaceSelectedTrackSample)
                                    safeThis->onReplaceSelectedTrackSample(activated);
+                               else if (result == 5)
+                                   safeThis->enterSimilarMode(file);
                            });
         return;
     }
@@ -850,6 +860,13 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 
     if (! selectedIndex.has_value())
         return;
+
+    // Row 0 in similar mode is the "◂ Similar to …" chip → click exits.
+    if (inSimilarMode() && *selectedIndex == 0)
+    {
+        exitSimilarMode();
+        return;
+    }
 
     grabKeyboardFocus();   // so Enter/arrows act on the browser list, not a focused button
 
@@ -866,6 +883,11 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 
 void BrowserPanelComponent::openDirectoryItem(const BrowserItem& item)
 {
+    // Navigating away leaves similar mode (the following refresh rebuilds a normal listing).
+    similarQuery.reset();
+    similarQueryEmb.clear();
+    similarDirty = false;
+
     if (showingLocationRoots && item.name == "Macintosh HD")
     {
         pushCurrentLocationToBackHistory();
@@ -1137,6 +1159,9 @@ void BrowserPanelComponent::timerCallback()
     if (! isShowing())
         return;
 
+    if (similarDirty && ! similarRanked)   // rank once when the pool + query embedding are ready, then freeze
+        rebuildSimilarItems();
+
     const auto currentTimestamp = getWatchedLocationTimestamp();
     if (currentTimestamp != watchedLocationTimestamp)
     {
@@ -1149,6 +1174,48 @@ void BrowserPanelComponent::refreshEntries()
 {
     std::vector<BrowserItem> refreshedItems;
     const bool searching = searchQuery.trim().isNotEmpty();
+
+    // Global search (Ableton-style): a query searches the WHOLE library, independent of the current
+    // view (works even at the locations overview). Handled here with an early return so it doesn't
+    // depend on which folder branch would otherwise run.
+    if (searching && ! inSimilarMode())
+    {
+        // Scope = the user's added library folders. If none are set, search only the current folder —
+        // NEVER the whole disk (scanning all of Macintosh HD would be ruinous).
+        std::vector<juce::File> roots = libraryRoots;
+        if (roots.empty() && currentDirectory.isDirectory())
+            roots.push_back(currentDirectory);
+
+        const juce::String scope = "*search*" + (roots.empty() ? juce::String("none") : juce::String());
+        if (! roots.empty() && ! (recursiveScanValid && recursiveScanScope == scope))
+            beginRecursiveScan(roots, scope);
+
+        const auto filter = parseBrowserSearchFilter(searchQuery);
+        items.clear();
+        if (recursiveScanValid && recursiveScanScope == scope)
+        {
+            for (const auto& it : recursiveScanItems)
+            {
+                if (browserSection == BrowserSection::loops && ! isLoopItem(it)) continue;
+                if (browserSection == BrowserSection::oneShots && ! isOneShotItem(it)) continue;
+                if (! matchesBrowserSearch(it, filter)) continue;
+                items.push_back(it);
+            }
+        }
+        if (recursiveScanPending && items.empty())
+            items.push_back(BrowserItem { juce::String::fromUTF8("Searching\xe2\x80\xa6"), "", "",
+                                          juce::Colour(0xff7a8ba0), 4.0, juce::File(), true, true });
+
+        selectedIndex.reset();
+        hoverIndex.reset();
+        dragIndex.reset();
+        clampScrollOffset();
+        // CRITICAL: stamp the watched location, else timerCallback sees a "stale" timestamp every tick,
+        // invalidates the scan cache, and re-scans the WHOLE library forever (runaway CPU + memory).
+        watchedLocationTimestamp = getWatchedLocationTimestamp();
+        repaint();
+        return;
+    }
 
     if (showingLocationRoots)
     {
@@ -1333,14 +1400,16 @@ void BrowserPanelComponent::refreshEntries()
         // the current level. Without a query, show the normal folder listing (subdirs + files).
         if (searching)
         {
-            // Use the cached recursive scan if it's ready for this folder; otherwise kick off a
-            // BACKGROUND scan (so the UI never freezes) and show the cached results for now —
-            // a "Searching…" row is appended below while the scan runs.
-            if (recursiveScanValid && recursiveScanDir == currentDirectory)
+            // Ableton-style: a search spans the WHOLE library (all added folders), not just the open
+            // folder. If no library folders are set, fall back to searching under the current folder.
+            const bool global = ! libraryRoots.empty();
+            const juce::String scope = global ? juce::String("*library*") : currentDirectory.getFullPathName();
+
+            if (recursiveScanValid && recursiveScanScope == scope)
                 for (const auto& cached : recursiveScanItems)
                     refreshedItems.push_back(cached);
             else
-                beginRecursiveScan(currentDirectory);
+                beginRecursiveScan(global ? libraryRoots : std::vector<juce::File> { currentDirectory }, scope);
         }
         else
         {
@@ -1422,6 +1491,13 @@ void BrowserPanelComponent::refreshEntries()
     entrySignature = newSignature;
     unfilteredItems = std::move(refreshedItems);
 
+    // In "find similar" mode the list is a similarity ranking, not the folder listing.
+    if (inSimilarMode())
+    {
+        rebuildSimilarItems();
+        return;
+    }
+
     // Apply the case-insensitive search filter. Parent-link rows (".." / "Go up")
     // always pass through so the user can keep navigating while a query is active.
     items.clear();
@@ -1460,28 +1536,170 @@ void BrowserPanelComponent::refreshEntries()
     repaint();
 }
 
-void BrowserPanelComponent::beginRecursiveScan(const juce::File& directory)
+void BrowserPanelComponent::enterSimilarMode(const juce::File& query)
 {
-    if (recursiveScanPending && scanPendingDir == directory)
-        return;   // a scan for this folder is already running
+    if (! query.existsAsFile())
+        return;
+    similarQuery = query;
+    similarQueryEmb.clear();
+    similarFiles.clear();
+    similarDirty = true;
+    similarRanked = false;
+    searchQuery = {};
+    searchEditor.setText({}, juce::dontSendNotification);
+
+    juce::Component::SafePointer<BrowserPanelComponent> safe(this);
+    sampleEmbedding.requestEmbedding(query, [safe](std::vector<float> v)
+    {
+        if (safe == nullptr) return;
+        safe->similarQueryEmb = std::move(v);
+        safe->similarDirty = true;
+    });
+
+    // Candidate pool = EVERY audio file across ALL the user's added library folders. If none are set
+    // (the user just browses folders), broaden from the open sub-folder to its PARENT (the whole pack)
+    // so similarity spans a diverse set, not one homogeneous sub-folder.
+    std::vector<juce::File> roots = libraryRoots;
+    if (roots.empty())
+    {
+        const auto parent = currentDirectory.getParentDirectory();
+        roots.push_back(parent.isDirectory() && parent != currentDirectory ? parent : currentDirectory);
+    }
+
+    juce::Thread::launch([safe, roots]
+    {
+        std::vector<juce::File> found;
+        for (const auto& root : roots)
+        {
+            if (! root.isDirectory()) continue;
+            auto files = root.findChildFiles(juce::File::findFiles, true, "*.wav;*.aif;*.aiff;*.mp3;*.flac;*.ogg");
+            for (auto& f : files) found.push_back(f);
+            if (found.size() > 8000) break;   // sanity cap for very large libraries
+        }
+        juce::MessageManager::callAsync([safe, found = std::move(found)]() mutable
+        {
+            if (safe == nullptr || ! safe->inSimilarMode()) return;
+            safe->similarFiles = std::move(found);
+            safe->similarDirty = true;
+        });
+    });
+
+    rebuildSimilarItems();
+}
+
+void BrowserPanelComponent::exitSimilarMode()
+{
+    if (! similarQuery.has_value())
+        return;
+    similarQuery.reset();
+    similarQueryEmb.clear();
+    similarDirty = false;
+    similarRanked = false;
+    entrySignature.clear();   // force a normal listing rebuild
+    refreshEntries();
+}
+
+void BrowserPanelComponent::rebuildSimilarItems()
+{
+    similarDirty = false;
+    if (! similarQuery.has_value() || similarRanked)   // frozen after the first complete ranking
+        return;
+
+    // Candidate pool = the whole-library file scan (falls back to the current folder's files until the
+    // scan lands). Request any missing embeddings; each arrival re-ranks (coalesced in timerCallback).
+    std::vector<juce::File> pool = similarFiles;
+    if (pool.empty())
+        for (const auto& it : unfilteredItems)
+            if (! it.isDirectory && ! it.isParentLink && it.file.existsAsFile())
+                pool.push_back(it.file);
+
+    juce::Component::SafePointer<BrowserPanelComponent> safe(this);
+    std::vector<juce::File>         cands;
+    std::vector<std::vector<float>> embs;
+    int requested = 0;
+    for (const auto& f : pool)
+    {
+        if (f == *similarQuery) continue;
+        if (auto e = sampleEmbedding.cachedEmbedding(f); e && ! e->empty())
+        {
+            cands.push_back(f);
+            embs.push_back(std::move(*e));
+        }
+        else if (requested < 1500)   // throttle the analysis flood on huge libraries
+        {
+            ++requested;
+            sampleEmbedding.requestEmbedding(f, [safe](std::vector<float>) { if (safe) safe->similarDirty = true; });
+        }
+    }
+
+    items.clear();
+    // Header chip (row 0) — click to exit similar mode. No indexing counter (pre-indexed in background).
+    items.push_back(BrowserItem { juce::String::fromUTF8("\xE2\x97\x82  Similar to ") + similarQuery->getFileNameWithoutExtension(),
+                                  "", "tap to exit", theme::cool::cyan, 4.0, juce::File(), false, false });
+
+    if (! similarQueryEmb.empty() && ! embs.empty())
+    {
+        const auto ranked = SampleEmbedding::rankSimilar(similarQueryEmb, embs);
+        int shown = 0;
+        for (const auto& m : ranked)
+        {
+            const auto& f = cands[(std::size_t) m.index];
+            BrowserItem it {
+                f.getFileNameWithoutExtension(),
+                "",
+                juce::String((int) std::round(m.score * 100.0f)) + "% match  •  " + f.getParentDirectory().getFileName(),
+                colourForEntry(f, false),
+                4.0,
+                f,
+                false,
+                false
+            };
+            items.push_back(std::move(it));
+            if (++shown >= 120) break;
+        }
+
+        // Freeze once we've ranked with the real pool + query embedding both ready → no visible reshuffle.
+        if (! similarFiles.empty())
+            similarRanked = true;
+    }
+
+    selectedIndex.reset();
+    hoverIndex.reset();
+    dragIndex.reset();
+    clampScrollOffset();
+    repaint();
+}
+
+void BrowserPanelComponent::beginRecursiveScan(std::vector<juce::File> roots, const juce::String& scopeKey)
+{
+    if (recursiveScanPending && scanPendingScope == scopeKey)
+        return;   // a scan for this scope is already running
 
     recursiveScanPending = true;
-    scanPendingDir = directory;
+    scanPendingScope = scopeKey;
     const int generation = ++scanGeneration;
     juce::Component::SafePointer<BrowserPanelComponent> safeThis(this);
 
-    scanPool.addJob([safeThis, directory, generation]()
+    scanPool.addJob([safeThis, roots = std::move(roots), scopeKey, generation]()
     {
-        // Heavy disk traversal — off the message thread so the UI never freezes.
+        // Heavy disk traversal across ALL roots (whole library on a global search) — off the message
+        // thread so the UI never freezes. Dedup by path so nested roots don't double up.
         juce::Array<juce::File> found;
+        std::set<juce::String> seen;
         int scanned = 0;
-        for (const auto& entry : juce::RangedDirectoryIterator(directory, true, "*", juce::File::findFiles))
+        bool capped = false;
+        for (const auto& root : roots)
         {
-            const auto file = entry.getFile();
-            if (file.hasFileExtension("wav;wave;aif;aiff;mp3;flac;ogg;m4a"))
-                found.add(file);
-            if (++scanned >= 40000 || found.size() >= 4000)   // safety caps
-                break;
+            if (! root.isDirectory()) continue;
+            for (const auto& entry : juce::RangedDirectoryIterator(root, true, "*", juce::File::findFiles))
+            {
+                const auto file = entry.getFile();
+                if (file.hasFileExtension("wav;wave;aif;aiff;mp3;flac;ogg;m4a")
+                    && seen.insert(file.getFullPathName()).second)
+                    found.add(file);
+                if (++scanned >= 200000 || found.size() >= 30000) { capped = true; break; }   // safety caps
+            }
+            if (capped) break;
         }
         std::sort(found.begin(), found.end(),
                   [](const juce::File& a, const juce::File& b)
@@ -1489,7 +1707,7 @@ void BrowserPanelComponent::beginRecursiveScan(const juce::File& directory)
                       return a.getFileName().compareNatural(b.getFileName()) < 0;
                   });
 
-        juce::MessageManager::callAsync([safeThis, directory, generation, found]()
+        juce::MessageManager::callAsync([safeThis, scopeKey, generation, found]()
         {
             auto* self = safeThis.getComponent();
             if (self == nullptr || generation != self->scanGeneration.load())
@@ -1509,7 +1727,7 @@ void BrowserPanelComponent::beginRecursiveScan(const juce::File& directory)
                     false
                 });
 
-            self->recursiveScanDir = directory;
+            self->recursiveScanScope = scopeKey;
             self->recursiveScanValid = true;
             self->recursiveScanPending = false;
             self->refreshEntries();   // rebuild now that the cache is ready

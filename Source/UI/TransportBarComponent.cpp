@@ -2,6 +2,8 @@
 
 #include "OrionTheme.h"
 
+#include <cmath>
+
 namespace orion
 {
 namespace
@@ -211,9 +213,56 @@ TransportBarComponent::~TransportBarComponent()
 
 void TransportBarComponent::setState(const TransportBarState& newState)
 {
+    // Called every 60 Hz tick. The whole bar (lots of text) was repainting each time because
+    // engineLoad (CPU%) / master level jitter constantly — pegging the software renderer while idle.
+    // Only repaint when a DISPLAYED value actually changes (with a tolerance on the noisy meters).
+    const auto& o = state;
+    const bool sameEnough =
+           std::abs(newState.tempoBpm      - o.tempoBpm)      < 0.005
+        && std::abs(newState.scanProgress  - o.scanProgress)  < 0.005
+        && std::abs(newState.engineLoad    - o.engineLoad)    < 0.03f   // ignore CPU-meter jitter
+        && std::abs(newState.masterGainDb  - o.masterGainDb)  < 0.05
+        && std::abs(newState.masterLevel   - o.masterLevel)   < 0.01f
+        && std::abs(newState.masterLevelDb - o.masterLevelDb) < 0.5f
+        && newState.keyText == o.keyText && newState.timeSignature == o.timeSignature
+        && newState.positionText == o.positionText && newState.projectName == o.projectName
+        && newState.scanName == o.scanName
+        && newState.playing == o.playing && newState.recording == o.recording
+        && newState.loop == o.loop && newState.metronome == o.metronome && newState.countIn == o.countIn
+        && newState.scanVisible == o.scanVisible
+        && newState.mixerOpen == o.mixerOpen && newState.clipEditorOpen == o.clipEditorOpen
+        && newState.stepSequencerOpen == o.stepSequencerOpen;
+
+    const bool staticLayoutChanged = newState.tempoBpm != o.tempoBpm
+        || newState.keyText != o.keyText || newState.timeSignature != o.timeSignature
+        || newState.projectName != o.projectName || newState.scanVisible != o.scanVisible
+        || newState.scanName != o.scanName || newState.scanProgress != o.scanProgress
+        || newState.playing != o.playing || newState.recording != o.recording
+        || newState.loop != o.loop || newState.metronome != o.metronome || newState.countIn != o.countIn
+        || newState.mixerOpen != o.mixerOpen || newState.clipEditorOpen != o.clipEditorOpen
+        || newState.stepSequencerOpen != o.stepSequencerOpen;
+    const bool positionChanged = newState.positionText != o.positionText;
+    const bool masterMeterChanged = std::abs(newState.masterGainDb - o.masterGainDb) >= 0.05
+        || std::abs(newState.masterLevel - o.masterLevel) >= 0.01f
+        || std::abs(newState.masterLevelDb - o.masterLevelDb) >= 0.5f;
+    const bool cpuMeterChanged = std::abs(newState.engineLoad - o.engineLoad) >= 0.03f;
+
     state = newState;
     syncButtons();
-    repaint();
+    if (sameEnough)
+        return;
+
+    if (staticLayoutChanged)
+        repaint();
+    else
+    {
+        if (positionChanged)
+            repaint(positionCardBounds);
+        if (masterMeterChanged)
+            repaint(masterMeterBounds);
+        if (cpuMeterChanged)
+            repaint(cpuMeterBounds);
+    }
 }
 
 juce::Rectangle<int> TransportBarComponent::getTempoEditorBounds() const noexcept

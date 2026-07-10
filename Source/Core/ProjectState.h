@@ -3,6 +3,8 @@
 #include <juce_core/juce_core.h>
 #include <juce_graphics/juce_graphics.h>
 
+#include "ChordTheory.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -145,6 +147,30 @@ inline double warpBeatToSourceRatio(const std::vector<WarpMarker>& markers, doub
     return pts.back().sourceRatio;
 }
 
+// Warp markers as (outputRatio, inputRatio) control points for the piecewise stretch renderer.
+// Empty when there are no user markers (→ the caller uses the plain linear warp).
+inline std::vector<std::pair<double, double>> warpPointsOutInForClip(const std::vector<WarpMarker>& markers, double totalBeats)
+{
+    std::vector<std::pair<double, double>> out;
+    if (markers.empty() || totalBeats <= 0.0)
+        return out;
+    const auto pts = warpControlPoints(markers, totalBeats);
+    const double lastBeat = juce::jmax(1.0e-9, pts.back().beat);
+    out.reserve(pts.size());
+    for (const auto& p : pts)
+        out.push_back({ juce::jlimit(0.0, 1.0, p.beat / lastBeat), juce::jlimit(0.0, 1.0, p.sourceRatio) });
+    return out;
+}
+
+// A chord placed on the arrangement's chord lane (Fender-style): a time span carrying a chord spec.
+// Serves as a harmonic scaffold/reference; audition on click, edit via the chord selector.
+struct ChordEvent
+{
+    double startBeat { 0.0 };
+    double lengthInBeats { 4.0 };
+    orion::chords::ChordSpec spec {};
+};
+
 struct TimelineClip
 {
     juce::String name;
@@ -192,6 +218,9 @@ struct TimelineClip
     // Piecewise warp control points (empty = plain linear warp). Kept sorted by source position.
     // At the end of the struct so positional aggregate initialisers elsewhere stay valid.
     std::vector<WarpMarker> warpMarkers;
+    // Live re-harmonisation: when true, the clip's audio is re-pitched per bar to follow the
+    // arrangement chord lane (root transpose per chord segment). At the end for positional init.
+    bool followsChordLane { false };
 };
 
 // Maps a linear fade progress t in [0,1] (0 = silent end, 1 = full level) to a
@@ -378,6 +407,19 @@ public:
     void clearLoopRange() noexcept;
     const std::vector<TrackState>& getTracks() const noexcept;
     std::vector<TrackState>& getTracks() noexcept;
+
+    // Arrangement chord lane.
+    const std::vector<ChordEvent>& getChordTrack() const noexcept { return chordTrack; }
+    std::vector<ChordEvent>& getChordTrack() noexcept { return chordTrack; }
+    bool isChordLaneVisible() const noexcept { return chordLaneVisible; }
+    void setChordLaneVisible(bool v) noexcept { chordLaneVisible = v; }
+    int  getChordLaneOctave() const noexcept { return chordLaneOctave; }
+    void setChordLaneOctave(int o) noexcept { chordLaneOctave = juce::jlimit(-3, 3, o); }
+
+    // Guards structural edits to clip note/slide vectors against the audio thread reading them. The
+    // audio thread try-locks (never blocks); the message thread locks around add/remove/replace of
+    // midiNotes / pitchSlides so a reallocation can't dangle a reference mid-render (that was a crash).
+    juce::CriticalSection& getAudioEditLock() const noexcept { return audioEditLock; }
     const std::vector<BusState>& getBuses() const noexcept { return buses; }
     std::vector<BusState>& getBuses() noexcept { return buses; }
 
@@ -406,8 +448,12 @@ private:
     bool recordWithMetronome { false };
     bool recordWithCountIn { true };
     std::vector<TrackState> tracks;
+    std::vector<ChordEvent> chordTrack;
+    bool chordLaneVisible { false };
+    int  chordLaneOctave { 0 };   // playback/audition octave shift for the chord lane
     std::vector<BusState> buses;
     std::vector<TrackState::InsertFx> masterInserts;
+    mutable juce::CriticalSection audioEditLock;
     int nextGroupId { 0 };   // monotonic allocator for folder groupIds
 
     // Per-track output routing: -1 = master (default), >=0 = aux bus index.

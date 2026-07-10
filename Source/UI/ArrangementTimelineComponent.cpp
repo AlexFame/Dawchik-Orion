@@ -1,6 +1,8 @@
 #include "ArrangementTimelineComponent.h"
 
 #include "OrionTheme.h"
+#include "../Audio/ChordDetector.h"
+#include "../Audio/StemSeparator.h"
 #include "../Audio/WarpEngine.h"
 
 #include <algorithm>
@@ -22,6 +24,76 @@ juce::AudioFormatManager& getSharedWaveformFormatManager()
     std::call_once(flag, [&]() { manager.registerBasicFormats(); });
     return manager;
 }
+
+// Popover to choose which stems to extract (like Logic's Stem Splitter). Fires `onSeparate` with the
+// selected stem names (Demucs computes all 6 in one pass; we only lay out the chosen ones).
+class StemPickerCallout final : public juce::Component
+{
+public:
+    explicit StemPickerCallout(std::function<void(std::vector<juce::String>)> onSeparate)
+        : go(std::move(onSeparate))
+    {
+        static const std::array<std::pair<const char*, const char*>, 6> items {{
+            { "Vocals", "vocals" }, { "Drums", "drums" }, { "Bass", "bass" },
+            { "Guitar", "guitar" }, { "Piano", "piano" }, { "Other", "other" } }};
+
+        title.setText("Separate stems", juce::dontSendNotification);
+        title.setFont(juce::Font(14.0f, juce::Font::bold));
+        title.setColour(juce::Label::textColourId, orion::theme::text::primary);
+        addAndMakeVisible(title);
+
+        for (const auto& it : items)
+        {
+            auto* t = toggles.add(new juce::ToggleButton(it.first));
+            t->setToggleState(true, juce::dontSendNotification);
+            t->setColour(juce::ToggleButton::textColourId, orion::theme::text::primary);
+            addAndMakeVisible(t);
+            names.add(it.second);
+        }
+
+        separateBtn.setButtonText("Separate");
+        separateBtn.onClick = [this]
+        {
+            std::vector<juce::String> sel;
+            for (int i = 0; i < toggles.size(); ++i)
+                if (toggles[i]->getToggleState()) sel.push_back(names[i]);
+            auto cb = go;                                  // copy before dismiss deletes us
+            if (auto* box = findParentComponentOfClass<juce::CallOutBox>()) box->dismiss();
+            if (! sel.empty() && cb) cb(sel);
+        };
+        cancelBtn.setButtonText("Cancel");
+        cancelBtn.onClick = [this] { if (auto* box = findParentComponentOfClass<juce::CallOutBox>()) box->dismiss(); };
+        addAndMakeVisible(separateBtn);
+        addAndMakeVisible(cancelBtn);
+
+        setSize(226, 22 + 6 * 28 + 16 + 34 + 24);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.setColour(orion::theme::surface::panel);
+        g.fillRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(14, 12);
+        title.setBounds(r.removeFromTop(22));
+        r.removeFromTop(6);
+        for (auto* t : toggles) t->setBounds(r.removeFromTop(28));
+        r.removeFromTop(10);
+        auto row = r.removeFromTop(30);
+        cancelBtn.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(3, 0));
+        separateBtn.setBounds(row.reduced(3, 0));
+    }
+
+private:
+    juce::Label title;
+    juce::OwnedArray<juce::ToggleButton> toggles;
+    juce::StringArray names;
+    juce::TextButton separateBtn, cancelBtn;
+    std::function<void(std::vector<juce::String>)> go;
+};
 
 const auto timelineBackground = juce::Colour(0xff18212a); // lighter DAW canvas: enough midtone for a calm, readable grid
 const auto barGridColour = juce::Colour(0xff647180);
@@ -50,6 +122,7 @@ constexpr auto maximumVerticalZoom = 2.26;
 constexpr auto editToolbarHeight = 34;
 constexpr auto timelineRulerHeight = 30;
 constexpr auto timelineTopChromeHeight = editToolbarHeight + timelineRulerHeight;
+constexpr auto chordLaneHeight = 46;   // arrangement chord lane, shown below the ruler when enabled
 constexpr auto editToolButtonCount = 9;
 constexpr auto loopLaneHeight = 11;
 constexpr auto loopHandleHitWidth = 8;
@@ -98,6 +171,25 @@ double choosePlaylistSubdivisionStep(double pixelsPerBeat, int beatsPerBar)
     return static_cast<double>(chooseGridStepBeats(pixelsPerBeat, beatsPerBar, 42.0));
 }
 
+double chooseStretchSnapStep(double pixelsPerBeat)
+{
+    // Live-style adaptive editing grid: retain fine resolution when it is readable,
+    // but make edge drags jump between distinct on-screen cells at wider zoom levels.
+    // A fixed 1/16-beat step looked like pixel-by-pixel crawling once the timeline
+    // was zoomed out.
+    static constexpr std::array<double, 8> steps {
+        1.0 / 32.0, 1.0 / 16.0, 1.0 / 8.0, 1.0 / 4.0,
+        1.0 / 2.0, 1.0, 2.0, 4.0
+    };
+
+    constexpr double minimumCellWidthPixels = 16.0;
+    for (const auto step : steps)
+        if (pixelsPerBeat * step >= minimumCellWidthPixels)
+            return step;
+
+    return steps.back();
+}
+
 juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
 {
     auto bounds = component.getLocalBounds();
@@ -105,10 +197,18 @@ juce::Rectangle<int> getTimelineContentBounds(const juce::Component& component)
     return bounds;
 }
 
+// Total top chrome (edit toolbar + ruler + optional chord lane). The chord lane, when shown, sits
+// between the ruler and the tracks, so every "tracks start" offset must account for it.
+int timelineTopChromeFor(const juce::Component& component)
+{
+    const auto* atc = dynamic_cast<const orion::ArrangementTimelineComponent*>(&component);
+    return timelineTopChromeHeight + (atc != nullptr && atc->isChordLaneShown() ? chordLaneHeight : 0);
+}
+
 juce::Rectangle<int> getVisibleTrackAreaBounds(const juce::Component& component)
 {
     auto bounds = getTimelineContentBounds(component);
-    bounds.removeFromTop(timelineTopChromeHeight);
+    bounds.removeFromTop(timelineTopChromeFor(component));
     return bounds.getIntersection(component.getLocalBounds());
 }
 
@@ -275,7 +375,9 @@ ArrangementTimelineComponent::ArrangementTimelineComponent(ProjectState& project
     trackVolumeInlineEditor.onReturnKey = [this] { commitTrackVolumeEditor(true); };
     trackVolumeInlineEditor.onEscapeKey = [this] { commitTrackVolumeEditor(false); };
     trackVolumeInlineEditor.onFocusLost = [this] { commitTrackVolumeEditor(true); };
-    startTimerHz(120);
+    // Mouse drags repaint on demand; 60 Hz is enough for transport/zoom animation and
+    // avoids waking the software renderer twice per display frame.
+    startTimerHz(60);
 }
 
 ArrangementTimelineComponent::~ArrangementTimelineComponent() = default;
@@ -344,7 +446,7 @@ bool ArrangementTimelineComponent::undo()
         return false;
 
     const auto beforeSig = instrumentLayoutSignature(project.getTracks());
-    redoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip });
+    redoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip, project.getChordTrack() });
     restoreSnapshot(undoStack.back());
     undoStack.pop_back();
     if (onInstrumentLayoutChangedByHistory && beforeSig != instrumentLayoutSignature(project.getTracks()))
@@ -359,7 +461,7 @@ bool ArrangementTimelineComponent::redo()
         return false;
 
     const auto beforeSig = instrumentLayoutSignature(project.getTracks());
-    undoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip });
+    undoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip, project.getChordTrack() });
     restoreSnapshot(redoStack.back());
     redoStack.pop_back();
     if (onInstrumentLayoutChangedByHistory && beforeSig != instrumentLayoutSignature(project.getTracks()))
@@ -558,6 +660,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     auto bounds = getTimelineContentBounds(*this);
     auto editToolbarArea = bounds.removeFromTop(editToolbarHeight);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
+    // Chord lane sits between the ruler and the tracks when enabled.
+    const bool chordLaneOn = project.isChordLaneVisible();
+    auto chordLaneArea = chordLaneOn ? bounds.removeFromTop(chordLaneHeight) : juce::Rectangle<int>();
     auto tracksArea = bounds;
     auto gridArea = tracksArea;
     gridArea.removeFromLeft(trackHeaderWidth);
@@ -591,6 +696,17 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.setColour(theme::text::primary.withAlpha(0.90f));
     g.drawLine(plus.getCentreX(), plus.getY(), plus.getCentreX(), plus.getBottom(), 2.0f);
     g.drawLine(plus.getX(), plus.getCentreY(), plus.getRight(), plus.getCentreY(), 2.0f);
+
+    // Chord-lane toggle, immediately left of the "+".
+    const auto chordBtn = getChordLaneToggleBounds().toFloat();
+    const bool chordOn = project.isChordLaneVisible();
+    g.setColour(chordOn ? theme::cool::cyan.withAlpha(0.85f) : theme::surface::primary.withAlpha(0.34f));
+    g.fillRoundedRectangle(chordBtn, 7.0f);
+    g.setColour(chordOn ? theme::cool::cyan : juce::Colours::white.withAlpha(0.18f));
+    g.drawRoundedRectangle(chordBtn.reduced(0.5f), 7.0f, 1.2f);
+    g.setColour(chordOn ? juce::Colours::black.withAlpha(0.9f) : theme::text::primary.withAlpha(0.9f));
+    g.setFont(juce::Font(13.0f, juce::Font::bold));
+    g.drawText("Ch", chordBtn, juce::Justification::centred);
 
     if (project.hasLoopRange())
     {
@@ -749,6 +865,13 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     g.restoreState();
 
     const auto& tracks = project.getTracks();
+    // Dragging a clip edge can generate mouse updates faster than a dense arrangement can redraw its
+    // per-pixel waveforms. We used to HIDE every waveform while trimming — which looked like all the
+    // audio content vanished the moment you touched a clip edge. Instead keep them visible (you need
+    // to see the wave to trim!) and just halve the column resolution during the drag.
+    const bool isClipEdgeDragging = dragState.has_value()
+        && (dragState->mode == DragMode::resizeLeft || dragState->mode == DragMode::resizeRight
+            || dragState->mode == DragMode::stretchLeft || dragState->mode == DragMode::stretchRight);
 
     g.saveState();
     g.reduceClipRegion(visibleTracksArea);
@@ -1014,6 +1137,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         {
             const auto clipIndex = static_cast<int>(&clip - tracks[trackArrayIndex].clips.data());
             const auto clipBoundsInt = getClipBounds(clip, trackIndex);
+            // The graphics clip rejects invisible pixels, but it does not stop the CPU work
+            // below: waveform aggregation used to still walk every column of clips that were
+            // entirely off-screen. Skip them before building gradients, paths or wave peaks.
+            if (! clipBoundsInt.intersects(visibleGridArea))
+                continue;
             const auto clipBounds = clipBoundsInt.toFloat();
             auto clipContentBounds = clipBoundsInt.reduced(0, 6);
             const auto shouldDrawLabel = clipBoundsInt.getWidth() > 36;
@@ -1120,10 +1248,21 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                                        bodyWidth,
                                        juce::roundToInt(visibleSourceBeats * pixelsPerBeat));
 
-                    for (int px = 0; px < waveformWidth; ++px)
+                    // Long clips can span thousands of pixels outside the viewport. Render only
+                    // the visible columns, while retaining the same source-to-screen mapping.
+                    const auto visibleWaveBounds = clipBodyBounds.getIntersection(visibleGridArea);
+                    const auto firstWavePixel = juce::jlimit(0, waveformWidth,
+                        visibleWaveBounds.getX() - bodyX);
+                    const auto lastWavePixel = juce::jlimit(firstWavePixel, waveformWidth,
+                        visibleWaveBounds.getRight() - bodyX);
+
+                    // Half-resolution columns while trimming: keeps the edge glued to the pointer on a
+                    // dense arrangement without hiding the waveform (each column is drawn twice as wide).
+                    const int step = isClipEdgeDragging ? 2 : 1;
+                    for (int px = firstWavePixel; px < lastWavePixel; px += step)
                     {
                         const auto bStart = static_cast<int>(bucketStart + static_cast<double>(px) * bucketSpan / waveformWidth);
-                        const auto bEnd   = static_cast<int>(bucketStart + static_cast<double>(px + 1) * bucketSpan / waveformWidth);
+                        const auto bEnd   = static_cast<int>(bucketStart + static_cast<double>(px + step) * bucketSpan / waveformWidth);
                         const auto safeEnd = juce::jmax(bStart + 1, bEnd);
 
                         float minVal = 0.0f, maxVal = 0.0f;
@@ -1137,9 +1276,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                         const auto top     = centerY + minVal * halfH;
                         const auto bottom  = centerY + maxVal * halfH;
                         if (bottom - top >= 0.5f)
-                            g.drawLine(x, top, x, bottom, 1.0f);
+                            g.drawLine(x, top, x, bottom, static_cast<float>(step));
                         else
-                            g.fillRect(x, centerY - 0.5f, 1.0f, 1.0f);
+                            g.fillRect(x, centerY - 0.5f, static_cast<float>(step), 1.0f);
                     }
                     g.restoreState();
                 }
@@ -1536,10 +1675,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto top = static_cast<float>(visibleGridArea.getY());
             const auto bottom = static_cast<float>(visibleGridArea.getBottom());
             const auto guideColour = isStretch ? theme::cool::cyan : theme::text::primary;
-            g.setColour(juce::Colours::black.withAlpha(0.45f));
-            g.drawLine(gx + 1.0f, top, gx + 1.0f, bottom, 2.6f);
-            g.setColour(guideColour.withAlpha(0.96f));
-            g.drawLine(gx, top, gx, bottom, 1.5f);
+            // During time-stretch the clip edge is already the direct snap indicator.
+            // Do not duplicate it with a full-height cyan guide; it reads as a delayed
+            // cursor and visually cuts through the entire arrangement.
+            if (! isStretch)
+            {
+                g.setColour(juce::Colours::black.withAlpha(0.45f));
+                g.drawLine(gx + 1.0f, top, gx + 1.0f, bottom, 2.6f);
+                g.setColour(guideColour.withAlpha(0.96f));
+                g.drawLine(gx, top, gx, bottom, 1.5f);
+            }
 
             // Length readout (bars.beats) so a precise stretch target is legible.
             const auto beatsPerBar = juce::jmax(1, project.getNumerator());
@@ -1736,7 +1881,475 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         }
     }
 
+    if (project.isChordLaneVisible())
+        drawChordLane(g);
+
+    // Alt-drag chord marquee: show the actual drag box (spanning tracks) for clear feedback.
+    if (chordMarqueeStart.has_value() && ! chordMarqueeRect.isEmpty())
+    {
+        g.setColour(theme::cool::cyan.withAlpha(0.10f));
+        g.fillRect(chordMarqueeRect);
+        g.setColour(theme::cool::cyan.withAlpha(0.55f));
+        g.drawRect(chordMarqueeRect, 1);
+    }
+
+    // Dragging the chord progression onto a track → highlight the drop target.
+    if (chordDragToTrack)
+    {
+        auto ghost = chordDropGhost;
+        if (! ghost.isEmpty())
+            ghost.removeFromLeft(trackHeaderWidth);
+        if (! ghost.isEmpty())
+        {
+            g.setColour(theme::cool::cyan.withAlpha(0.16f));
+            g.fillRoundedRectangle(ghost.toFloat(), 4.0f);
+            g.setColour(theme::cool::cyan.withAlpha(0.75f));
+            g.drawRoundedRectangle(ghost.toFloat().reduced(0.5f), 4.0f, 1.5f);
+            g.setColour(theme::cool::cyan);
+            g.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+            g.drawText("Drop: chords \xE2\x86\x92 MIDI", ghost.reduced(8, 4),
+                       juce::Justification::topLeft, false);
+        }
+    }
+
+    // Stem-separation status banner (long offline op) — centred near the top of the timeline.
+    if (stemRunning || stemStatus.isNotEmpty())
+    {
+        auto area = getTimelineContentBounds(*this);
+        juce::Rectangle<int> banner(area.getCentreX() - 170, area.getY() + 54, 340, 46);
+        g.setColour(theme::surface::panel.withAlpha(0.96f));
+        g.fillRoundedRectangle(banner.toFloat(), 8.0f);
+        g.setColour(theme::cool::cyan.withAlpha(0.55f));
+        g.drawRoundedRectangle(banner.toFloat().reduced(0.5f), 8.0f, 1.0f);
+
+        auto inner = banner.reduced(12, 8);
+        g.setColour(theme::text::primary);
+        g.setFont(juce::Font(12.0f, juce::Font::bold));
+        const auto label = stemRunning
+            ? ("Separating stems\xE2\x80\xA6 " + juce::String(juce::roundToInt(stemProgress * 100.0f)) + "%")
+            : stemStatus;
+        g.drawText(label, inner.removeFromTop(16), juce::Justification::centredLeft, true);
+
+        if (stemRunning)
+        {
+            inner.removeFromTop(4);
+            auto bar = inner.removeFromTop(6);
+            g.setColour(juce::Colours::white.withAlpha(0.12f));
+            g.fillRoundedRectangle(bar.toFloat(), 3.0f);
+            g.setColour(theme::cool::cyan);
+            g.fillRoundedRectangle(bar.withWidth(juce::jmax(2, juce::roundToInt(bar.getWidth() * stemProgress))).toFloat(), 3.0f);
+        }
+    }
+
     paintToolPalette(g);
+}
+
+//============================================================================ chord lane
+bool ArrangementTimelineComponent::isChordLaneShown() const noexcept
+{
+    return project.isChordLaneVisible();
+}
+
+void ArrangementTimelineComponent::setChordLaneShown(bool shown)
+{
+    if (project.isChordLaneVisible() == shown)
+        return;
+    project.setChordLaneVisible(shown);
+    if (! shown && arrChordSelector != nullptr)
+        arrChordSelector->setVisible(false);
+    resized();
+    repaint();
+}
+
+juce::Rectangle<int> ArrangementTimelineComponent::getChordLaneBounds() const noexcept
+{
+    if (! project.isChordLaneVisible())
+        return {};
+    auto bounds = getTimelineContentBounds(*this);
+    bounds.removeFromTop(editToolbarHeight);
+    bounds.removeFromTop(timelineRulerHeight);
+    return bounds.removeFromTop(chordLaneHeight);
+}
+
+juce::Rectangle<int> ArrangementTimelineComponent::getChordLaneGridArea() const noexcept
+{
+    auto lane = getChordLaneBounds();
+    lane.removeFromLeft(trackHeaderWidth);
+    return lane;
+}
+
+juce::Rectangle<int> ArrangementTimelineComponent::getChordOctaveUpBounds() const noexcept
+{
+    const auto lane = getChordLaneBounds();
+    if (lane.isEmpty()) return {};
+    const juce::Rectangle<int> box(lane.getX() + 108, lane.getY() + 5, 20, lane.getHeight() - 10);
+    return box.withHeight(box.getHeight() / 2);
+}
+
+juce::Rectangle<int> ArrangementTimelineComponent::getChordOctaveDownBounds() const noexcept
+{
+    const auto up = getChordOctaveUpBounds();
+    if (up.isEmpty()) return {};
+    return up.withY(up.getBottom());
+}
+
+int ArrangementTimelineComponent::chordEventAtPoint(juce::Point<int> position) const
+{
+    const auto grid = getChordLaneGridArea();
+    if (grid.isEmpty() || ! grid.contains(position))   // grid only — never the track-header gutter
+        return -1;
+    const auto& chords = project.getChordTrack();
+    for (int i = static_cast<int>(chords.size()) - 1; i >= 0; --i)
+    {
+        const auto x0 = beatToX(chords[static_cast<std::size_t>(i)].startBeat, grid);
+        const auto x1 = beatToX(chords[static_cast<std::size_t>(i)].startBeat
+                                    + chords[static_cast<std::size_t>(i)].lengthInBeats, grid);
+        if (position.x >= static_cast<int>(x0) && position.x <= static_cast<int>(x1))
+            return i;
+    }
+    return -1;
+}
+
+void ArrangementTimelineComponent::addChordAtBeat(double beat)
+{
+    const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    const auto snapped = juce::jmax(0.0, std::floor(snapBeatValue(beat) / beatsPerBar) * beatsPerBar);
+
+    const std::array<int, 7> pattern = project.isKeyMinor()
+        ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
+        : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
+    const auto tonic = orion::chords::diatonicTriads(project.getKeyRoot(), pattern)[0];
+
+    pushUndoSnapshot();
+    {
+        const juce::ScopedLock sl(project.getAudioEditLock());
+        project.getChordTrack().push_back(ChordEvent { snapped, beatsPerBar, tonic });
+    }
+    if (onChordLaneChanged) onChordLaneChanged();
+    if (onChordAudition)
+        onChordAudition(orion::chords::pitchesInKey(tonic, project.getKeyRoot(), pattern, 48 + project.getChordLaneOctave() * 12));
+    repaint();
+}
+
+void ArrangementTimelineComponent::openChordEditorFor(int index)
+{
+    auto& chords = project.getChordTrack();
+    if (index < 0 || index >= static_cast<int>(chords.size()))
+        return;
+    editingChordIndex = index;
+
+    const std::array<int, 7> pattern = project.isKeyMinor()
+        ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
+        : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
+    const juce::String keyName = juce::String(orion::chords::rootName(project.getKeyRoot()))
+                               + (project.isKeyMinor() ? " Minor" : " Major");
+
+    if (arrChordSelector == nullptr)
+    {
+        arrChordSelector = std::make_unique<ChordSelectorComponent>();
+        addChildComponent(*arrChordSelector);
+        arrChordSelector->onAudition = [this](const std::vector<int>& p) { if (onChordAudition) onChordAudition(p); };
+        arrChordSelector->onChordChanged = [this](const orion::chords::ChordSpec& s)
+        {
+            const juce::ScopedLock sl(project.getAudioEditLock());
+            auto& ct = project.getChordTrack();
+            if (editingChordIndex >= 0 && editingChordIndex < static_cast<int>(ct.size()))
+                ct[static_cast<std::size_t>(editingChordIndex)].spec = s;
+            if (onChordLaneChanged) onChordLaneChanged();
+            repaint();
+        };
+        arrChordSelector->onClose = [this] { if (arrChordSelector) arrChordSelector->setVisible(false); };
+    }
+
+    arrChordSelector->setProjectKey(project.getKeyRoot(), pattern, keyName);
+    arrChordSelector->setChord(chords[static_cast<std::size_t>(index)].spec, false);
+
+    const auto grid = getChordLaneGridArea();
+    const auto blockX = static_cast<int>(beatToX(chords[static_cast<std::size_t>(index)].startBeat, grid));
+    constexpr int w = 620, h = 400;
+    const int x = juce::jlimit(getLocalBounds().getX() + 8,
+                               juce::jmax(getLocalBounds().getX() + 8, getWidth() - w - 8), blockX);
+    const int y = juce::jmin(getChordLaneBounds().getBottom() + 6, getHeight() - h - 8);
+    arrChordSelector->setBounds(x, juce::jmax(8, y), w, h);
+    arrChordSelector->setVisible(true);
+    arrChordSelector->toFront(true);
+}
+
+void ArrangementTimelineComponent::updateChordMarqueeSelection()
+{
+    const auto grid = getChordLaneGridArea();
+    if (grid.isEmpty())
+        return;
+    const auto left  = chordMarqueeRect.getX();
+    const auto right = chordMarqueeRect.getRight();
+
+    selectedChords.clear();
+    const auto& chords = project.getChordTrack();
+    for (int i = 0; i < static_cast<int>(chords.size()); ++i)
+    {
+        // Horizontal overlap is enough (the lane is a single thin row) — forgiving to select a range.
+        const auto x0 = beatToX(chords[static_cast<std::size_t>(i)].startBeat, grid);
+        const auto x1 = beatToX(chords[static_cast<std::size_t>(i)].startBeat
+                                    + chords[static_cast<std::size_t>(i)].lengthInBeats, grid);
+        if (x1 >= static_cast<float>(left) && x0 <= static_cast<float>(right))
+            selectedChords.insert(i);
+    }
+}
+
+bool ArrangementTimelineComponent::duplicateSelectedChords()
+{
+    if (selectedChords.empty())
+        return false;
+
+    pushUndoSnapshot();
+    std::set<int> newSelection;
+    {
+        const juce::ScopedLock sl(project.getAudioEditLock());
+        auto& ct = project.getChordTrack();
+
+        // Duplicate the selected group directly after itself (extends the progression).
+        double minStart = std::numeric_limits<double>::max(), maxEnd = 0.0;
+        for (int i : selectedChords)
+            if (i >= 0 && i < static_cast<int>(ct.size()))
+            {
+                minStart = juce::jmin(minStart, ct[static_cast<std::size_t>(i)].startBeat);
+                maxEnd   = juce::jmax(maxEnd, ct[static_cast<std::size_t>(i)].startBeat + ct[static_cast<std::size_t>(i)].lengthInBeats);
+            }
+        const double shift = juce::jmax(0.0, maxEnd - minStart);
+
+        std::vector<ChordEvent> copies;
+        for (int i : selectedChords)
+            if (i >= 0 && i < static_cast<int>(ct.size()))
+            {
+                auto c = ct[static_cast<std::size_t>(i)];
+                c.startBeat += shift;
+                copies.push_back(c);
+            }
+        for (auto& c : copies)
+        {
+            ct.push_back(c);
+            newSelection.insert(static_cast<int>(ct.size()) - 1);
+        }
+    }
+    selectedChords = newSelection;
+    if (onChordLaneChanged) onChordLaneChanged();
+    repaint();
+    return true;
+}
+
+bool ArrangementTimelineComponent::deleteSelectedChords()
+{
+    if (selectedChords.empty())
+        return false;
+
+    pushUndoSnapshot();
+    {
+        const juce::ScopedLock sl(project.getAudioEditLock());
+        auto& ct = project.getChordTrack();
+        // Erase from the highest index down so earlier indices stay valid.
+        for (auto it = selectedChords.rbegin(); it != selectedChords.rend(); ++it)
+            if (*it >= 0 && *it < static_cast<int>(ct.size()))
+                ct.erase(ct.begin() + *it);
+    }
+    selectedChords.clear();
+    if (onChordLaneChanged) onChordLaneChanged();
+    repaint();
+    return true;
+}
+
+void ArrangementTimelineComponent::detectChordsForClip(const juce::File& file, double startBeat,
+                                                       int numBars, int keyRoot, bool keyMinor,
+                                                       double clipLengthBeats, double sampleStartRatio,
+                                                       double sourceLengthBeats)
+{
+    if (! file.existsAsFile())
+        return;
+
+    // Source→timeline transform, IDENTICAL to the waveform drawing: a full-file ratio r maps to
+    // beat = startBeat + (r - sampleStartRatio) * sourceLengthBeats. This is what makes chords land
+    // exactly under the sample. sourceLengthBeats defaults to the clip length when not supplied.
+    const double srcLenBeats = sourceLengthBeats > 0.0 ? sourceLengthBeats : clipLengthBeats;
+
+    const double beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    // detectedBars can be 0 right after a drop (deep analysis not done yet) — estimate from the
+    // clip length so chord detection still fires (this was the "chords don't always appear" bug).
+    if (numBars <= 0)
+        numBars = juce::jmax(1, static_cast<int>(std::round(clipLengthBeats / beatsPerBar)));
+
+    chordAnalysisRunning = true;   // drive the in-lane progress indicator
+    if (! project.isChordLaneVisible()) project.setChordLaneVisible(true);
+    resized();
+    repaint();
+
+    juce::Component::SafePointer<ArrangementTimelineComponent> safe(this);
+
+    juce::Thread::launch([safe, file, startBeat, numBars, keyRoot, keyMinor, beatsPerBar, clipLengthBeats, sampleStartRatio, srcLenBeats]
+    {
+        orion::chorddetect::Options opts;
+        opts.numBars = numBars;
+        opts.beatsPerBar = static_cast<int>(beatsPerBar);
+        opts.keyRoot = keyRoot;
+        opts.keyMinor = keyMinor;
+        opts.clipLengthBeats = clipLengthBeats;
+
+        // Primary: Chordino change points as source-file ratios → mapped with the WAVEFORM transform.
+        auto changes = orion::chorddetect::detectChordChanges(file, opts);
+        // Fallback (helper unavailable): native per-beat segments.
+        auto timedFallback = changes.empty() ? orion::chorddetect::detectTimedChords(file, opts)
+                                             : std::vector<orion::chorddetect::TimedChord>{};
+
+        juce::MessageManager::callAsync([safe, changes, timedFallback, startBeat, clipLengthBeats, sampleStartRatio, srcLenBeats]
+        {
+            if (safe == nullptr)
+                return;
+            safe->chordAnalysisRunning = false;   // analysis done → hide the progress indicator
+
+            std::vector<orion::chorddetect::TimedChord> timed = timedFallback;
+            if (! changes.empty())
+            {
+                // Same transform as the waveform: r → startBeat + (r - sampleStartRatio) * srcLenBeats.
+                const double clipEndRel = clipLengthBeats;   // relative to startBeat
+                const auto toRel = [&](double r) { return (r - sampleStartRatio) * srcLenBeats; };
+                for (std::size_t i = 0; i < changes.size(); ++i)
+                {
+                    double s = juce::jlimit(0.0, clipEndRel, toRel(changes[i].sourceRatio));
+                    double e = (i + 1 < changes.size()) ? juce::jlimit(0.0, clipEndRel, toRel(changes[i + 1].sourceRatio))
+                                                        : clipEndRel;
+                    if (e - s <= 1.0e-4) continue;
+                    timed.push_back({ s, e - s, changes[i].spec });
+                }
+            }
+            if (timed.empty())
+            {
+                safe->repaint();
+                return;
+            }
+
+            const juce::ScopedLock sl(safe->project.getAudioEditLock());
+            auto& ct = safe->project.getChordTrack();
+            for (const auto& t : timed)
+            {
+                ChordEvent ev;
+                ev.startBeat = startBeat + t.startBeat;
+                ev.lengthInBeats = t.lengthInBeats;
+                ev.spec = t.spec;
+                ct.push_back(ev);
+            }
+            safe->project.setChordLaneVisible(true);
+            if (safe->onChordLaneChanged) safe->onChordLaneChanged();
+            safe->resized();
+            safe->repaint();
+        });
+    });
+}
+
+void ArrangementTimelineComponent::drawChordLane(juce::Graphics& g)
+{
+    const auto lane = getChordLaneBounds();
+    const auto grid = getChordLaneGridArea();
+    if (lane.isEmpty())
+        return;
+
+    g.saveState();
+    g.reduceClipRegion(lane);
+
+    g.setColour(theme::surface::elevated.withAlpha(0.72f));
+    g.fillRect(lane);
+    g.setColour(juce::Colours::white.withAlpha(0.06f));
+    g.drawHorizontalLine(lane.getBottom() - 1, static_cast<float>(lane.getX()), static_cast<float>(lane.getRight()));
+
+    // Header gutter label.
+    auto label = lane.withWidth(trackHeaderWidth).reduced(10, 0);
+    g.setColour(theme::text::primary.withAlpha(0.6f));
+    g.setFont(juce::Font(11.0f, juce::Font::bold));
+    g.drawText("CHORDS", label, juce::Justification::centredLeft);
+
+    // Octave ▲▼ for chord playback/audition.
+    const auto up = getChordOctaveUpBounds();
+    const auto dn = getChordOctaveDownBounds();
+    const int oct = project.getChordLaneOctave();
+    auto drawArrow = [&](juce::Rectangle<int> r, bool pointUp)
+    {
+        g.setColour(theme::surface::elevated.withAlpha(0.9f));
+        g.fillRoundedRectangle(r.toFloat().reduced(1.0f), 3.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.8f));
+        juce::Path p;
+        const auto c = r.toFloat().reduced(6.0f, 4.0f);
+        if (pointUp) { p.startNewSubPath(c.getX(), c.getBottom()); p.lineTo(c.getCentreX(), c.getY()); p.lineTo(c.getRight(), c.getBottom()); }
+        else         { p.startNewSubPath(c.getX(), c.getY()); p.lineTo(c.getCentreX(), c.getBottom()); p.lineTo(c.getRight(), c.getY()); }
+        g.strokePath(p, juce::PathStrokeType(1.4f));
+    };
+    drawArrow(up, true);
+    drawArrow(dn, false);
+    g.setColour(theme::text::primary.withAlpha(oct == 0 ? 0.45f : 0.85f));
+    g.setFont(juce::Font(10.5f, juce::Font::bold));
+    g.drawText((oct > 0 ? "+" : "") + juce::String(oct), juce::Rectangle<int>(up.getRight() + 2, lane.getY(), 24, lane.getHeight()), juce::Justification::centredLeft);
+
+    // Clip the blocks to the grid so they never bleed left into the track-header gutter when scrolled.
+    g.reduceClipRegion(grid);
+    const auto& chords = project.getChordTrack();
+    for (int i = 0; i < static_cast<int>(chords.size()); ++i)
+    {
+        const auto& ev = chords[static_cast<std::size_t>(i)];
+        const auto x0 = beatToX(ev.startBeat, grid);
+        const auto x1 = beatToX(ev.startBeat + ev.lengthInBeats, grid);
+        if (x1 < grid.getX() - 2 || x0 > grid.getRight() + 2)
+            continue;
+        juce::Rectangle<float> block(x0 + 1.0f, lane.getY() + 2.0f,
+                                     juce::jmax(14.0f, x1 - x0 - 2.0f), lane.getHeight() - 4.0f);
+        const bool editing = i == editingChordIndex && arrChordSelector != nullptr && arrChordSelector->isVisible();
+        const bool selected = selectedChords.count(i) > 0;
+        g.setColour((editing ? theme::cool::cyan : theme::cool::aqua).withAlpha(selected ? 0.95f : 0.82f));
+        g.fillRoundedRectangle(block, 5.0f);
+        g.setColour(selected ? juce::Colours::white.withAlpha(0.95f) : juce::Colours::black.withAlpha(0.35f));
+        g.drawRoundedRectangle(block, 5.0f, selected ? 1.8f : 1.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.92f));
+        g.setFont(juce::Font(12.5f, juce::Font::bold));
+        g.drawText(orion::chords::chordName(ev.spec), block.toNearestInt().reduced(6, 0), juce::Justification::centredLeft);
+    }
+
+    // Marquee box (drawn across the lane's full height for a clear selection cue).
+    if (chordMarqueeStart.has_value() && ! chordMarqueeRect.isEmpty())
+    {
+        const auto box = juce::Rectangle<int>(chordMarqueeRect.getX(), lane.getY(),
+                                              chordMarqueeRect.getWidth(), lane.getHeight())
+                             .getIntersection(grid);
+        g.setColour(theme::cool::cyan.withAlpha(0.14f));
+        g.fillRect(box);
+        g.setColour(theme::cool::cyan.withAlpha(0.6f));
+        g.drawRect(box, 1);
+    }
+
+    // Indeterminate progress bar while a chord analysis is running.
+    if (chordAnalysisRunning && ! grid.isEmpty())
+    {
+        g.setColour(theme::surface::primary.withAlpha(0.82f));
+        g.fillRect(grid);
+
+        const int barH = 4;
+        auto track = grid.reduced(24, 0).withHeight(barH).withY(grid.getCentreY() + 6);
+        g.setColour(juce::Colours::white.withAlpha(0.10f));
+        g.fillRoundedRectangle(track.toFloat(), barH * 0.5f);
+
+        // Moving highlight segment (indeterminate — Chordino gives no percentage).
+        const double phase = (juce::Time::getMillisecondCounter() % 1100) / 1100.0;
+        const float segW = track.getWidth() * 0.28f;
+        const float travel = track.getWidth() + segW;
+        const float x = track.getX() - segW + static_cast<float>(phase) * travel;
+        juce::Rectangle<float> seg(x, (float) track.getY(), segW, (float) track.getHeight());
+        g.setColour(theme::cool::cyan);
+        g.saveState();
+        g.reduceClipRegion(track);
+        g.fillRoundedRectangle(seg, barH * 0.5f);
+        g.restoreState();
+
+        g.setColour(theme::text::primary.withAlpha(0.85f));
+        g.setFont(juce::Font(12.0f, juce::Font::bold));
+        g.drawText("Analyzing chords\xE2\x80\xA6", grid.reduced(24, 0).withHeight(16).withY(grid.getCentreY() - 16),
+                   juce::Justification::centredLeft, false);
+    }
+
+    g.restoreState();
 }
 
 juce::Rectangle<int> ArrangementTimelineComponent::getEditToolbarBounds() const noexcept
@@ -2207,6 +2820,29 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
     if (volumeEditorTrackIndex.has_value() && ! trackVolumeInlineEditor.getBounds().contains(event.getPosition()))
         commitTrackVolumeEditor(true);
 
+    // Clicking anything that isn't the chord lane deselects chords, so Backspace doesn't
+    // delete a lingering chord instead of the clicked clip/track.
+    if (! selectedChords.empty()
+        && ! (project.isChordLaneVisible() && getChordLaneGridArea().contains(event.getPosition()))
+        && ! event.mods.isAltDown())
+    {
+        selectedChords.clear();
+        repaint();
+    }
+
+    // Alt-drag ANYWHERE over the grid marquee-selects chords by time range — easier than aiming at
+    // the thin lane, and works right over the audio you're rearranging.
+    if (project.isChordLaneVisible() && event.mods.isAltDown()
+        && event.getPosition().x >= getChordLaneGridArea().getX())
+    {
+        if (! (event.mods.isCommandDown() || event.mods.isShiftDown()))
+            selectedChords.clear();
+        chordMarqueeStart = event.getPosition();
+        chordMarqueeRect = {};
+        repaint();
+        return;
+    }
+
     if (handleEditToolbarClick(event.getPosition()))
         return;
 
@@ -2245,12 +2881,145 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         }
     }
 
+    if (getChordLaneToggleBounds().contains(event.getPosition()))
+    {
+        setChordLaneShown(! project.isChordLaneVisible());
+        return;
+    }
+
+    // Chord lane octave ▲▼.
+    if (project.isChordLaneVisible() && getChordOctaveUpBounds().contains(event.getPosition()))
+    {
+        project.setChordLaneOctave(project.getChordLaneOctave() + 1);
+        repaint();
+        return;
+    }
+    if (project.isChordLaneVisible() && getChordOctaveDownBounds().contains(event.getPosition()))
+    {
+        project.setChordLaneOctave(project.getChordLaneOctave() - 1);
+        repaint();
+        return;
+    }
+
     if (getAddTrackButtonBounds().contains(event.getPosition()))
     {
         if (onAddTrackRequested)
             onAddTrackRequested();        // open the full Add Track dialog
         else
             showAddTrackMenu();           // fallback: inline popup
+        return;
+    }
+
+    // Right-click an audio clip → toggle "Follow chord lane" (live re-harmonisation).
+    if (event.mods.isPopupMenu())
+    {
+        if (const auto hit = hitTestClip(event.getPosition(), false); hit.has_value())
+        {
+            auto& tracks = project.getTracks();
+            if (hit->trackIndex < static_cast<int>(tracks.size()))
+            {
+                auto& clips = tracks[static_cast<std::size_t>(hit->trackIndex)].clips;
+                if (hit->clipIndex < static_cast<int>(clips.size()) && clips[static_cast<std::size_t>(hit->clipIndex)].type == ClipType::audio)
+                {
+                    const auto& clip = clips[static_cast<std::size_t>(hit->clipIndex)];
+                    const bool on = clip.followsChordLane;
+                    juce::PopupMenu menu;
+                    menu.addItem(2, "Analyze chords");   // Logic-style: (re)detect this loop's progression
+                    menu.addItem(3, "Separate stems (6)", orion::stems::isAvailable() && ! stemRunning, false);
+                    menu.addItem(1, "Follow chord lane (re-harmonise)", true, on);
+                    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this)
+                                           .withTargetScreenArea({ event.getScreenX(), event.getScreenY(), 1, 1 }),
+                                       [this, ti = hit->trackIndex, ci = hit->clipIndex](int r)
+                                       {
+                                           if (r != 1 && r != 2 && r != 3) return;
+                                           auto& t = project.getTracks();
+                                           if (ti >= static_cast<int>(t.size()) || ci >= static_cast<int>(t[static_cast<std::size_t>(ti)].clips.size()))
+                                               return;
+                                           if (r == 3)
+                                           {
+                                               // Pick which stems to extract (Logic-style), then run.
+                                               juce::Rectangle<int> anchor(getWidth() / 2 - 1, getHeight() / 2 - 1, 2, 2);
+                                               if (ci < static_cast<int>(t[static_cast<std::size_t>(ti)].clips.size()))
+                                                   anchor = getClipBounds(t[static_cast<std::size_t>(ti)].clips[static_cast<std::size_t>(ci)], ti);
+                                               auto content = std::make_unique<StemPickerCallout>(
+                                                   [this, ti, ci](std::vector<juce::String> sel) { separateStemsForClip(ti, ci, sel); });
+                                               juce::CallOutBox::launchAsynchronously(std::move(content), localAreaToGlobal(anchor), nullptr);
+                                               return;
+                                           }
+                                           auto& c = t[static_cast<std::size_t>(ti)].clips[static_cast<std::size_t>(ci)];
+                                           if (r == 1)
+                                           {
+                                               c.followsChordLane = ! c.followsChordLane;
+                                               if (! project.isChordLaneVisible()) project.setChordLaneVisible(true);
+                                               if (onChordLaneChanged) onChordLaneChanged();
+                                               repaint();
+                                           }
+                                           else   // r == 2: analyze this clip's chords → replace the lane
+                                           {
+                                               {
+                                                   const juce::ScopedLock sl(project.getAudioEditLock());
+                                                   project.getChordTrack().clear();
+                                               }
+                                               const double srcLen = c.warpTargetLengthInBeats > 0.0 ? c.warpTargetLengthInBeats
+                                                                                                     : c.lengthInBeats;
+                                               detectChordsForClip(juce::File(c.sourcePath), c.startBeat, c.detectedBars,
+                                                                   c.sourceKeyRoot, c.sourceKeyIsMinor, c.lengthInBeats,
+                                                                   c.sampleStartRatio, srcLen);
+                                           }
+                                       });
+                    return;
+                }
+            }
+        }
+    }
+
+    // Chord lane: click a block → select + audition (+ arm move); drag empty space → marquee-select.
+    if (project.isChordLaneVisible() && getChordLaneGridArea().contains(event.getPosition()))
+    {
+        const int idx = chordEventAtPoint(event.getPosition());
+        if (idx >= 0)
+        {
+            if (event.mods.isCommandDown() || event.mods.isShiftDown())
+            {
+                if (selectedChords.count(idx)) selectedChords.erase(idx);
+                else                           selectedChords.insert(idx);
+            }
+            else if (! selectedChords.count(idx))   // keep an existing multi-selection so you can drag the group
+            {
+                selectedChords = { idx };
+            }
+            setSingleSelection(std::nullopt);        // clicking a chord clears clip selection
+
+            // Arm a move of the current selection.
+            chordMoving = true;
+            chordMoveCaptured = false;
+            chordDragAnchorBeat = xToBeatPosition(event.getPosition().x);
+            chordDragOrig.clear();
+            const auto& ct = project.getChordTrack();
+            for (int i : selectedChords)
+                if (i >= 0 && i < static_cast<int>(ct.size()))
+                    chordDragOrig.emplace_back(i, ct[static_cast<std::size_t>(i)].startBeat);
+            if (idx >= 0 && idx < static_cast<int>(ct.size()))
+                chordDragHomeStart = ct[static_cast<std::size_t>(idx)].startBeat;
+
+            if (onChordAudition)
+            {
+                const std::array<int, 7> pattern = project.isKeyMinor()
+                    ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
+                    : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
+                onChordAudition(orion::chords::pitchesInKey(
+                    project.getChordTrack()[static_cast<std::size_t>(idx)].spec,
+                    project.getKeyRoot(), pattern, 48 + project.getChordLaneOctave() * 12));
+            }
+        }
+        else
+        {
+            if (! (event.mods.isCommandDown() || event.mods.isShiftDown()))
+                selectedChords.clear();
+            chordMarqueeStart = event.getPosition();
+            chordMarqueeRect = {};
+        }
+        repaint();
         return;
     }
 
@@ -2425,8 +3194,9 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
         }
         else if (trackHeaderHit->control == TrackHeaderControl::volume)
         {
+            // Arm a drag but DON'T jump the value on the initial click — a click near the left edge used
+            // to snap the volume to the bottom (-24). The value only changes once the user drags.
             trackVolumeDragState = TrackVolumeDragState { true, trackHeaderHit->trackIndex, trackHeaderHit->bounds };
-            updateTrackVolumeFromPoint(trackHeaderHit->trackIndex, trackHeaderHit->bounds, event.getPosition().x);
         }
         else if (trackHeaderHit->control == TrackHeaderControl::volumeValue)
         {
@@ -2617,6 +3387,87 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    // Move selected chords in time.
+    if (chordMoving)
+    {
+        // Dragging DOWN out of the lane → bake the whole progression into a MIDI clip on drop.
+        const int laneBottom = getChordLaneBounds().getBottom();
+        if (event.getPosition().y > laneBottom + 6)
+        {
+            if (! chordDragToTrack)
+            {
+                // Undo any incidental in-lane time move from the initial press.
+                const juce::ScopedLock sl(project.getAudioEditLock());
+                auto& ct = project.getChordTrack();
+                for (const auto& [i, orig] : chordDragOrig)
+                    if (i >= 0 && i < static_cast<int>(ct.size()))
+                        ct[static_cast<std::size_t>(i)].startBeat = orig;
+                chordDragToTrack = true;
+            }
+            chordDropTargetTrack = trackIndexFromY(event.getPosition().y);
+            chordDropGhost = chordDropTargetTrack >= 0 ? getTrackLaneBounds(chordDropTargetTrack)
+                                                       : juce::Rectangle<int>();
+            repaint();
+            return;
+        }
+        if (chordDragToTrack)   // came back up into the lane → resume normal in-time move
+        {
+            chordDragToTrack = false;
+            chordDropTargetTrack = -1;
+            chordDropGhost = {};
+        }
+
+        const auto delta = snapBeatValue(xToBeatPosition(event.getPosition().x) - chordDragAnchorBeat);
+        if (std::abs(delta) > 1.0e-6 || chordMoveCaptured)
+        {
+            if (! chordMoveCaptured) { pushUndoSnapshot(); chordMoveCaptured = true; }
+            const juce::ScopedLock sl(project.getAudioEditLock());
+            auto& ct = project.getChordTrack();
+
+            if (chordDragOrig.size() == 1)
+            {
+                // Live reorder: the dragged block floats under the cursor while a "hole" follows it;
+                // any block the cursor passes over slides into the hole (ghost preview, both directions).
+                const int dragged = chordDragOrig.front().first;
+                if (dragged >= 0 && dragged < static_cast<int>(ct.size()))
+                {
+                    const double origStart = chordDragOrig.front().second;
+                    const double len = ct[static_cast<std::size_t>(dragged)].lengthInBeats;
+                    ct[static_cast<std::size_t>(dragged)].startBeat = juce::jmax(0.0, origStart + delta);
+                    const double centre = ct[static_cast<std::size_t>(dragged)].startBeat + len * 0.5;
+                    for (int j = 0; j < static_cast<int>(ct.size()); ++j)
+                    {
+                        if (j == dragged) continue;
+                        const double js = ct[static_cast<std::size_t>(j)].startBeat;
+                        if (centre >= js && centre < js + ct[static_cast<std::size_t>(j)].lengthInBeats
+                            && std::abs(js - chordDragHomeStart) > 1.0e-6)
+                        {
+                            ct[static_cast<std::size_t>(j)].startBeat = chordDragHomeStart;
+                            chordDragHomeStart = js;
+                            break;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (const auto& [i, orig] : chordDragOrig)
+                    if (i >= 0 && i < static_cast<int>(ct.size()))
+                        ct[static_cast<std::size_t>(i)].startBeat = juce::jmax(0.0, orig + delta);
+            }
+            repaint();
+        }
+        return;
+    }
+    // Marquee-select chords on the lane.
+    if (chordMarqueeStart.has_value())
+    {
+        chordMarqueeRect = juce::Rectangle<int>(*chordMarqueeStart, event.getPosition());
+        updateChordMarqueeSelection();
+        repaint();
+        return;
+    }
+
     if (clipGainDragState.active)
     {
         auto& tracks = project.getTracks();
@@ -2738,19 +3589,30 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     if (dragState->mode == DragMode::move)
     {
         // Only move to another track after a deliberate drag — a plain click (with a few
-        // pixels of jitter) must never teleport the clip to a neighbouring lane.
+        // pixels of jitter) must never teleport the clip to a neighbouring lane. Group drags and
+        // Alt-drag copies move too: every clip shifts by the same lane delta as the grabbed one.
         const auto draggedFarEnough = event.getDistanceFromDragStart() > 5;
         const auto hoveredTrackIndex = trackIndexFromY(event.getPosition().y);
-        if (draggedFarEnough && dragState->clipItems.size() <= 1
-            && hoveredTrackIndex >= 0 && hoveredTrackIndex != dragState->clip.trackIndex)
-        {
-            moveSelectedClipToTrack(hoveredTrackIndex);
-        }
+        if (draggedFarEnough && hoveredTrackIndex >= 0 && hoveredTrackIndex != dragState->clip.trackIndex)
+            moveDraggedClipsByTrackDelta(hoveredTrackIndex - dragState->clip.trackIndex);
     }
 
     auto& tracks = project.getTracks();
     auto& clip = tracks[static_cast<std::size_t>(dragState->clip.trackIndex)].clips[static_cast<std::size_t>(dragState->clip.clipIndex)];
+    const auto clipBoundsBeforeEdit = getClipBounds(clip, dragState->clip.trackIndex);
+    const auto repaintEditedClip = [&]
+    {
+        const auto clipBoundsAfterEdit = getClipBounds(clip, dragState->clip.trackIndex);
+        repaint(clipBoundsBeforeEdit.getUnion(clipBoundsAfterEdit).expanded(14, 12)
+                    .getIntersection(getLocalBounds()));
+    };
     const auto beatDelta = snapBeatValue(xToBeatDelta(event.getDistanceFromDragStartX()));
+    // Edge edits should lock the edge directly to the cursor's snapped grid position.
+    // Using a delta from the grab point made an edge picked up inside its hit area lag
+    // behind the pointer by up to one grid step, which felt noticeably unlike Warp.
+    const auto stretchSnapStep = chooseStretchSnapStep(pixelsPerBeat);
+    const auto snappedStretchCursorBeat = std::round(xToBeatPosition(event.getPosition().x) / stretchSnapStep)
+        * stretchSnapStep;
 
     if (dragState->mode == DragMode::fadeIn)
     {
@@ -2770,7 +3632,7 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
         clip.fadeOutBeats = juce::jlimit(0.0,
                                          juce::jmax(0.0, clip.lengthInBeats - clip.fadeInBeats),
                                          dragState->originalFadeOutBeats - rawDelta);
-        repaint();
+        repaintEditedClip();
         return;
     }
 
@@ -2788,7 +3650,7 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
             clip.fadeInCurve = curve;
         else
             clip.fadeOutCurve = curve;
-        repaint();
+        repaintEditedClip();
         return;
     }
 
@@ -2851,7 +3713,7 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
                 break;
         }
 
-        repaint();
+        repaintEditedClip();
         return;
     }
 
@@ -2892,7 +3754,8 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
         case DragMode::stretchRight: // time-stretch from right edge — sample fills new length
         {
             const auto maxLenTimeline = getTimelineEndBeats() - origStart;
-            const auto newLen = juce::jlimit(minLen, juce::jmax(minLen, maxLenTimeline), snapBeatValue(origLen + beatDelta));
+            const auto newLen = juce::jlimit(minLen, juce::jmax(minLen, maxLenTimeline),
+                                             snappedStretchCursorBeat - origStart);
             clip.lengthInBeats = newLen;
             clip.sampleStartRatio = trimStart0;
             clip.sampleEndRatio   = trimEnd0;
@@ -2901,7 +3764,7 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
         }
         case DragMode::stretchLeft: // time-stretch from left edge
         {
-            const auto newStart = juce::jlimit(0.0, origEnd - minLen, snapBeatValue(origStart + beatDelta));
+            const auto newStart = juce::jlimit(0.0, origEnd - minLen, snappedStretchCursorBeat);
             const auto newLen   = origEnd - newStart;
             clip.startBeat        = newStart;
             clip.lengthInBeats    = newLen;
@@ -2918,7 +3781,7 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     clip.fadeInBeats  = juce::jlimit(0.0, clip.lengthInBeats, clip.fadeInBeats);
     clip.fadeOutBeats = juce::jlimit(0.0, juce::jmax(0.0, clip.lengthInBeats - clip.fadeInBeats), clip.fadeOutBeats);
 
-    repaint();
+    repaintEditedClip();
 }
 
 void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
@@ -2941,7 +3804,7 @@ void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
     }
 
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(timelineTopChromeHeight);
+    bounds.removeFromTop(timelineTopChromeFor(*this));
     const auto tracksArea = bounds;
     const auto headerResizeX = tracksArea.getX() + trackHeaderWidth;
     if (tracksArea.contains(event.getPosition())
@@ -3010,6 +3873,49 @@ void ArrangementTimelineComponent::modifierKeysChanged(const juce::ModifierKeys&
 
 void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 {
+    if (chordMoving)
+    {
+        // Dropped below the lane → bake the progression into a MIDI clip on the target track.
+        if (chordDragToTrack)
+        {
+            const int target = chordDropTargetTrack;
+            chordMoving = false;
+            chordMoveCaptured = false;
+            chordDragOrig.clear();
+            chordDragToTrack = false;
+            chordDropTargetTrack = -1;
+            chordDropGhost = {};
+            bakeChordsToMidiClip(target);
+            return;
+        }
+
+        const bool moved = chordMoveCaptured;
+
+        // Settle the dragged block into the hole it opened up during the live reorder.
+        if (moved && chordDragOrig.size() == 1)
+        {
+            const juce::ScopedLock sl(project.getAudioEditLock());
+            auto& ct = project.getChordTrack();
+            const int dragged = chordDragOrig.front().first;
+            if (dragged >= 0 && dragged < static_cast<int>(ct.size()))
+                ct[static_cast<std::size_t>(dragged)].startBeat = juce::jmax(0.0, chordDragHomeStart);
+        }
+
+        chordMoving = false;
+        chordMoveCaptured = false;
+        chordDragOrig.clear();
+        if (moved && onChordLaneChanged) onChordLaneChanged();
+        repaint();
+        return;
+    }
+    if (chordMarqueeStart.has_value())
+    {
+        chordMarqueeStart.reset();
+        chordMarqueeRect = {};
+        repaint();
+        return;
+    }
+
     const auto clipGainHistoryCaptured = clipGainDragState.historyCaptured;
     const auto wasBoxSelecting = selectionBoxState.active;
 
@@ -3067,6 +3973,17 @@ void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& even
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto loopLane = rulerGridArea.removeFromTop(loopLaneHeight);
     const auto beatsPerBar = static_cast<double>(project.getNumerator());
+
+    // Chord lane: double-click a chord to edit it in the selector, or empty space to drop a tonic chord.
+    if (project.isChordLaneVisible() && getChordLaneGridArea().contains(event.getPosition()))
+    {
+        const int idx = chordEventAtPoint(event.getPosition());
+        if (idx >= 0)
+            openChordEditorFor(idx);
+        else
+            addChordAtBeat(xToBeatPosition(event.getPosition().x));
+        return;
+    }
 
     if (loopLane.contains(event.getPosition()))
     {
@@ -3181,6 +4098,11 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    if (! selectedChords.empty() && (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey))
+    {
+        return deleteSelectedChords();
+    }
+
     if (selectedClip.has_value() && (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey))
     {
         return deleteSelectedClips();
@@ -3192,6 +4114,11 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
     {
         deleteSelectedTracks();
         return true;
+    }
+
+    if (! selectedChords.empty() && key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0))
+    {
+        return duplicateSelectedChords();
     }
 
     if (selectedClip.has_value() && key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0))
@@ -3594,6 +4521,16 @@ juce::Rectangle<int> ArrangementTimelineComponent::getAddTrackButtonBounds() con
     return headerArea.removeFromRight(44).withSizeKeepingCentre(30, 30);
 }
 
+juce::Rectangle<int> ArrangementTimelineComponent::getChordLaneToggleBounds() const noexcept
+{
+    auto bounds = getTimelineContentBounds(*this);
+    bounds.removeFromTop(editToolbarHeight);
+    auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
+    auto headerArea = rulerArea.removeFromLeft(trackHeaderWidth);
+    headerArea.removeFromRight(44);   // skip the "+" add-track button
+    return headerArea.removeFromRight(40).withSizeKeepingCentre(30, 30);
+}
+
 void ArrangementTimelineComponent::showAddTrackMenu()
 {
     juce::PopupMenu menu;
@@ -3638,6 +4575,205 @@ void ArrangementTimelineComponent::createMidiClipAt(int trackIndex, double start
     });
 
     setSingleSelection(SelectedClip { trackIndex, static_cast<int>(track.clips.size()) - 1 });
+    repaint();
+}
+
+// Bake the whole chord-lane progression into one MIDI clip (Logic-style "drag chord track to a
+// MIDI track"). Preserves each chord's beat position/length; voices with the same key-aware
+// intervals used for audition, at the chord lane's octave. If the target isn't a MIDI track, a
+// fresh MIDI track is created for it.
+void ArrangementTimelineComponent::bakeChordsToMidiClip(int trackIndex)
+{
+    const auto& ct = project.getChordTrack();
+    if (ct.empty())
+        return;
+
+    auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())
+        || ! tracks[static_cast<std::size_t>(trackIndex)].isMidiTrack)
+    {
+        addMidiTrack();                                    // pushes its own undo snapshot
+        trackIndex = static_cast<int>(tracks.size()) - 1;
+    }
+    else
+    {
+        pushUndoSnapshot();
+    }
+
+    // Time span of the progression.
+    double minStart = ct.front().startBeat, maxEnd = 0.0;
+    for (const auto& ev : ct)
+    {
+        minStart = juce::jmin(minStart, ev.startBeat);
+        maxEnd   = juce::jmax(maxEnd, ev.startBeat + ev.lengthInBeats);
+    }
+    const double clipStart = juce::jmax(0.0, minStart);
+    const double clipLen   = juce::jmax(1.0, maxEnd - clipStart);
+
+    const std::array<int, 7> pattern = project.isKeyMinor()
+        ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
+        : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
+    const int base = 48 + project.getChordLaneOctave() * 12;
+
+    // Build raw per-chord note segments, then TIE consecutive segments of the same pitch that abut
+    // into one sustained note. Two chords that share a tone (very common in a progression) would
+    // otherwise place a note-off and a note-on on the same tick; some instruments drop the retrigger
+    // and the shared voice goes silent (only the changed tone sounds). Tying = correct voice-leading.
+    struct Seg { int pitch; double start; double end; };
+    std::vector<Seg> segs;
+    for (const auto& ev : ct)
+        for (int p : orion::chords::pitchesInKey(ev.spec, project.getKeyRoot(), pattern, base))
+            segs.push_back({ p, ev.startBeat, ev.startBeat + ev.lengthInBeats });
+
+    std::sort(segs.begin(), segs.end(), [](const Seg& a, const Seg& b)
+              { return a.pitch != b.pitch ? a.pitch < b.pitch : a.start < b.start; });
+
+    std::vector<MidiNote> notes;
+    for (const auto& s : segs)
+    {
+        if (! notes.empty())
+        {
+            auto& prev = notes.back();
+            const double prevEnd = clipStart + prev.startBeat + prev.lengthInBeats;
+            if (prev.pitch == s.pitch && s.start <= prevEnd + 1.0e-6)   // abutting/overlapping same pitch → tie
+            {
+                prev.lengthInBeats = juce::jmax(prev.lengthInBeats, (s.end - clipStart) - prev.startBeat);
+                continue;
+            }
+        }
+        notes.push_back(MidiNote { s.pitch, s.start - clipStart, s.end - s.start, 100 });
+    }
+
+    auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    TimelineClip clip;
+    clip.name          = "Chords";
+    clip.type          = ClipType::midi;
+    clip.startBeat     = clipStart;
+    clip.lengthInBeats = clipLen;
+    clip.colour        = track.colour;
+    clip.midiNotes     = std::move(notes);
+
+    {
+        const juce::ScopedLock sl(project.getAudioEditLock());
+        track.clips.push_back(std::move(clip));
+    }
+
+    setSingleSelection(SelectedClip { trackIndex, static_cast<int>(track.clips.size()) - 1 });
+    repaint();
+}
+
+// Kick off a background 6-stem separation of the clip's audio (Demucs, like Logic's Stem Splitter).
+// The heavy work runs off the message thread; a progress banner shows while it runs; on completion
+// applyStemResult lays the stems out as new tracks.
+void ArrangementTimelineComponent::separateStemsForClip(int trackIndex, int clipIndex, const std::vector<juce::String>& wantedStems)
+{
+    if (stemRunning || wantedStems.empty())
+        return;
+    auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+    auto& clips = tracks[static_cast<std::size_t>(trackIndex)].clips;
+    if (clipIndex < 0 || clipIndex >= static_cast<int>(clips.size()))
+        return;
+
+    const TimelineClip original = clips[static_cast<std::size_t>(clipIndex)];   // capture by value
+    const juce::File src(original.sourcePath);
+    if (! src.existsAsFile())
+        return;
+
+    // Persistent, writable output location (source folders may be read-only).
+    auto outDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                      .getChildFile("Orion").getChildFile("Stems")
+                      .getChildFile(src.getFileNameWithoutExtension() + "_" + juce::String(juce::Time::currentTimeMillis()));
+
+    stemRunning = true;
+    stemProgress = 0.0f;
+    stemStatus = "Separating stems\xE2\x80\xA6";
+    repaint();
+
+    const juce::StringArray wanted (wantedStems.data(), static_cast<int>(wantedStems.size()));
+    juce::Component::SafePointer<ArrangementTimelineComponent> safe(this);
+    juce::Thread::launch([safe, src, outDir, original, trackIndex, wanted]
+    {
+        auto res = orion::stems::separate(
+            src, outDir,
+            [safe](float p) { juce::MessageManager::callAsync([safe, p] { if (safe != nullptr) safe->stemProgress = p; }); },
+            [safe] { return safe == nullptr; });
+
+        juce::MessageManager::callAsync([safe, res, original, trackIndex, wanted]
+        {
+            if (safe == nullptr)
+                return;
+            safe->stemRunning = false;
+            if (! res.ok)
+            {
+                safe->stemStatus = "Stem split failed: " + res.error;
+                safe->repaint();
+                return;
+            }
+            // Keep only the stems the user selected.
+            auto filtered = res;
+            filtered.stems.erase(std::remove_if(filtered.stems.begin(), filtered.stems.end(),
+                                 [&](const orion::stems::Stem& s) { return ! wanted.contains(s.name); }),
+                                 filtered.stems.end());
+            if (filtered.stems.empty())
+            {
+                safe->stemStatus = {};
+                safe->repaint();
+                return;
+            }
+            safe->applyStemResult(filtered, original, trackIndex);
+        });
+    });
+}
+
+void ArrangementTimelineComponent::applyStemResult(const orion::stems::Result& res, const TimelineClip& original, int originalTrackIndex)
+{
+    if (res.stems.empty())
+        return;
+
+    pushUndoSnapshot();
+
+    {
+        auto& tracks = project.getTracks();
+        originalTrackIndex = juce::jlimit(0, static_cast<int>(tracks.size()) - 1, originalTrackIndex);
+        // Mute the original clip (still identify it by source + position; it may have moved index).
+        for (auto& c : tracks[static_cast<std::size_t>(originalTrackIndex)].clips)
+            if (c.sourcePath == original.sourcePath && std::abs(c.startBeat - original.startBeat) < 1.0e-6)
+                c.muted = true;
+    }
+
+    int insertAt = originalTrackIndex + 1;
+    for (const auto& stem : res.stems)
+    {
+        const auto title = stem.name.substring(0, 1).toUpperCase() + stem.name.substring(1);   // "Drums"
+        const int idx = insertTrackAt(insertAt, false, title, juce::Colour(), true);
+        if (idx < 0 || idx >= static_cast<int>(project.getTracks().size()))
+            continue;
+
+        auto& t = project.getTracks()[static_cast<std::size_t>(idx)];
+        // Mirror the original clip's timing/warp so stems line up EXACTLY under it; just swap the audio.
+        TimelineClip clip = original;
+        clip.name = title;
+        clip.sourcePath = stem.file.getFullPathName();
+        clip.colour = t.colour;
+        clip.muted = false;
+        clip.solo = false;
+        clip.followsChordLane = false;
+        clip.midiNotes.clear();
+        clip.pitchSlides.clear();
+        clip.signalAnalysisPending = false;
+        {
+            const juce::ScopedLock sl(project.getAudioEditLock());
+            t.clips.clear();
+            t.clips.push_back(clip);
+        }
+        insertAt = idx + 1;
+    }
+
+    stemStatus = {};
+    notifyClipSelectionChanged();
+    clampScrollOffsets();
     repaint();
 }
 
@@ -3846,13 +4982,14 @@ void ArrangementTimelineComponent::deleteSelectedTracks()
 void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(timelineTopChromeHeight);
+    bounds.removeFromTop(timelineTopChromeFor(*this));
 
     const auto visibleTracksArea = getVisibleTrackAreaBounds(*this);
     auto visibleGridArea = visibleTracksArea;
     visibleGridArea.removeFromLeft(trackHeaderWidth);
 
-    if (! visibleTracksArea.contains(event.getPosition()))
+    const bool overChordLane = getChordLaneBounds().contains(event.getPosition());
+    if (! visibleTracksArea.contains(event.getPosition()) && ! overChordLane)
         return;
 
     const auto nowMs = juce::Time::getMillisecondCounterHiRes();
@@ -3879,7 +5016,7 @@ void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event,
         return;
     }
 
-    if (isExplicitHorizontal && visibleGridArea.contains(event.getPosition()))
+    if (isExplicitHorizontal && (visibleGridArea.contains(event.getPosition()) || overChordLane))
     {
         const auto previousScrollX = scrollX;
         scrollX -= horizontalDelta * 600.0;
@@ -3905,11 +5042,14 @@ void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event,
 void ArrangementTimelineComponent::mouseMagnify(const juce::MouseEvent& event, float scaleFactor)
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto tracksArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    auto tracksArea = bounds.withTrimmedTop(timelineTopChromeFor(*this));
     auto headerArea = tracksArea.removeFromLeft(trackHeaderWidth);
     auto gridArea = tracksArea;
+    // The chord lane maps horizontally like the grid, so zooming over it should zoom time too.
+    const bool overGrid = gridArea.contains(event.getPosition())
+                       || getChordLaneGridArea().contains(event.getPosition());
 
-    if (! headerArea.contains(event.getPosition()) && ! gridArea.contains(event.getPosition()))
+    if (! headerArea.contains(event.getPosition()) && ! overGrid)
         return;
 
     const auto clampedScale = juce::jlimit(0.35, 2.85, static_cast<double>(scaleFactor));
@@ -3923,7 +5063,7 @@ void ArrangementTimelineComponent::mouseMagnify(const juce::MouseEvent& event, f
     const auto stableDelta = pendingMagnifyDelta;
     pendingMagnifyDelta = 0.0;
     const auto verticalDelta = headerArea.contains(event.getPosition()) ? stableDelta : 0.0;
-    const auto horizontalDelta = gridArea.contains(event.getPosition()) ? stableDelta : 0.0;
+    const auto horizontalDelta = overGrid ? stableDelta : 0.0;
     adjustZoom(horizontalDelta, verticalDelta, event.getPosition());
 }
 
@@ -3985,7 +5125,7 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     if (targetTrackIndex < 0)
     {
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(timelineTopChromeHeight);
+        tracksBounds.removeFromTop(timelineTopChromeFor(*this));
         if (tracksBounds.contains(tracksBounds.getX() + 1, dragSourceDetails.localPosition.y))
         {
             targetTrackIndex = static_cast<int>(project.getTracks().size());
@@ -4120,6 +5260,9 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
         droppedClip.keyShiftEnabled = getPayloadBool("keyShiftEnabled", droppedClip.keyShiftEnabled);
     }
 
+    if (autoWarp && autoDetectChordsOnImport)
+        detectChordsForClip(sourceFile, startBeat, analysis.detectedBars, analysis.sourceKeyRoot, analysis.sourceKeyIsMinor, lengthBeats);
+
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(targetTrack.clips.size()) - 1 });
 
     clearBrowserDropPreview();
@@ -4173,6 +5316,9 @@ int ArrangementTimelineComponent::addAudioClipToTrack(const juce::File& file, in
     auto& clip = targetTrack.clips.back();
     clip.signalAnalysisPending = analysis.needsSignalAnalysis;
     clip.gainNormalizationPending = false;
+
+    if (autoWarp && autoDetectChordsOnImport)
+        detectChordsForClip(file, clampedStart, analysis.detectedBars, analysis.sourceKeyRoot, analysis.sourceKeyIsMinor, lengthBeats);
 
     ensureBeatVisible(clip.startBeat + clip.lengthInBeats);
     repaint();
@@ -4432,6 +5578,9 @@ bool ArrangementTimelineComponent::importAudioFileAt(const juce::File& file,
     droppedClip.signalAnalysisPending = analysis.needsSignalAnalysis;
     droppedClip.gainNormalizationPending = false;
 
+    if (autoWarp && autoDetectChordsOnImport)
+        detectChordsForClip(file, startBeat, analysis.detectedBars, analysis.sourceKeyRoot, analysis.sourceKeyIsMinor, lengthBeats);
+
     setSingleSelection(SelectedClip { targetTrackIndex, static_cast<int>(targetTrack.clips.size()) - 1 });
     ensureBeatVisible(droppedClip.startBeat + droppedClip.lengthInBeats);
     repaint();
@@ -4448,7 +5597,7 @@ void ArrangementTimelineComponent::ensureBeatVisible(double endBeat)
 void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double verticalDelta, std::optional<juce::Point<int>> focusPoint)
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto tracksArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    auto tracksArea = bounds.withTrimmedTop(timelineTopChromeFor(*this));
     auto gridArea = tracksArea;
     gridArea.removeFromLeft(trackHeaderWidth);
 
@@ -4466,29 +5615,42 @@ void ArrangementTimelineComponent::adjustZoom(double horizontalDelta, double ver
     const auto focusBeat = oldPixelsPerBeat > 0.0 ? (scrollX + focusXInView) / oldPixelsPerBeat : 0.0;
     const auto oldTrackHeight = static_cast<double>(getTotalTrackHeight());
     const auto focusTrackRatio = oldTrackHeight > 0.0 ? (scrollY + focusYInView) / oldTrackHeight : 0.5;
-    if (std::abs(horizontalDelta) > 0.0001)
+    const bool zoomH = std::abs(horizontalDelta) > 0.0001;
+    const bool zoomV = std::abs(verticalDelta) > 0.0001;
+    if (! zoomH && ! zoomV)
+        return;
+
+    // Capture the focus for BOTH axes on any zoom. timerCallback recomputes scrollX AND scrollY every
+    // frame while animating, so if we only refreshed the zoomed axis the other one was recomputed from
+    // a STALE focus captured during some earlier zoom — which is what threw the view to the bottom of
+    // the track list when zooming horizontally. With both fresh, the non-zoomed axis is an identity
+    // (ratio * unchangedSize - offset == the current scroll) and therefore stays exactly put.
+    zoomFocusBeat       = focusBeat;
+    zoomFocusXInView    = focusXInView;
+    zoomFocusTrackRatio = focusTrackRatio;
+    zoomFocusYInView    = focusYInView;
+
+    if (zoomH)
     {
         timelineAutoFitActive = false;
         const auto zoomFactor = std::pow(1.2, horizontalDelta);
         targetPixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, targetPixelsPerBeat * zoomFactor);
-        zoomFocusBeat = focusBeat;
-        zoomFocusXInView = focusXInView;
-        zoomAnimating = true;
     }
-
-    if (std::abs(verticalDelta) > 0.0001)
+    if (zoomV)
     {
         const auto zoomFactor = std::pow(1.18, verticalDelta);
         targetVerticalZoom = juce::jlimit(minimumVerticalZoom, maximumVerticalZoom, targetVerticalZoom * zoomFactor);
-        zoomFocusTrackRatio = focusTrackRatio;
-        zoomFocusYInView = focusYInView;
-        zoomAnimating = true;
     }
+    zoomAnimating = true;
     // The eased application happens in timerCallback; nothing to apply instantly here.
 }
 
 void ArrangementTimelineComponent::timerCallback()
 {
+    if (chordAnalysisRunning)
+        repaint(getChordLaneBounds());   // animate the indeterminate progress bar
+    if (stemRunning)
+        repaint();                        // refresh the stem-separation progress banner
     // Ease the zoom toward its target while keeping the focus point pinned, so the playlist glides
     // instead of stepping. Scroll is recomputed each frame from the pinned focus beat / track ratio.
     if (zoomAnimating)
@@ -4540,7 +5702,14 @@ void ArrangementTimelineComponent::timerCallback()
         }
     }
 
-    repaint();
+    // Repaint only when the transport or an animation needs it. The playlist's render layers
+    // overlap (clips, waveform, meter headers and playhead), so this stays as one coherent frame.
+    const bool playing   = transport.isPlaying() || transport.isCountInActive();
+    if (playing) meterSettleFrames = 120;                 // keep meters live while playing
+    else if (meterSettleFrames > 0) --meterSettleFrames;  // ~1 s after stop → meters decay, then quiet
+    const bool animating = zoomAnimating || std::abs(browserAppendAnim - appendTarget) > 0.001f;
+    if (playing || animating || meterSettleFrames > 0)
+        repaint();
 }
 
 float ArrangementTimelineComponent::beatToX(double beat, juce::Rectangle<int> laneArea) const noexcept
@@ -4551,7 +5720,7 @@ float ArrangementTimelineComponent::beatToX(double beat, juce::Rectangle<int> la
 void ArrangementTimelineComponent::clampScrollOffsets()
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeFor(*this));
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     
     // Enforce the content-adaptive max-zoom-out floor here too, so the view fits the content on
@@ -4588,7 +5757,7 @@ void ArrangementTimelineComponent::zoomToFitContent()
 void ArrangementTimelineComponent::applyTimelineAutoFit()
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeFor(*this));
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto viewportW = static_cast<double>(juce::jmax(1, rulerGridArea.getWidth()));
 
@@ -4602,7 +5771,7 @@ void ArrangementTimelineComponent::applyTimelineAutoFit()
 double ArrangementTimelineComponent::minZoomPixelsPerBeat() const noexcept
 {
     auto bounds = getTimelineContentBounds(*this);
-    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeHeight);
+    auto rulerGridArea = bounds.withTrimmedTop(timelineTopChromeFor(*this));
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto viewportW = static_cast<double>(juce::jmax(1, rulerGridArea.getWidth()));
 
@@ -4746,7 +5915,7 @@ double ArrangementTimelineComponent::xToBeatDelta(int xDelta) const noexcept
 double ArrangementTimelineComponent::xToBeatPosition(int x) const noexcept
 {
     auto bounds = getTimelineContentBounds(*this);
-    bounds.removeFromTop(timelineTopChromeHeight);
+    bounds.removeFromTop(timelineTopChromeFor(*this));
     bounds.removeFromLeft(trackHeaderWidth);
 
     const auto localX = static_cast<double>(x - bounds.getX());
@@ -4816,6 +5985,74 @@ void ArrangementTimelineComponent::moveSelectedClipToTrack(int targetTrackIndex)
     if (! dragState->clipItems.empty())
         dragState->clipItems.front().clip = dragState->clip;
     setSingleSelection(dragState->clip);
+}
+
+void ArrangementTimelineComponent::moveDraggedClipsByTrackDelta(int deltaTracks)
+{
+    if (! dragState.has_value() || deltaTracks == 0 || dragState->clipItems.empty())
+        return;
+
+    auto& tracks = project.getTracks();
+    const int trackCount = static_cast<int>(tracks.size());
+
+    // Validate first: every dragged clip must land on an existing, type-compatible track.
+    for (const auto& item : dragState->clipItems)
+    {
+        const int src = item.clip.trackIndex;
+        const int dst = src + deltaTracks;
+        if (src < 0 || src >= trackCount || dst < 0 || dst >= trackCount)
+            return;
+        const auto& srcClips = tracks[static_cast<std::size_t>(src)].clips;
+        if (item.clip.clipIndex < 0 || item.clip.clipIndex >= static_cast<int>(srcClips.size()))
+            return;
+        if (! canClipLiveOnTrack(srcClips[static_cast<std::size_t>(item.clip.clipIndex)], dst))
+            return;
+    }
+
+    // Snapshot the movers (by value) BEFORE erasing, so indices stay meaningful.
+    struct Moving { TimelineClip clip; int targetTrack; };
+    std::vector<Moving> moving;
+    moving.reserve(dragState->clipItems.size());
+    for (const auto& item : dragState->clipItems)
+        moving.push_back({ tracks[static_cast<std::size_t>(item.clip.trackIndex)]
+                               .clips[static_cast<std::size_t>(item.clip.clipIndex)],
+                           item.clip.trackIndex + deltaTracks });
+
+    // Erase originals highest-index-first so earlier indices stay valid.
+    auto ordered = dragState->clipItems;
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b)
+    {
+        if (a.clip.trackIndex != b.clip.trackIndex) return a.clip.trackIndex > b.clip.trackIndex;
+        return a.clip.clipIndex > b.clip.clipIndex;
+    });
+
+    const juce::ScopedLock sl(project.getAudioEditLock());   // clips vectors reallocate — guard the audio thread
+    for (const auto& item : ordered)
+    {
+        auto& srcClips = tracks[static_cast<std::size_t>(item.clip.trackIndex)].clips;
+        srcClips.erase(srcClips.begin() + item.clip.clipIndex);
+    }
+
+    std::vector<DragState::ClipItem> newItems;
+    std::vector<SelectedClip> newSelection;
+    newItems.reserve(moving.size());
+    newSelection.reserve(moving.size());
+    for (std::size_t i = 0; i < moving.size(); ++i)
+    {
+        auto& dstClips = tracks[static_cast<std::size_t>(moving[i].targetTrack)].clips;
+        dstClips.push_back(moving[i].clip);
+        const SelectedClip sc { moving[i].targetTrack, static_cast<int>(dstClips.size()) - 1 };
+        newItems.push_back(DragState::ClipItem { sc,
+                                                 dragState->clipItems[i].originalStartBeat,
+                                                 dragState->clipItems[i].originalLengthInBeats });
+        newSelection.push_back(sc);
+    }
+
+    dragState->clipItems = std::move(newItems);
+    dragState->clip = dragState->clipItems.front().clip;
+    selectedClips = std::move(newSelection);
+    selectedClip = selectedClips.back();
+    lastClickedClip = selectedClip;
 }
 
 std::vector<ArrangementTimelineComponent::SelectedClip>
@@ -5244,13 +6481,18 @@ void ArrangementTimelineComponent::splitSelectionAtFocusedBeat()
 
 void ArrangementTimelineComponent::pushUndoSnapshot()
 {
-    undoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip });
+    undoStack.push_back(TimelineSnapshot { project.getTracks(), selectedClip, project.getChordTrack() });
     redoStack.clear();
 }
 
 void ArrangementTimelineComponent::restoreSnapshot(const TimelineSnapshot& snapshot)
 {
-    project.getTracks() = snapshot.tracks;
+    {
+        const juce::ScopedLock sl(project.getAudioEditLock());
+        project.getTracks() = snapshot.tracks;
+        project.getChordTrack() = snapshot.chordTrack;
+    }
+    selectedChords.clear();
     selectedClip = snapshot.selectedClip;
     selectedClips.clear();
     if (selectedClip.has_value())
@@ -5450,7 +6692,7 @@ void ArrangementTimelineComponent::updateBrowserDropPreview(const juce::Point<in
     if (targetTrackIndex < 0)
     {
         auto tracksBounds = getTimelineContentBounds(*this);
-        tracksBounds.removeFromTop(timelineTopChromeHeight);
+        tracksBounds.removeFromTop(timelineTopChromeFor(*this));
         if (tracksBounds.contains(tracksBounds.getX() + 1, position.y))
         {
             targetTrackIndex = static_cast<int>(project.getTracks().size());

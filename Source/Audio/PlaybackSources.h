@@ -353,6 +353,62 @@ private:
     }
 };
 
+// Built-in polyphonic preview instrument for the chord lane (audition + future transport playback).
+// A soft sine+harmonic voice with click-free attack/release. Independent of any track instrument, so
+// chords are audible even in a project that has no MIDI/sampler track.
+struct ChordPreviewSound final : juce::SynthesiserSound
+{
+    bool appliesToNote(int) override { return true; }
+    bool appliesToChannel(int) override { return true; }
+};
+
+struct ChordPreviewVoice final : juce::SynthesiserVoice
+{
+    bool canPlaySound(juce::SynthesiserSound* s) override { return dynamic_cast<ChordPreviewSound*>(s) != nullptr; }
+
+    void startNote(int midiNote, float velocity, juce::SynthesiserSound*, int) override
+    {
+        phase = 0.0;
+        env = 0.0;
+        releasing = false;
+        level = 0.22f * juce::jlimit(0.05f, 1.0f, velocity);
+        const auto freq = juce::MidiMessage::getMidiNoteInHertz(midiNote);
+        angleDelta = juce::MathConstants<double>::twoPi * freq / getSampleRate();
+    }
+
+    void stopNote(float, bool allowTailOff) override
+    {
+        if (allowTailOff)
+            releasing = true;
+        else { clearCurrentNote(); angleDelta = 0.0; }
+    }
+
+    void pitchWheelMoved(int) override {}
+    void controllerMoved(int, int) override {}
+
+    void renderNextBlock(juce::AudioBuffer<float>& out, int start, int num) override
+    {
+        if (angleDelta == 0.0)
+            return;
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        while (--num >= 0)
+        {
+            env = releasing ? juce::jmax(0.0, env - 0.00045) : juce::jmin(1.0, env + 0.0016);
+            const auto s = static_cast<float>((std::sin(phase) * 0.7 + std::sin(phase * 2.0) * 0.14) * level * env);
+            for (int ch = 0; ch < out.getNumChannels(); ++ch)
+                out.addSample(ch, start, s);
+            phase += angleDelta;
+            if (phase > twoPi) phase -= twoPi;
+            ++start;
+            if (releasing && env <= 0.0) { clearCurrentNote(); angleDelta = 0.0; break; }
+        }
+    }
+
+    double phase { 0.0 }, angleDelta { 0.0 }, env { 0.0 };
+    float level { 0.0f };
+    bool releasing { false };
+};
+
 class ArrangementPlaybackSource final : public juce::AudioSource
 {
 public:
@@ -372,6 +428,69 @@ public:
                             return stretchBufferToLengthWithExperimentalBackend(source, outputSamples, sampleRate, sourcePath);
                         })
     {
+        chordPreviewSynth.addSound(new ChordPreviewSound());
+        for (int i = 0; i < 16; ++i)
+            chordPreviewSynth.addVoice(new ChordPreviewVoice());
+    }
+
+    // --- Chord-lane preview instrument (built-in synth; always audible) ---
+    void chordPreviewNoteOn(int midiNote, float velocity)  { chordPreviewSynth.noteOn(1, midiNote, velocity); }
+    void chordPreviewNoteOff(int midiNote)                 { chordPreviewSynth.noteOff(1, midiNote, 0.0f, true); }
+    void chordPreviewAllOff()                              { chordPreviewSynth.allNotesOff(1, true); }
+    // Bumped whenever the chord lane changes so cached re-harmonised renders invalidate.
+    void bumpChordGeneration() noexcept { ++chordGeneration; }
+    int chordGenerationValue() const noexcept { return chordGeneration.load(); }
+
+    // Play the chord lane along the transport: at `beat`, trigger the active chord through the
+    // built-in synth (once per chord, released on change/stop). Runs on the audio thread.
+    void updateChordPlayback(double beat, bool playing)
+    {
+        // Respect solo: the chord lane is a global aux, so if any track is soloed it stays silent.
+        bool anySolo = false;
+        for (const auto& t : project.getTracks())
+            if (t.solo) { anySolo = true; break; }
+
+        if (! playing || ! project.isChordLaneVisible() || anySolo)
+        {
+            if (activeChordIndex != -1) { releaseActiveChordPlayback(); activeChordIndex = -1; }
+            return;
+        }
+
+        // Never block the audio thread: if the chord list is being edited, keep the current chord.
+        const juce::ScopedTryLock stl(project.getAudioEditLock());
+        if (! stl.isLocked())
+            return;
+
+        const auto& chords = project.getChordTrack();
+        int idx = -1;
+        for (int i = 0; i < static_cast<int>(chords.size()); ++i)
+            if (beat >= chords[static_cast<std::size_t>(i)].startBeat - 1.0e-6
+                && beat <  chords[static_cast<std::size_t>(i)].startBeat + chords[static_cast<std::size_t>(i)].lengthInBeats - 1.0e-6)
+            { idx = i; break; }
+
+        if (idx == activeChordIndex)
+            return;
+
+        releaseActiveChordPlayback();
+        activeChordIndex = idx;
+        if (idx >= 0)
+        {
+            static const std::array<int, 7> majPat { { 0, 2, 4, 5, 7, 9, 11 } };
+            static const std::array<int, 7> minPat { { 0, 2, 3, 5, 7, 8, 10 } };
+            activeChordPitches = orion::chords::pitchesInKey(chords[static_cast<std::size_t>(idx)].spec,
+                                                             project.getKeyRoot(),
+                                                             project.isKeyMinor() ? minPat : majPat,
+                                                             48 + project.getChordLaneOctave() * 12);
+            for (int p : activeChordPitches)
+                chordPreviewSynth.noteOn(1, juce::jlimit(0, 127, p), 0.8f);
+        }
+    }
+
+    void releaseActiveChordPlayback()
+    {
+        for (int p : activeChordPitches)
+            chordPreviewSynth.noteOff(1, juce::jlimit(0, 127, p), 0.0f, true);
+        activeChordPitches.clear();
     }
 
     ~ArrangementPlaybackSource() override
@@ -383,6 +502,7 @@ public:
     {
         outputSampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
         preparedBlockSize = samplesPerBlockExpected > 0 ? samplesPerBlockExpected : 512;
+        chordPreviewSynth.setCurrentPlaybackSampleRate(outputSampleRate);
 
         // Pre-allocate the metering scratch buffer so the audio callback never reallocates.
         samplerMeterScratch.setSize(2, preparedBlockSize, false, false, true);
@@ -887,11 +1007,17 @@ public:
                 // Pre-build for warped clips AND for clips that only need a pitch
                 // shift (manual transpose / key-shift) — otherwise the realtime read
                 // (allowBuild=false) misses the cache and the clip goes silent.
-                if (! clip.warpEnabled && computeKeyShiftSemitones(clip) == 0)
+                const bool reharm = clip.followsChordLane && project.isChordLaneVisible();
+                if (! reharm && ! clip.warpEnabled && computeKeyShiftSemitones(clip) == 0)
                     continue;
 
                 if (const auto* originalAudioData = getAudioFileData(clip.sourcePath))
-                    juce::ignoreUnused(getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, true));
+                {
+                    if (reharm)
+                        juce::ignoreUnused(getReharmonizedAudioFileData(clip, *originalAudioData, beatsPerSecond, true));
+                    else
+                        juce::ignoreUnused(getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, true));
+                }
             }
         }
     }
@@ -922,6 +1048,7 @@ public:
 
         if (! transport.isPlaying())
         {
+            updateChordPlayback(0.0, false);   // release any sounding chord on stop
             const auto beatsPerSecondStopped = project.getTempoBpm() / 60.0;
 
             // Falling edge: start a short fade-out tail from the last playing position so the
@@ -952,7 +1079,7 @@ public:
                 currentTimelineBeat = transport.getPlayheadBeat();
             }
 
-            samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
+            samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);            chordPreviewSynth.renderNextBlock(*info.buffer, {}, info.startSample, info.numSamples);
             processInstruments(*info.buffer, info.startSample, info.numSamples,
                                currentTimelineBeat, beatsPerSecondStopped,
                                false, true, false);
@@ -970,7 +1097,7 @@ public:
         const auto loopSpanBeats = juce::jmax(1.0, loopEndBeat - loopStartBeat);
         if (! loopActive && project.getPlaybackEndInBeats() <= 0.0)
         {
-            samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
+            samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);            chordPreviewSynth.renderNextBlock(*info.buffer, {}, info.startSample, info.numSamples);
             processInstruments(*info.buffer, info.startSample, info.numSamples,
                                currentTimelineBeat, beatsPerSecond, false, true, false);
             return;
@@ -988,8 +1115,9 @@ public:
         }
 
         const auto beatAdvancePerSample = beatsPerSecond / outputSampleRate;
+        updateChordPlayback(currentTimelineBeat, true);
         renderAudioIntoBuffer(*info.buffer, info.startSample, info.numSamples, currentTimelineBeat, outputSampleRate, loopActive, ! loopActive, true);
-        samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);
+        samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);        chordPreviewSynth.renderNextBlock(*info.buffer, {}, info.startSample, info.numSamples);
 
         currentTimelineBeat += static_cast<double>(info.numSamples) * beatAdvancePerSample;
         while (loopActive && currentTimelineBeat >= loopEndBeat)
@@ -1007,6 +1135,11 @@ private:
     {
         juce::AudioBuffer<float> buffer;
         double sampleRate { 44100.0 };
+        juce::int64 lastUsedMs { 0 };   // for LRU eviction of the warp/re-harm cache
+        juce::int64 bytes() const noexcept
+        {
+            return static_cast<juce::int64>(buffer.getNumSamples()) * juce::jmax(1, buffer.getNumChannels()) * 4;
+        }
     };
 
 public:
@@ -1448,6 +1581,20 @@ private:
         if (beatsPerSecond <= 0.0 || renderSampleRate <= 0.0 || numSamples <= 0)
             return;
 
+        // Guard the clip note/slide vectors we're about to iterate. The realtime audio thread NEVER
+        // blocks — if the message thread is mid-edit it bails (one silent block) rather than read a
+        // vector that's being reallocated (that dangled a note reference and crashed). Offline render
+        // (export) blocks until the edit finishes so nothing is dropped.
+        struct AudioRenderLock
+        {
+            juce::CriticalSection& lock; bool locked = false;
+            AudioRenderLock(juce::CriticalSection& l, bool realtime) : lock(l)
+            { if (realtime) locked = lock.tryEnter(); else { lock.enter(); locked = true; } }
+            ~AudioRenderLock() { if (locked) lock.exit(); }
+        } renderLock(project.getAudioEditLock(), isRealtime);
+        if (! renderLock.locked)
+            return;
+
         std::vector<int> instrumentTracks;
         snapshotInstrumentTracks(instrumentTracks);
         const auto trackHasInstrument = [&instrumentTracks](int idx)
@@ -1640,7 +1787,13 @@ private:
                     // background producer publishes it — clean low end, same as the clip
                     // editor. Until it's ready we stream as an instant stand-in, so Play
                     // never waits and the audio swaps up seamlessly when the render lands.
-                    if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
+                    const bool reharm = clip.followsChordLane && project.isChordLaneVisible();
+                    if (const auto* rhData = reharm ? getReharmonizedAudioFileData(clip, *originalAudioData, beatsPerSecond, false) : nullptr)
+                    {
+                        audioData = rhData;
+                        resolved = true;
+                    }
+                    else if (const auto* warpedAudioData = getWarpedAudioFileData(clip, *originalAudioData, beatsPerSecond, false))
                     {
                         audioData = warpedAudioData;
                         resolved = true;
@@ -1916,7 +2069,10 @@ private:
         {
             const juce::ScopedLock sl(audioCacheLock);
             if (const auto it = audioCache.find(key); it != audioCache.end())
+            {
+                it->second->lastUsedMs = juce::Time::getMillisecondCounter();
                 return it->second.get();
+            }
         }
 
         juce::File file(path);
@@ -1934,9 +2090,14 @@ private:
 
         const juce::ScopedLock sl(audioCacheLock);
         if (const auto it = audioCache.find(key); it != audioCache.end())
+        {
+            it->second->lastUsedMs = juce::Time::getMillisecondCounter();
             return it->second.get();   // another thread won the race
+        }
         const auto* dataPtr = data.get();
+        data->lastUsedMs = juce::Time::getMillisecondCounter();
         audioCache.emplace(key, std::move(data));
+        trimAudioCache(key);
         return dataPtr;
     }
 
@@ -1946,7 +2107,10 @@ private:
     {
         const juce::ScopedLock sl(audioCacheLock);
         const auto it = audioCache.find(path.toStdString());
-        return it != audioCache.end() ? it->second.get() : nullptr;
+        if (it == audioCache.end())
+            return nullptr;
+        it->second->lastUsedMs = juce::Time::getMillisecondCounter();
+        return it->second.get();
     }
 
 public:
@@ -2015,8 +2179,26 @@ private:
         const auto targetSamples   = juce::jmax(1, static_cast<int>(std::round((warpLengthInBeats / beatsPerSecond) * originalData.sampleRate)));
         const auto semitonesShift  = computeKeyShiftSemitones(clip);
         const auto pitchScale      = std::pow(2.0, static_cast<double>(semitonesShift) / 12.0);
+
+        // Ableton-style warp markers → piecewise (variable-ratio) render. Hash the map into the cache
+        // key so editing markers yields a fresh entry (old linear/other-map entries stay valid).
+        const auto warpPts = warpPointsOutInForClip(clip.warpMarkers, warpLengthInBeats);
+        std::string warpTag;
+        if (! warpPts.empty())
+        {
+            juce::int64 h = 1469598103934665603LL;
+            for (const auto& p : warpPts)
+            {
+                const juce::int64 q = static_cast<juce::int64>(std::llround(p.first * 1.0e6)) * 1000003
+                                    + static_cast<juce::int64>(std::llround(p.second * 1.0e6));
+                h = (h ^ q) * 1099511628211LL;
+            }
+            warpTag = "|w" + std::to_string(h);
+        }
+
         const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples)
                        + "|p" + std::to_string(semitonesShift)
+                       + warpTag
                        + "|" + currentWarpBackendTag().toStdString();
 
         // The warp cache is read from the audio thread (allowBuild=false) and written from
@@ -2031,19 +2213,145 @@ private:
             if (! stl.isLocked())
                 return nullptr;   // a build is in progress — this block plays the fallback
             const auto it = warpedAudioCache.find(key);
-            return it != warpedAudioCache.end() ? it->second.get() : nullptr;
+            if (it == warpedAudioCache.end()) return nullptr;
+            it->second->lastUsedMs = juce::Time::getMillisecondCounter();   // mark playing → LRU won't evict it
+            return it->second.get();
         }
 
         const juce::ScopedLock sl(warpCacheLock);
         if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
+        {
+            it->second->lastUsedMs = juce::Time::getMillisecondCounter();
             return it->second.get();
+        }
 
         auto data = std::make_unique<AudioFileData>();
         data->sampleRate = originalData.sampleRate;
-        data->buffer = stretchBufferToLengthWithExperimentalBackend(originalData.buffer, targetSamples, originalData.sampleRate, clip.sourcePath, pitchScale);
+        data->buffer = warpPts.empty()
+            ? stretchBufferToLengthWithExperimentalBackend(originalData.buffer, targetSamples, originalData.sampleRate, clip.sourcePath, pitchScale)
+            : stretchBufferPiecewiseWarp(originalData.buffer, targetSamples, originalData.sampleRate, warpPts, pitchScale);
 
         const auto* dataPtr = data.get();
         warpedAudioCache.emplace(key, std::move(data));
+        retireStaleWarpVariants(clip.sourcePath.toStdString(), false, key);   // drop old warp variants for this clip
+        return dataPtr;
+    }
+
+    // Live re-harmonisation: render the clip warped to the grid but pitched PER BAR to follow the
+    // chord lane (root transpose per chord segment). Cached by a progression generation counter so
+    // the audio thread only compares a key; the (heavier) render runs on the build/message thread.
+    const AudioFileData* getReharmonizedAudioFileData(const TimelineClip& clip,
+                                                      const AudioFileData& originalData,
+                                                      double beatsPerSecond,
+                                                      bool allowBuild)
+    {
+        const auto warpLengthInBeats = clip.warpTargetLengthInBeats > 0.0 ? clip.warpTargetLengthInBeats : clip.lengthInBeats;
+        if (beatsPerSecond <= 0.0 || originalData.sampleRate <= 0.0 || warpLengthInBeats <= 0.0)
+            return nullptr;
+
+        const auto targetSamples = juce::jmax(1, static_cast<int>(std::round((warpLengthInBeats / beatsPerSecond) * originalData.sampleRate)));
+        const auto gen = chordGeneration.load();
+        const auto key = clip.sourcePath.toStdString() + "|" + std::to_string(targetSamples)
+                       + "|rh" + std::to_string(gen) + "t" + std::to_string(clip.transposeSemitones)
+                       + "k" + std::to_string(clip.sourceKeyRoot)
+                       + "|" + currentWarpBackendTag().toStdString();
+
+        if (! allowBuild)
+        {
+            const juce::ScopedTryLock stl(warpCacheLock);
+            if (! stl.isLocked())
+                return nullptr;
+            const auto it = warpedAudioCache.find(key);
+            if (it == warpedAudioCache.end()) return nullptr;
+            it->second->lastUsedMs = juce::Time::getMillisecondCounter();   // mark playing → LRU won't evict it
+            return it->second.get();
+        }
+
+        const juce::ScopedLock sl(warpCacheLock);
+        if (const auto it = warpedAudioCache.find(key); it != warpedAudioCache.end())
+        {
+            it->second->lastUsedMs = juce::Time::getMillisecondCounter();
+            return it->second.get();
+        }
+
+        const auto shortest = [](int d) { while (d > 6) d -= 12; while (d < -6) d += 12; return d; };
+        const int defaultShift = computeKeyShiftSemitones(clip);
+
+        // Base render at the default (whole-clip) shift; chord segments overwrite their span below.
+        auto data = std::make_unique<AudioFileData>();
+        data->sampleRate = originalData.sampleRate;
+        data->buffer = stretchBufferToLengthWithExperimentalBackend(
+            originalData.buffer, targetSamples, originalData.sampleRate, clip.sourcePath,
+            std::pow(2.0, static_cast<double>(defaultShift) / 12.0));
+
+        const int srcLen = originalData.buffer.getNumSamples();
+        const int channels = data->buffer.getNumChannels();
+        const double clipStart = clip.startBeat;
+        const double clipEnd = clip.startBeat + clip.lengthInBeats;
+
+        for (const auto& ev : project.getChordTrack())
+        {
+            const double s = juce::jmax(ev.startBeat, clipStart);
+            const double e = juce::jmin(ev.startBeat + ev.lengthInBeats, clipEnd);
+            if (e - s < 1.0e-4)
+                continue;
+
+            int shift = defaultShift;
+            if (clip.sourceKeyRoot >= 0)
+                shift = clip.transposeSemitones + shortest(ev.spec.rootPc - clip.sourceKeyRoot);
+            if (shift == defaultShift)
+                continue;   // same as base — nothing to overwrite
+
+            const double rb0 = (s - clipStart), rb1 = (e - clipStart);
+            const int o0 = juce::jlimit(0, targetSamples, static_cast<int>(std::round(rb0 / warpLengthInBeats * targetSamples)));
+            const int o1 = juce::jlimit(0, targetSamples, static_cast<int>(std::round(rb1 / warpLengthInBeats * targetSamples)));
+            const int s0 = juce::jlimit(0, srcLen, static_cast<int>(std::round(rb0 / warpLengthInBeats * srcLen)));
+            const int s1 = juce::jlimit(0, srcLen, static_cast<int>(std::round(rb1 / warpLengthInBeats * srcLen)));
+            if (o1 - o0 < 8 || s1 - s0 < 8)
+                continue;
+
+            juce::AudioBuffer<float> slice(originalData.buffer.getNumChannels(), s1 - s0);
+            for (int ch = 0; ch < slice.getNumChannels(); ++ch)
+                slice.copyFrom(ch, 0, originalData.buffer, ch, s0, s1 - s0);
+
+            auto seg = stretchBufferToLengthWithExperimentalBackend(
+                slice, o1 - o0, originalData.sampleRate, clip.sourcePath,
+                std::pow(2.0, static_cast<double>(shift) / 12.0));
+
+            const int n = juce::jmin(o1 - o0, seg.getNumSamples());
+            const int fade = juce::jmin(160, n / 4);   // edge fades so segment seams don't click
+            for (int ch = 0; ch < channels && ch < seg.getNumChannels(); ++ch)
+            {
+                data->buffer.copyFrom(ch, o0, seg, ch, 0, n);
+                for (int i = 0; i < fade; ++i)
+                {
+                    const float g = static_cast<float>(i) / static_cast<float>(fade);
+                    data->buffer.getWritePointer(ch)[o0 + i]         *= g;
+                    data->buffer.getWritePointer(ch)[o0 + n - 1 - i] *= g;
+                }
+            }
+        }
+
+        // De-click the very start/end of the whole clip (a re-pitched first bar can begin on a
+        // non-zero sample → an audible click at the clip's start).
+        {
+            const int edge = juce::jmin(96, data->buffer.getNumSamples() / 4);
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                auto* w = data->buffer.getWritePointer(ch);
+                const int last = data->buffer.getNumSamples() - 1;
+                for (int i = 0; i < edge; ++i)
+                {
+                    const float g = static_cast<float>(i) / static_cast<float>(edge);
+                    w[i]        *= g;
+                    w[last - i] *= g;
+                }
+            }
+        }
+
+        const auto* dataPtr = data.get();
+        warpedAudioCache.emplace(key, std::move(data));
+        retireStaleWarpVariants(clip.sourcePath.toStdString(), true, key);   // drop stale re-harm generations for this clip
         return dataPtr;
     }
 
@@ -2377,6 +2685,9 @@ private:
     TransportEngine& transport;
     juce::AudioFormatManager& audioFormatManager;
     SamplerEngine samplerEngine;
+    juce::Synthesiser chordPreviewSynth;   // built-in voice for chord-lane audition/playback
+    int activeChordIndex { -1 };           // chord event currently sounding during transport
+    std::vector<int> activeChordPitches;
     double outputSampleRate { 44100.0 };
     int preparedBlockSize { 512 };
     double currentTimelineBeat { 0.0 };
@@ -2391,7 +2702,92 @@ private:
     int declickTotal { 1 };
     std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
+    // Full decoded source files are also real memory (a few long stereo files quickly become GB).
+    // Keep them bounded and retire evicted buffers briefly, matching the warp-cache strategy: the
+    // audio thread may still hold a raw pointer for the current block after a cache lookup.
+    std::vector<std::pair<juce::int64, std::unique_ptr<AudioFileData>>> retiredAudio;
+
+    void trimAudioCache(const std::string& keepKey)
+    {
+        const juce::int64 now = juce::Time::getMillisecondCounter();
+        if (auto it = audioCache.find(keepKey); it != audioCache.end())
+            it->second->lastUsedMs = now;
+
+        constexpr juce::int64 kCapBytes = 768LL * 1024 * 1024;
+        juce::int64 total = 0;
+        for (const auto& [k, v] : audioCache) total += v->bytes();
+
+        while (total > kCapBytes && audioCache.size() > 1)
+        {
+            auto lru = audioCache.end();
+            for (auto it = audioCache.begin(); it != audioCache.end(); ++it)
+                if (it->first != keepKey
+                    && (lru == audioCache.end() || it->second->lastUsedMs < lru->second->lastUsedMs))
+                    lru = it;
+
+            if (lru == audioCache.end())
+                break;
+
+            total -= lru->second->bytes();
+            retiredAudio.emplace_back(now, std::move(lru->second));
+            audioCache.erase(lru);
+        }
+
+        retiredAudio.erase(std::remove_if(retiredAudio.begin(), retiredAudio.end(),
+                           [now](auto& e) { return now - e.first > 3000; }), retiredAudio.end());
+    }
+
+    // Superseded warp/re-harm renders, moved here instead of freed immediately: the audio thread may
+    // still hold a raw pointer to one for the current block, so we free them a few seconds later (an
+    // audio block is ~ms). Without this, every chord edit / warp-marker drag leaked a full audio buffer
+    // forever → the cache ballooned to many GB. Guarded by warpCacheLock.
+    std::vector<std::pair<juce::int64, std::unique_ptr<AudioFileData>>> retiredWarp;
+    // Keep at most one cached render per (clip, kind). Retire the rest (freed later by the note above).
+    void retireStaleWarpVariants(const std::string& sourcePath, bool reharm, const std::string& keepKey)
+    {
+        const juce::int64 now = juce::Time::getMillisecondCounter();
+        if (auto it = warpedAudioCache.find(keepKey); it != warpedAudioCache.end())
+            it->second->lastUsedMs = now;   // the just-built entry is the most recently used
+
+        // 1) Keep at most one render per (clip, kind) — retire superseded variants.
+        const auto prefix = sourcePath + "|";
+        for (auto it = warpedAudioCache.begin(); it != warpedAudioCache.end(); )
+        {
+            const auto& k = it->first;
+            const bool sameClip = k.rfind(prefix, 0) == 0;
+            const bool isReharm = k.find("|rh") != std::string::npos;
+            if (sameClip && isReharm == reharm && k != keepKey)
+            {
+                retiredWarp.emplace_back(now, std::move(it->second));
+                it = warpedAudioCache.erase(it);
+            }
+            else
+                ++it;
+        }
+
+        // 2) Hard total-size ceiling (LRU): the cache can NEVER exceed this, whatever the user does.
+        constexpr juce::int64 kCapBytes = 768LL * 1024 * 1024;
+        juce::int64 total = 0;
+        for (const auto& [k, v] : warpedAudioCache) total += v->bytes();
+        while (total > kCapBytes && warpedAudioCache.size() > 1)
+        {
+            auto lru = warpedAudioCache.end();
+            for (auto it = warpedAudioCache.begin(); it != warpedAudioCache.end(); ++it)
+                if (it->first != keepKey
+                    && (lru == warpedAudioCache.end() || it->second->lastUsedMs < lru->second->lastUsedMs))
+                    lru = it;
+            if (lru == warpedAudioCache.end()) break;
+            total -= lru->second->bytes();
+            retiredWarp.emplace_back(now, std::move(lru->second));
+            warpedAudioCache.erase(lru);
+        }
+
+        // Free anything retired long enough ago that no in-flight audio block can still reference it.
+        retiredWarp.erase(std::remove_if(retiredWarp.begin(), retiredWarp.end(),
+                          [now](auto& e) { return now - e.first > 3000; }), retiredWarp.end());
+    }
     juce::CriticalSection warpCacheLock;   // guards warpedAudioCache (audio vs message thread)
+    std::atomic<int> chordGeneration { 0 };   // invalidates re-harmonised renders on chord edits
     juce::CriticalSection audioCacheLock;  // guards audioCache (audio vs producer/message threads)
     // Background file decode so a big source (a 90 s clip decodes in ~1.5 s) never blocks the
     // audio or message thread — that block was why a long warped clip started late / silent.

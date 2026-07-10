@@ -5,10 +5,17 @@
 #include "../Core/ProjectState.h"
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace orion
 {
+struct ClipEditorWaveform
+{
+    std::vector<float> minValues;
+    std::vector<float> maxValues;
+};
+
 struct ClipEditorState
 {
     bool hasSelection { false };
@@ -39,8 +46,9 @@ struct ClipEditorState
     // True when previewSourceRatio is a position in warped OUTPUT time (clip-editor preview) rather than
     // a source ratio — the playhead is then drawn directly on the beat axis, not through the warp map.
     bool playheadIsBeatTime { false };
-    std::vector<float> waveformMin;
-    std::vector<float> waveformMax;
+    // Peaks are cached by source file in MainComponent. Sharing the immutable cache avoids
+    // copying thousands of values on every 60 Hz playhead update.
+    std::shared_ptr<const ClipEditorWaveform> waveform;
     bool warpEnabled { false };
     bool keyShiftEnabled { false };
     std::vector<WarpMarker> warpMarkers;

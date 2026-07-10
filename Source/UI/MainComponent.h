@@ -83,6 +83,14 @@ private:
     int  resolveArmedMidiTrack();
     void liveMidiNoteOn(int trackIndex, int midiNote, int velocity);
     void liveMidiNoteOff(int trackIndex, int midiNote);
+    // Chord-lane audition: play a chord through the selected (or first) instrument track, auto-released.
+    void auditionArrangementChord(const std::vector<int>& pitches);
+    void stopArrangementChordAudition();
+    std::vector<std::pair<int, int>> activeChordAuditionNotes;   // (trackIndex, pitch)
+    int chordAuditionGeneration { 0 };
+    std::atomic<bool> reharmRebuildRunning { false };   // coalesces background re-harmonise renders
+    std::atomic<bool> warpRebuildRunning { false };     // coalesces background warp-marker cache rebuilds
+    unsigned lastMenuStateHash { 0xFFFFFFFFu };         // skip per-tick menu-bar rebuilds when unchanged
     // Chord mode: expand a single played key into the diatonic chord for the project key
     // (or just {note} when chord mode / tonality is off). liveChordVoicing remembers each
     // held key's actual pitches so note-off releases the whole chord even if the mode was
@@ -210,7 +218,7 @@ private:
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
     std::map<std::pair<int, int>, std::unique_ptr<PluginEditorWindow>> insertEditorWindows;
-    std::map<std::string, std::pair<std::vector<float>, std::vector<float>>> clipEditorWaveformCache;
+    std::map<std::string, std::shared_ptr<const ClipEditorWaveform>> clipEditorWaveformCache;
     // Cache of fully-prepared (trimmed + pitch-shifted) clip-editor preview buffers,
     // keyed by source|startSample|numSamples|semitones|backend, so re-triggering or
     // returning to a previous pitch is instant instead of re-stretching every time.
@@ -308,6 +316,8 @@ private:
     juce::AudioFormatManager audioFormatManager;
     juce::AudioDeviceManager audioDeviceManager;
     juce::StringArray activeMidiInputDeviceIds;   // devices we've attached note callbacks to
+    // Directly-opened MIDI inputs (bypasses AudioDeviceManager, which wasn't delivering on macOS).
+    std::map<juce::String, std::unique_ptr<juce::MidiInput>> directMidiInputs;
     std::optional<double> globalSpacePreviewRestoreBeat;
     bool globalSpacePreviewWasRecordArmed { false };
     juce::StringArray seenMidiInputDeviceIds;     // devices auto-enabled once (plug-and-play)
@@ -450,6 +460,18 @@ private:
     bool isResizingBrowserPanel { false };
     int browserResizeStartX { 0 };
     int browserResizeStartWidth { 300 };
+    // A thin drag bar sitting ON TOP of the browser/timeline seam so the resize gesture is actually
+    // reachable (child components otherwise swallow the mouse before MainComponent sees it).
+    struct DragBar final : juce::Component
+    {
+        std::function<void(const juce::MouseEvent&)> onDown, onDrag, onUp;
+        void mouseDown(const juce::MouseEvent& e) override { if (onDown) onDown(e); }
+        void mouseDrag(const juce::MouseEvent& e) override { if (onDrag) onDrag(e); }
+        void mouseUp(const juce::MouseEvent& e) override   { if (onUp)   onUp(e); }
+        // Fully invisible — it only provides the resize cursor + drag gesture, no drawn line at all.
+        void paint(juce::Graphics&) override {}
+    };
+    DragBar browserResizeBar;
     double pluginScanProgress { 0.0 };
     bool pluginScanVisible { false };
     bool audioInputPermissionRequestInFlight { false };

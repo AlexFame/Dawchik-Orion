@@ -1334,6 +1334,82 @@ juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce
     return stretchBufferToLength(source, outputSamples, sampleRate);
 }
 
+juce::AudioBuffer<float> stretchBufferPiecewiseWarp(const juce::AudioBuffer<float>& source,
+                                                    int outputSamples,
+                                                    double sampleRate,
+                                                    const std::vector<std::pair<double, double>>& warpPointsOutIn,
+                                                    double pitchScale)
+{
+    // No markers → identical to the plain warp render (keeps behaviour byte-for-byte for un-marked clips).
+    if (warpPointsOutIn.size() < 2 || source.getNumSamples() <= 1 || outputSamples <= 0)
+        return stretchBufferToLengthWithExperimentalBackend(source, juce::jmax(1, outputSamples), sampleRate, {}, pitchScale);
+
+    const int channels     = juce::jlimit(1, 2, source.getNumChannels());
+    const int inputSamples  = source.getNumSamples();
+    const int totalOut      = juce::jmax(1, outputSamples);
+    const double sr         = sampleRate > 0.0 ? sampleRate : 44100.0;
+
+    // Piecewise-linear lookup: output ratio [0,1] -> source input ratio [0,1].
+    const auto inputRatioAt = [&](double o) -> double
+    {
+        o = juce::jlimit(0.0, 1.0, o);
+        for (std::size_t i = 1; i < warpPointsOutIn.size(); ++i)
+            if (o <= warpPointsOutIn[i].first)
+            {
+                const double span = juce::jmax(1.0e-9, warpPointsOutIn[i].first - warpPointsOutIn[i - 1].first);
+                const double t = (o - warpPointsOutIn[i - 1].first) / span;
+                return warpPointsOutIn[i - 1].second + t * (warpPointsOutIn[i].second - warpPointsOutIn[i - 1].second);
+            }
+        return warpPointsOutIn.back().second;
+    };
+
+    signalsmith::stretch::SignalsmithStretch<float> stretch;
+    stretch.presetDefault(channels, static_cast<float>(sr));
+    stretch.setTransposeFactor(static_cast<float>(juce::jlimit(0.25, 4.0, pitchScale)));
+
+    juce::AudioBuffer<float> out(channels, totalOut);
+    out.clear();
+
+    juce::AudioBuffer<float> scratch(channels, 8192);
+    const int scratchCap = scratch.getNumSamples();
+
+    double inputCursor = inputRatioAt(0.0) * inputSamples;
+    int produced = 0;
+    while (produced < totalOut)
+    {
+        const int probe = juce::jmin(totalOut, produced + 256);
+        const double localRatio = juce::jmax(1.0e-4,
+            (inputRatioAt(static_cast<double>(probe) / totalOut) - inputRatioAt(static_cast<double>(produced) / totalOut))
+                * inputSamples / juce::jmax(1, probe - produced));
+        const int outChunk = juce::jlimit(1, totalOut - produced,
+                                          juce::jmin(2048, static_cast<int>(scratchCap / juce::jmax(1.0, localRatio))));
+
+        const double inStart = inputCursor;
+        const double inEnd   = inputRatioAt(static_cast<double>(produced + outChunk) / totalOut) * inputSamples;
+        const int inChunk = juce::jlimit(1, scratchCap, static_cast<int>(std::llround(inEnd - inStart)));
+
+        for (int c = 0; c < channels; ++c)
+        {
+            auto* dst = scratch.getWritePointer(c);
+            const int sc = juce::jmin(c, source.getNumChannels() - 1);
+            for (int i = 0; i < inChunk; ++i)
+            {
+                const double idx = inStart + i;
+                const int i0 = static_cast<int>(idx);
+                const float a = (i0 >= 0 && i0 < inputSamples) ? source.getSample(sc, i0) : 0.0f;
+                const float b = (i0 + 1 >= 0 && i0 + 1 < inputSamples) ? source.getSample(sc, i0 + 1) : a;
+                dst[i] = a + static_cast<float>(idx - i0) * (b - a);
+            }
+        }
+        inputCursor = inEnd;
+        const float* inPtrs[2]  = { scratch.getReadPointer(0), channels > 1 ? scratch.getReadPointer(1) : nullptr };
+        float*       outPtrs[2] = { out.getWritePointer(0) + produced, channels > 1 ? out.getWritePointer(1) + produced : nullptr };
+        stretch.process(inPtrs, inChunk, outPtrs, outChunk);
+        produced += outChunk;
+    }
+    return out;
+}
+
 juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
                                                       double sourceBpm,
                                                       double projectTempoBpm,

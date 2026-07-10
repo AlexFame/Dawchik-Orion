@@ -12,7 +12,12 @@
 
 #include "../Audio/TransportEngine.h"
 #include "../Core/ProjectState.h"
+#include "ChordSelectorComponent.h"
 #include "OrionTheme.h"
+
+#include <memory>
+
+namespace orion::stems { struct Result; }   // stem-separation result (Audio/StemSeparator.h)
 
 namespace orion
 {
@@ -56,6 +61,15 @@ public:
     std::function<std::pair<float, float>(int)> onRequestTrackLevelStereo;
     // Returns the current live signal level in dB (-100 ≈ silent → "-inf").
     std::function<float(int)> onRequestTrackLevelDb;
+
+    // Arrangement chord lane (Fender-style). Host wires audition to a preview instrument.
+    bool isChordLaneShown() const noexcept;
+    void setChordLaneShown(bool shown);
+    bool duplicateSelectedChords();   // Cmd+D on selected chord blocks
+    std::function<void(const std::vector<int>&)> onChordAudition;
+    std::function<void()> onChordAuditionStop;
+    // Fired when the chord lane changes, so the host can re-render re-harmonised audio clips.
+    std::function<void()> onChordLaneChanged;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -312,6 +326,7 @@ private:
     {
         std::vector<TrackState> tracks;
         std::optional<SelectedClip> selectedClip;
+        std::vector<ChordEvent> chordTrack;
     };
 
     // Single source of truth for the track-header card sub-rectangles, so paint(),
@@ -337,6 +352,51 @@ private:
 
     void timerCallback() override;
     float beatToX(double beat, juce::Rectangle<int> laneArea) const noexcept;
+
+    // --- Chord lane ---
+    juce::Rectangle<int> getChordLaneBounds() const noexcept;   // strip below the ruler
+    juce::Rectangle<int> getChordLaneGridArea() const noexcept; // lane minus the track-header gutter
+    int chordEventAtPoint(juce::Point<int> position) const;     // index into chordTrack, or -1
+    void addChordAtBeat(double beat);
+    void openChordEditorFor(int index);
+    // Detect a chord progression from a dropped audio loop (background thread) and lay it on the lane.
+    void detectChordsForClip(const juce::File& file, double startBeat, int numBars, int keyRoot, bool keyMinor,
+                             double clipLengthBeats, double sampleStartRatio = 0.0, double sourceLengthBeats = 0.0);
+    void drawChordLane(juce::Graphics& g);
+    std::unique_ptr<ChordSelectorComponent> arrChordSelector;
+    int editingChordIndex { -1 };
+    std::set<int> selectedChords;          // chord-lane blocks selected for move/delete
+    bool deleteSelectedChords();
+    // Move: drag selected chord blocks in time. Marquee: rubber-band select a range on the lane.
+    bool chordMoving { false };
+    bool chordMoveCaptured { false };
+    double chordDragAnchorBeat { 0.0 };
+    double chordDragHomeStart { 0.0 };   // the "hole" the dragged block will drop into (live reorder)
+    std::vector<std::pair<int, double>> chordDragOrig;   // (index, original startBeat)
+    std::optional<juce::Point<int>> chordMarqueeStart;
+    juce::Rectangle<int> chordMarqueeRect;
+    void updateChordMarqueeSelection();
+    // Drag the whole chord progression DOWN out of the lane onto a track → bake it into a MIDI clip
+    // (Logic-style "chord track to MIDI"). Armed once a chord drag crosses below the lane.
+    bool chordDragToTrack { false };
+    int  chordDropTargetTrack { -1 };
+    juce::Rectangle<int> chordDropGhost;
+    void bakeChordsToMidiClip(int trackIndex);   // -1 → create a new MIDI track
+    // True while a background chord analysis is running → shows an indeterminate progress bar in the lane.
+    bool chordAnalysisRunning { false };
+    // Auto-analyze chords when an audio loop is dropped. OFF by user request — chords are created only
+    // via the explicit right-click "Analyze chords".
+    bool autoDetectChordsOnImport { false };
+
+    // --- Stem separation (Demucs, Logic-style Stem Splitter) --------------------------------------
+    void separateStemsForClip(int trackIndex, int clipIndex, const std::vector<juce::String>& wantedStems);
+    void applyStemResult(const orion::stems::Result& res, const TimelineClip& original, int originalTrackIndex);
+    bool  stemRunning { false };
+    float stemProgress { 0.0f };
+    juce::String stemStatus;
+    // Frames to keep repainting after playback stops so the header meters decay smoothly to zero,
+    // instead of freezing (the idle timer otherwise skips repaint to save CPU).
+    int meterSettleFrames { 0 };
     juce::Rectangle<int> getTrackLaneBounds(int trackIndex) const noexcept;
     juce::Rectangle<int> getClipGainHandleBounds(const TimelineClip& clip, int trackIndex) const noexcept;
     std::optional<SelectedClip> hitTestClip(juce::Point<int> position, bool midiOnly) const;
@@ -349,6 +409,10 @@ private:
     double snapClipCreationBeat(double beat) const noexcept;
     bool canClipLiveOnTrack(const TimelineClip& clip, int trackIndex) const noexcept;
     void moveSelectedClipToTrack(int targetTrackIndex);
+    // Shift every clip in the current drag by `deltaTracks` lanes, preserving their relative offsets.
+    // Works for a single clip, a multi-selection, and Alt-drag copies. No-op unless ALL of them can
+    // land on a compatible track (MIDI→MIDI, audio→audio) that exists.
+    void moveDraggedClipsByTrackDelta(int deltaTracks);
     // Keyboard relocation (Logic-style: no dragging). The clips to act on are the current
     // selection, or the last-clicked clip if a track header selection cleared it.
     std::vector<SelectedClip> clipsToRelocate() const;
@@ -424,6 +488,9 @@ private:
     void deleteSelectedTrack();
     void deleteSelectedTracks();   // remove every track selected via its header (Cmd/Shift-click)
     juce::Rectangle<int> getAddTrackButtonBounds() const noexcept;
+    juce::Rectangle<int> getChordLaneToggleBounds() const noexcept;
+    juce::Rectangle<int> getChordOctaveUpBounds() const noexcept;
+    juce::Rectangle<int> getChordOctaveDownBounds() const noexcept;
     juce::Rectangle<int> getTrackVolumeValueBounds(int trackIndex) const noexcept;
     void updateTrackVolumeFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x);
     void showTrackVolumeEditor(int trackIndex);

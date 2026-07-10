@@ -161,7 +161,28 @@ bool StepSequencerComponent::rowIsMelodic(int trackIndex) const
     return false;
 }
 
-void StepSequencerComponent::toggleStep(int trackIndex, int step)
+bool StepSequencerComponent::stepIsOn(int trackIndex, int step) const
+{
+    auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return false;
+
+    const int clipIndex = const_cast<StepSequencerComponent*>(this)->findPatternClip(trackIndex, false);
+    if (clipIndex < 0)
+        return false;
+
+    const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    const auto& clip = track.clips[static_cast<std::size_t>(clipIndex)];
+    const auto pitch = channelNotePitch(track);
+    const auto stepLen = stepLengthBeats();
+    const auto target = step * stepLen;
+    for (const auto& n : clip.midiNotes)
+        if (n.pitch == pitch && std::abs(n.startBeat - target) < stepLen * kBeatEpsilonFraction)
+            return true;
+    return false;
+}
+
+void StepSequencerComponent::setStep(int trackIndex, int step, bool on)
 {
     auto& tracks = project.getTracks();
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
@@ -177,11 +198,16 @@ void StepSequencerComponent::toggleStep(int trackIndex, int step)
     const auto stepLen = stepLengthBeats();
     const auto target = step * stepLen;
 
+    // Guard the note vector against the audio render thread reading it mid-reallocation.
+    const juce::ScopedLock audioLock(project.getAudioEditLock());
+
     for (auto it = clip.midiNotes.begin(); it != clip.midiNotes.end(); ++it)
     {
         if (it->pitch == pitch && std::abs(it->startBeat - target) < stepLen * kBeatEpsilonFraction)
         {
-            clip.midiNotes.erase(it);   // step was on → turn it off
+            if (on)
+                return;   // already on — nothing to do
+            clip.midiNotes.erase(it);
             if (onPatternEdited)
                 onPatternEdited();
             repaint();
@@ -189,12 +215,20 @@ void StepSequencerComponent::toggleStep(int trackIndex, int step)
         }
     }
 
+    if (! on)
+        return;   // already off — nothing to do
+
     clip.midiNotes.push_back(MidiNote { pitch, target, stepLen, 100 });
     if (clip.lengthInBeats < patternBeats() - 1.0e-4)
         clip.lengthInBeats = patternBeats();
     if (onPatternEdited)
         onPatternEdited();
     repaint();
+}
+
+void StepSequencerComponent::toggleStep(int trackIndex, int step)
+{
+    setStep(trackIndex, step, ! stepIsOn(trackIndex, step));
 }
 
 //==============================================================================
@@ -527,10 +561,49 @@ void StepSequencerComponent::mouseDown(const juce::MouseEvent& event)
             const int n = patternSteps();
             const double w = static_cast<double>(steps.getWidth()) / static_cast<double>(juce::jmax(1, n));
             const int step = juce::jlimit(0, n - 1, static_cast<int>((pos.x - steps.getX()) / w));
-            toggleStep(ti, step);
+
+            // Begin a paint stroke: the first step's new state becomes the value dragged across the row.
+            const bool nowOn = ! stepIsOn(ti, step);
+            stepPaintActive = true;
+            stepPaintValue = nowOn;
+            stepPaintTrack = ti;
+            stepPaintLastStep = step;
+            setStep(ti, step, nowOn);
         }
         return;
     }
+}
+
+void StepSequencerComponent::mouseDrag(const juce::MouseEvent& event)
+{
+    if (! stepPaintActive || stepPaintTrack < 0)
+        return;
+
+    // Paint across the row the stroke started on: map the pointer's x to a step and apply the
+    // stroke value to every new step it crosses.
+    for (int row = 0; row < static_cast<int>(channelTrackIndices.size()); ++row)
+    {
+        if (channelTrackIndices[static_cast<std::size_t>(row)] != stepPaintTrack)
+            continue;
+
+        const auto steps = stepsBounds(row);
+        const int n = patternSteps();
+        const double w = static_cast<double>(steps.getWidth()) / static_cast<double>(juce::jmax(1, n));
+        const int step = juce::jlimit(0, n - 1, static_cast<int>((event.getPosition().x - steps.getX()) / w));
+        if (step != stepPaintLastStep)
+        {
+            stepPaintLastStep = step;
+            setStep(stepPaintTrack, step, stepPaintValue);
+        }
+        break;
+    }
+}
+
+void StepSequencerComponent::mouseUp(const juce::MouseEvent&)
+{
+    stepPaintActive = false;
+    stepPaintTrack = -1;
+    stepPaintLastStep = -1;
 }
 
 void StepSequencerComponent::mouseMove(const juce::MouseEvent& event)
@@ -586,6 +659,7 @@ void StepSequencerComponent::timerCallback()
     if (transport.isPlaying())
     {
         const int s = currentPlayStep();
+        const int previousStep = lastPlayStep;
         if (s != lastPlayStep)
         {
             lastPlayStep = s;
@@ -594,11 +668,37 @@ void StepSequencerComponent::timerCallback()
             for (const int ti : channelTrackIndices)
                 if (stepActive(ti, s))
                     lastTriggerMsByTrack[ti] = now;
+
+            // The cursor only changes two cells per drum row. Melodic rows draw one
+            // continuous cursor line, so their step strip is still a small repaint.
+            for (int row = 0; row < static_cast<int>(channelTrackIndices.size()); ++row)
+            {
+                const auto trackIndex = channelTrackIndices[static_cast<std::size_t>(row)];
+                if (rowIsMelodic(trackIndex))
+                    repaint(stepsBounds(row));
+                else
+                {
+                    if (previousStep >= 0)
+                        repaint(stepCellBounds(row, previousStep).expanded(2, 2));
+                    repaint(stepCellBounds(row, s).expanded(2, 2));
+                }
+            }
         }
-        repaint();   // animate the cursor + decay the signal indicators
+
+        // Only active signal indicators need a decay redraw between step changes.
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        for (int row = 0; row < static_cast<int>(channelTrackIndices.size()); ++row)
+        {
+            const auto trackIndex = channelTrackIndices[static_cast<std::size_t>(row)];
+            if (const auto it = lastTriggerMsByTrack.find(trackIndex);
+                it != lastTriggerMsByTrack.end() && now - it->second < 220.0)
+                repaint(nameBounds(row));
+        }
     }
     else
     {
+        if (lastPlayStep >= 0)
+            repaint(gridArea());   // clear the final cursor frame once after Stop
         lastPlayStep = -1;
     }
 }
