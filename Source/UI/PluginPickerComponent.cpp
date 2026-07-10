@@ -170,22 +170,22 @@ void PluginPickerComponent::paint(juce::Graphics& g)
     // No background dim — floating panel only (soft shadow gives separation).
     const auto panel = getPanelBounds();
     g.setColour(juce::Colours::black.withAlpha(0.4f));
-    g.fillRoundedRectangle(panel.toFloat().translated(0.0f, 3.0f), 12.0f);
+    g.fillRoundedRectangle(panel.toFloat().translated(0.0f, 3.0f), theme::metrics::panelRadius);
     g.setColour(panelColour);
-    g.fillRoundedRectangle(panel.toFloat(), 12.0f);
+    g.fillRoundedRectangle(panel.toFloat(), theme::metrics::panelRadius);
     g.setColour(panelStroke);
-    g.drawRoundedRectangle(panel.toFloat(), 12.0f, 1.0f);
+    g.drawRoundedRectangle(panel.toFloat(), theme::metrics::panelRadius, 1.0f);
 
     auto inner = panel.reduced(pad);
     auto titleRow = inner.removeFromTop(30);
     g.setColour(textColour);
-    g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     g.drawText(titleText, titleRow, juce::Justification::centredLeft, false);
 
     // Close "x".
     const auto closeB = getCloseBounds();
     g.setColour(mutedText);
-    g.setFont(juce::FontOptions(20.0f));
+    g.setFont(juce::FontOptions(22.0f));
     g.drawText("x", closeB, juce::Justification::centred);
 
     // Footer.
@@ -197,13 +197,13 @@ void PluginPickerComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff262a30));
     g.fillRoundedRectangle(rescanB.toFloat(), 6.0f);
     g.setColour(cyan.withAlpha(0.9f));
-    g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
     g.drawText(isScanning ? "Scanning..." : "Rescan VST3", rescanB, juce::Justification::centred);
 
     if (filtered.empty())
     {
         g.setColour(mutedText);
-        g.setFont(juce::FontOptions(14.0f));
+    g.setFont(juce::FontOptions(16.0f));
         g.drawText(isScanning ? "Scanning plugins..."
                               : (allPlugins.isEmpty() ? "No plugins found — try Rescan." : "No matches."),
                    list.getBounds(), juce::Justification::centred, false);

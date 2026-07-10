@@ -15,6 +15,18 @@
 //  - Neutrals stay quiet behind the content.
 namespace orion::theme
 {
+// Shared geometry tokens. Components may use the small radius for indicators and the panel
+// radius for large containers, but should not invent one-off corner values.
+namespace metrics
+{
+constexpr int gridUnit = 4;
+constexpr int controlHeight = 28;
+constexpr int rowGap = gridUnit;
+constexpr float smallRadius = 3.0f;
+constexpr float controlRadius = 6.0f;
+constexpr float panelRadius = 8.0f;
+}  // namespace metrics
+
 // 1. FOUNDATION / NEUTRALS -----------------------------------------------------
 namespace core
 {
@@ -61,6 +73,7 @@ static const juce::Colour recordRedDim { 0xffb61f2e };
 static const juce::Colour warningAmber { 0xffffb020 };
 static const juce::Colour successGreen { 0xff22c55e };
 static const juce::Colour infoBlue     { 0xff4da3ff };
+static const juce::Colour previewSlate { 0xff7182a8 };
 }  // namespace accent
 
 // Legacy warm/cool families, remapped onto the new track palette bases so old call
@@ -122,18 +135,18 @@ struct Variant
 };
 
 static const Variant palette12[] {
-    { juce::Colour(0xffff5a5a), juce::Colour(0xffff7b73), juce::Colour(0xffe33e3e), juce::Colour(0xffb21f1f) },  // 1 Coral Red
-    { juce::Colour(0xffff8a3d), juce::Colour(0xffffa45a), juce::Colour(0xffe66f22), juce::Colour(0xffb3450f) },  // 2 Warm Orange
-    { juce::Colour(0xffffc23a), juce::Colour(0xffffd866), juce::Colour(0xffe0a21a), juce::Colour(0xffb37a0c) },  // 3 Amber Gold
-    { juce::Colour(0xffa6e22e), juce::Colour(0xffbdf15a), juce::Colour(0xff8ecc1e), juce::Colour(0xff5f8b12) },  // 4 Lime Green
-    { juce::Colour(0xff34d399), juce::Colour(0xff6ee7b7), juce::Colour(0xff10b981), juce::Colour(0xff0e7c59) },  // 5 Mint Green
-    { juce::Colour(0xff14b8a6), juce::Colour(0xff2dd4bf), juce::Colour(0xff0d9488), juce::Colour(0xff0b6e65) },  // 6 Teal
-    { juce::Colour(0xff22d3ee), juce::Colour(0xff67e8f9), juce::Colour(0xff0ea5e9), juce::Colour(0xff0b6d99) },  // 7 Aqua Cyan
-    { juce::Colour(0xff4f8bff), juce::Colour(0xff79b1ff), juce::Colour(0xff3a6ee5), juce::Colour(0xff1e4db4) },  // 8 Studio Blue
-    { juce::Colour(0xff6366f1), juce::Colour(0xff818cf8), juce::Colour(0xff4f46e5), juce::Colour(0xff3730a3) },  // 9 Deep Blue
-    { juce::Colour(0xffa855f7), juce::Colour(0xffc084fc), juce::Colour(0xff9333ea), juce::Colour(0xff6b21a8) },  // 10 Violet
-    { juce::Colour(0xffec4899), juce::Colour(0xfff472b6), juce::Colour(0xffdb2777), juce::Colour(0xff9d174d) },  // 11 Magenta
-    { juce::Colour(0xfffb7185), juce::Colour(0xfffb92a7), juce::Colour(0xffe11d48), juce::Colour(0xffbe123c) },  // 12 Rose Pink
+    { juce::Colour(0xffff3b30), juce::Colour(0xffff6258), juce::Colour(0xffe52d24), juce::Colour(0xffa91f1a) },  // 1 Red
+    { juce::Colour(0xffff2d83), juce::Colour(0xffff5b9d), juce::Colour(0xffe51f70), juce::Colour(0xffa91452) },  // 2 Pink
+    { juce::Colour(0xffe126ff), juce::Colour(0xffed63ff), juce::Colour(0xffc51ee3), juce::Colour(0xff83149b) },  // 3 Magenta
+    { juce::Colour(0xff8e2de2), juce::Colour(0xffad5af0), juce::Colour(0xff7221bd), juce::Colour(0xff4b147d) },  // 4 Violet
+    { juce::Colour(0xff304ffe), juce::Colour(0xff5b72ff), juce::Colour(0xff253fd3), juce::Colour(0xff18288c) },  // 5 Blue
+    { juce::Colour(0xff1de9ff), juce::Colour(0xff63f0ff), juce::Colour(0xff12c4dc), juce::Colour(0xff087d91) },  // 6 Cyan
+    { juce::Colour(0xff00c7b7), juce::Colour(0xff35dfd1), juce::Colour(0xff00a89b), juce::Colour(0xff006f68) },  // 7 Teal
+    { juce::Colour(0xff00d973), juce::Colour(0xff42e59a), juce::Colour(0xff00b85f), juce::Colour(0xff007c41) },  // 8 Green
+    { juce::Colour(0xff7be21b), juce::Colour(0xffa1ed4b), juce::Colour(0xff65bd14), juce::Colour(0xff3f790d) },  // 9 Lime
+    { juce::Colour(0xffdce51a), juce::Colour(0xffe9ed57), juce::Colour(0xffb9c10e), juce::Colour(0xff777d08) },  // 10 Yellow
+    { juce::Colour(0xffff9f1a), juce::Colour(0xffffba55), juce::Colour(0xffe7830d), juce::Colour(0xff9e5808) },  // 11 Orange
+    { juce::Colour(0xffffb37a), juce::Colour(0xffffc99f), juce::Colour(0xffe9955d), juce::Colour(0xffa8603d) },  // 12 Peach
 };
 
 constexpr auto paletteSize = static_cast<int>(sizeof(palette12) / sizeof(palette12[0]));

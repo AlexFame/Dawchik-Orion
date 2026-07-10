@@ -10,8 +10,8 @@ namespace
 {
 // Shared so paint() (background) and resized() (layout) stay in lock-step.
 constexpr int kPanelWidth = 500;
-constexpr int kPanelHeight = 80;
-constexpr int kReadoutRowHeight = 36;   // remainder of the panel is the button row
+constexpr int kPanelHeight = 88;
+constexpr int kReadoutRowHeight = 40;   // shared readout band; the remaining band holds transport controls
 constexpr int kUtilityHeight = 56;
 constexpr int kBrandWidth = 272;
 constexpr int kSideGroupWidth = 330;   // holds three nav items: MIXER · CLIP EDITOR · STEPS
@@ -22,10 +22,19 @@ constexpr int kGroupGap = 24;
 
 // Shared two-row layout so every cluster (readouts, MIXER/CLIP, MASTER OUT, CPU) puts its
 // label on the same line and its content on the same line, all the same size.
-constexpr int kContentBand = 36;   // total height of the label+content block, centred
+constexpr int kContentBand = 34;   // centred label+value block with clear frame breathing room
 constexpr int kLabelRowH = 14;
 constexpr int kLabelGap = 3;
-constexpr float kLabelFontSize = 10.5f;
+constexpr float kLabelFontSize = 12.0f;
+
+juce::Font transportFont(float size, bool bold = false)
+{
+    auto font = bold
+        ? juce::Font(juce::FontOptions("Avenir Next", size, juce::Font::bold))
+        : juce::Font(juce::FontOptions("Avenir Next", "Medium", size));
+    font.setExtraKerningFactor(bold ? 0.010f : 0.003f);
+    return font;
+}
 
 juce::String formatDb(double db)
 {
@@ -304,7 +313,23 @@ void TransportBarComponent::paint(juce::Graphics& g)
 
     const auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight).toFloat();
     g.setColour(theme::core::voidBlack.withAlpha(0.58f));
-    g.fillRoundedRectangle(panel, 9.0f);
+    g.fillRoundedRectangle(panel, theme::metrics::panelRadius);
+    g.setColour(theme::line::soft.withAlpha(0.78f));
+    g.drawRoundedRectangle(panel.reduced(0.8f), theme::metrics::panelRadius, 1.6f);
+
+    // The transport buttons are the primary action group. Give them a quiet elevated well so
+    // they read as one centered control block instead of six unrelated icons on the shelf.
+    auto controlGroup = prevButton.getBounds();
+    controlGroup = controlGroup.getUnion(stopButton.getBounds())
+                             .getUnion(recordButton.getBounds())
+                             .getUnion(playButton.getBounds())
+                             .getUnion(loopButton.getBounds())
+                             .getUnion(metronomeButton.getBounds())
+                             .expanded(9, 3);
+    g.setColour(theme::surface::elevated.withAlpha(0.34f));
+    g.fillRoundedRectangle(controlGroup.toFloat(), theme::metrics::controlRadius);
+    g.setColour(theme::line::normal.withAlpha(0.20f));
+    g.drawRoundedRectangle(controlGroup.toFloat().reduced(0.5f), theme::metrics::controlRadius, 1.0f);
 
     // One readout column, new-design style: a small muted label on top, the value below
     // (left-aligned), with an optional dropdown chevron after the value (Key opens a picker).
@@ -318,11 +343,11 @@ void TransportBarComponent::paint(juce::Graphics& g)
         const auto labelRow = col.removeFromTop(kLabelRowH).toFloat();
         col.removeFromTop(kLabelGap);
         g.setColour(theme::text::tertiary.withAlpha(0.55f));
-        g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+        g.setFont(transportFont(kLabelFontSize));
         g.drawText(label, labelRow, juce::Justification::centred);
 
         const auto valueRow = col.toFloat();
-        const juce::Font valueFont(juce::FontOptions(18.0f, juce::Font::bold));
+        const juce::Font valueFont = transportFont(21.0f, true);
         const float valueW = juce::GlyphArrangement::getStringWidth(valueFont, value);
         g.setColour(valueColour);
         g.setFont(valueFont);
@@ -403,7 +428,7 @@ void TransportBarComponent::resized()
     // Transport controls: a tight cluster of equal-size icons with a fixed gap, centred on
     // the panel axis — so spacing is perfectly even and the row is symmetric (record/play
     // straddle the centre).
-    auto band = panel.reduced(16, 3);
+    auto band = panel.reduced(16, 8);
     constexpr int iconSize = 38;
     constexpr int iconGap = 14;
     constexpr int count = 6;
@@ -550,14 +575,14 @@ void TransportBarComponent::drawUtilityItem(juce::Graphics& g, UtilityItem item,
     if (active || hovered)
     {
         g.setColour(fill);
-        g.fillRoundedRectangle(bounds.toFloat().reduced(2.0f, 1.0f), 7.0f);
+    g.fillRoundedRectangle(bounds.toFloat().reduced(2.0f, 1.0f), theme::metrics::controlRadius);
     }
 
     auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), kContentBand).reduced(8, 0);
     auto labelRow = content.removeFromTop(kLabelRowH);
     content.removeFromTop(kLabelGap);
     g.setColour(colour);
-    g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+    g.setFont(transportFont(kLabelFontSize));
     g.drawText(label, labelRow, juce::Justification::centred);
 
     auto icon = content.withSizeKeepingCentre(28, juce::jmin(content.getHeight(), 20));
@@ -618,7 +643,7 @@ void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<i
     auto title = content.removeFromTop(kLabelRowH);
     content.removeFromTop(kLabelGap);
     g.setColour(theme::warm::red);
-    g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+    g.setFont(transportFont(kLabelFontSize));
     g.drawText("MASTER OUT", title, juce::Justification::centredLeft);
 
     auto row = content;
@@ -638,7 +663,7 @@ void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<i
     }
 
     g.setColour(theme::text::primary.withAlpha(0.88f));
-    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.setFont(transportFont(13.0f, true));
     g.drawText(formatDb(state.masterLevelDb), row.removeFromLeft(56), juce::Justification::centredRight);
 }
 
@@ -649,7 +674,7 @@ void TransportBarComponent::drawCpuMeter(juce::Graphics& g, juce::Rectangle<int>
 
     auto cpu = bounds.withSizeKeepingCentre(bounds.getWidth(), kContentBand);
     g.setColour(theme::text::tertiary.withAlpha(0.60f));
-    g.setFont(juce::FontOptions(kLabelFontSize, juce::Font::plain));
+    g.setFont(transportFont(kLabelFontSize));
     g.drawText("CPU", cpu.removeFromTop(kLabelRowH), juce::Justification::centred);
     cpu.removeFromTop(kLabelGap);
 
@@ -665,7 +690,7 @@ void TransportBarComponent::drawCpuMeter(juce::Graphics& g, juce::Rectangle<int>
     }
 
     g.setColour(theme::text::primary.withAlpha(0.88f));
-    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.setFont(transportFont(12.0f, true));
     g.drawText(juce::String(juce::roundToInt(state.engineLoad * 100.0f)) + "%", loadRow, juce::Justification::centredRight);
 }
 
@@ -699,15 +724,15 @@ void TransportBarComponent::drawBrandCluster(juce::Graphics& g, juce::Rectangle<
     text = text.withSizeKeepingCentre(text.getWidth(), 39);   // centre the two text lines vertically
     auto titleRow = text.removeFromTop(19);
     g.setColour(theme::text::primary.withAlpha(0.94f));
-    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+    g.setFont(transportFont(16.0f, true));
     g.drawText("ORION", titleRow.removeFromLeft(56), juce::Justification::centredLeft);
     g.setColour(theme::text::tertiary.withAlpha(0.70f));
-    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+    g.setFont(transportFont(10.0f, true));
     g.drawText("PROJECT", titleRow, juce::Justification::centredLeft);
 
     text.removeFromTop(2);
     g.setColour(theme::text::secondary.withAlpha(0.92f));
-    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.setFont(transportFont(14.0f, true));
     g.drawFittedText(state.projectName.isNotEmpty() ? state.projectName : juce::String("Untitled"),
                      text.removeFromTop(18),
                      juce::Justification::centredLeft,
@@ -718,8 +743,8 @@ void TransportBarComponent::drawBrandCluster(juce::Graphics& g, juce::Rectangle<
 void TransportBarComponent::drawButtonFrame(juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour, bool active) const
 {
     g.setColour(colour);
-    g.fillRoundedRectangle(bounds, 6.0f);
+    g.fillRoundedRectangle(bounds, theme::metrics::controlRadius);
     g.setColour((active ? theme::warm::red : theme::line::normal).withAlpha(active ? 0.68f : 0.34f));
-    g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.0f);
+    g.drawRoundedRectangle(bounds.reduced(0.5f), theme::metrics::controlRadius, 1.0f);
 }
 }  // namespace orion

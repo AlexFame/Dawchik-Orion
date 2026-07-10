@@ -9,7 +9,7 @@ namespace orion
 {
 namespace
 {
-const auto cardRadius = 8.0f;
+const auto cardRadius = theme::metrics::panelRadius;
 const auto markerHitRadius = 12;
 const auto endMarkerHitRadius = 22;
 
@@ -164,7 +164,7 @@ void ClipEditorComponent::paint(juce::Graphics& g)
     if (! state.hasSelection)
     {
         g.setColour(theme::text::muted);
-        g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
         g.drawText("Select a clip", bounds, juce::Justification::centred);
         return;
     }
@@ -172,17 +172,17 @@ void ClipEditorComponent::paint(juce::Graphics& g)
     if (! state.isAudioClip)
     {
         g.setColour(theme::text::muted);
-        g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
         g.drawText("MIDI clip editor is next", bounds, juce::Justification::centred);
         return;
     }
 
     auto header = bounds.removeFromTop(30);
     g.setColour(theme::text::primary);
-    g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     g.drawText(state.title, header.removeFromLeft(360), juce::Justification::centredLeft);
     g.setColour(theme::text::tertiary);
-    g.setFont(juce::FontOptions(13.0f, juce::Font::plain));
+    g.setFont(juce::FontOptions(15.0f, juce::Font::plain));
     g.drawText(state.trackName, header.removeFromLeft(260), juce::Justification::centredLeft);
 
     bounds.removeFromTop(10);
@@ -270,7 +270,7 @@ void ClipEditorComponent::beginPitchTextEntry()
     pitchEditor = std::make_unique<juce::TextEditor>();
     pitchEditor->setBounds(pitchValueBounds.withTrimmedTop(16).reduced(4, 2));
     pitchEditor->setJustification(juce::Justification::centred);
-    pitchEditor->setFont(juce::FontOptions(15.0f, juce::Font::bold));
+    pitchEditor->setFont(juce::FontOptions(17.0f, juce::Font::bold));
     pitchEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
     pitchEditor->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
     pitchEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
@@ -789,17 +789,17 @@ void ClipEditorComponent::drawInfoCard(juce::Graphics& g, juce::Rectangle<int> b
 
     auto area = bounds.reduced(18, 14);
     g.setColour(theme::text::primary);
-    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
     g.drawText("CLIP INFO", area.removeFromTop(20), juce::Justification::centredLeft);
 
     const auto drawRow = [&](const juce::String& label, const juce::String& value)
     {
         auto row = area.removeFromTop(22);
         g.setColour(theme::text::muted);
-        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
         g.drawText(label, row.removeFromLeft(78), juce::Justification::centredLeft);
         g.setColour(theme::text::secondary);
-        g.setFont(juce::FontOptions(12.0f, juce::Font::plain));
+        g.setFont(juce::FontOptions(14.0f, juce::Font::plain));
         g.drawText(value, row, juce::Justification::centredRight);
     };
 
@@ -832,7 +832,7 @@ void ClipEditorComponent::drawControlCard(juce::Graphics& g, juce::Rectangle<int
     g.drawRoundedRectangle(pitchBox, 7.0f, hasKeyboardFocus(true) ? 1.4f : 1.0f);
     auto pitchText = pitchLabel.reduced(6, 4);
     g.setColour(theme::text::muted);
-    g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
     g.drawText("PITCH", pitchText.removeFromTop(13), juce::Justification::centred);
     if (pitchEditor == nullptr)   // hidden while the inline numeric editor is shown
     {

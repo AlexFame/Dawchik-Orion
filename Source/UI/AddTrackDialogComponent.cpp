@@ -267,18 +267,18 @@ void AddTrackDialogComponent::paint(juce::Graphics& g)
 {
     const auto panel = getPanelBounds();
     g.setColour(juce::Colours::black.withAlpha(0.4f));
-    g.fillRoundedRectangle(panel.toFloat().translated(0.0f, 3.0f), 14.0f);
+    g.fillRoundedRectangle(panel.toFloat().translated(0.0f, 3.0f), theme::metrics::panelRadius);
     g.setColour(panelColour);
-    g.fillRoundedRectangle(panel.toFloat(), 14.0f);
+    g.fillRoundedRectangle(panel.toFloat(), theme::metrics::panelRadius);
     g.setColour(panelStroke);
-    g.drawRoundedRectangle(panel.toFloat(), 14.0f, 1.0f);
+    g.drawRoundedRectangle(panel.toFloat(), theme::metrics::panelRadius, 1.0f);
 
     auto titleRow = panel.reduced(pad).removeFromTop(titleH);
     g.setColour(textColour);
-    g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     g.drawText("Add Track", titleRow, juce::Justification::centred, false);
     g.setColour(mutedText);
-    g.setFont(juce::FontOptions(20.0f));
+    g.setFont(juce::FontOptions(22.0f));
     g.drawText("x", getCloseBounds(), juce::Justification::centred);
 
     // Tab cards.
@@ -300,17 +300,17 @@ void AddTrackDialogComponent::paint(juce::Graphics& g)
         cell.removeFromTop(8);                                  // clear gap so text never touches the icon
         auto nameArea = cell.removeFromTop(18);
         g.setColour(active ? juce::Colours::white : textColour);
-        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
         g.drawText(kTypes[static_cast<std::size_t>(i)].name, nameArea, juce::Justification::centred, false);
         cell.removeFromTop(2);
         g.setColour(mutedText);
-        g.setFont(juce::FontOptions(10.5f));
+        g.setFont(juce::FontOptions(12.0f));
         g.drawText(kTypes[static_cast<std::size_t>(i)].sub, cell.removeFromTop(14), juce::Justification::centred, false);
     }
 
     // Field labels.
     g.setColour(mutedText);
-    g.setFont(juce::FontOptions(13.5f, juce::Font::bold));
+    g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
     const auto lx = panel.getX() + pad;
     g.drawText("Name",   lx, nameBox.getY(),        labelW, rowH, juce::Justification::centredLeft, false);
     g.drawText("Count",  lx, countBox.getY(),       labelW, rowH, juce::Justification::centredLeft, false);

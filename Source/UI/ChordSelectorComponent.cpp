@@ -163,16 +163,16 @@ void ChordSelectorComponent::paint (juce::Graphics& g)
 {
     // Panel shell.
     g.setColour (theme::core::studio);
-    g.fillRoundedRectangle (getLocalBounds().toFloat(), 14.0f);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), theme::metrics::panelRadius);
     g.setColour (theme::cool::cyan.withAlpha (0.28f));
-    g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.6f), 14.0f, 1.2f);
+    g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.6f), theme::metrics::panelRadius, 1.2f);
 
     // Header: chord name + key context + close.
     const auto header = headerBounds();
     g.setColour (theme::text::primary);
-    g.setFont (juce::Font (22.0f, juce::Font::bold));
+    g.setFont (juce::Font (24.0f, juce::Font::bold));
     g.drawText (chordName (spec), header.withTrimmedRight (40), juce::Justification::centredLeft);
-    g.setFont (juce::Font (12.0f, juce::Font::plain));
+    g.setFont (juce::Font (14.0f, juce::Font::plain));
     g.setColour (theme::text::primary.withAlpha (0.55f));
     g.drawText ("Key: " + keyName, header.withTrimmedRight (40), juce::Justification::centredRight);
 

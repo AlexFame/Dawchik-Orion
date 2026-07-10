@@ -92,23 +92,23 @@ void SidebarNavComponent::paint(juce::Graphics& g)
         if (active)
         {
             g.setColour(activeColour.withAlpha(0.18f));
-            g.fillRoundedRectangle(itemBounds.toFloat().reduced(4.0f, 3.0f), 5.0f);
+            g.fillRoundedRectangle(itemBounds.toFloat().reduced(4.0f, 3.0f), th::metrics::controlRadius);
             g.setColour(activeColour.withAlpha(0.78f));
-            g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), 5.0f, 1.0f);
+            g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), th::metrics::controlRadius, 1.0f);
         }
         else if (hovered)
         {
             g.setColour(juce::Colours::white.withAlpha(0.055f));
-            g.fillRoundedRectangle(itemBounds.toFloat().reduced(5.0f, 3.0f), 5.0f);
+            g.fillRoundedRectangle(itemBounds.toFloat().reduced(5.0f, 3.0f), th::metrics::controlRadius);
         }
 
         // addFolder gets a subtle container so it visually matches the other nav items.
         if (! active && entry.item == SidebarNavItem::addFolder)
         {
             g.setColour(juce::Colours::white.withAlpha(0.04f));
-            g.fillRoundedRectangle(itemBounds.toFloat().reduced(4.0f, 3.0f), 5.0f);
+            g.fillRoundedRectangle(itemBounds.toFloat().reduced(4.0f, 3.0f), th::metrics::controlRadius);
             g.setColour(th::line::subtle.withAlpha(0.5f));
-            g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), 5.0f, 1.0f);
+            g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), th::metrics::controlRadius, 1.0f);
         }
 
         const auto colour = active ? th::warm::coral.withAlpha(0.94f)
@@ -116,7 +116,7 @@ void SidebarNavComponent::paint(juce::Graphics& g)
         drawIcon(g, entry.item, itemBounds.withSizeKeepingCentre(28, 28).toFloat().translated(0.0f, -8.0f), colour);
 
         g.setColour(colour);
-        g.setFont(juce::FontOptions(8.2f, juce::Font::bold));
+    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
         g.drawText(entry.label, itemBounds.withY(itemBounds.getBottom() - 22).withHeight(14),
                    juce::Justification::centred, true);
     }

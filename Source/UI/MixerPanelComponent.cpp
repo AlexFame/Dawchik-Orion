@@ -22,12 +22,12 @@ const auto mutedText       = th::text::muted;
 constexpr double minGainDb = -60.0;
 constexpr double maxGainDb = 6.0;
 
-constexpr int stripWidth       = 122;
-constexpr int stripGap         = 6;
-constexpr int masterStripWidth = 122;
-constexpr int panelPadding     = 16;
-constexpr int titleHeight      = 28;
-constexpr int bottomBarHeight  = 40;
+constexpr int stripWidth       = 140;
+constexpr int stripGap         = 8;
+constexpr int masterStripWidth = 140;
+constexpr int panelPadding     = 20;
+constexpr int titleHeight      = 36;
+constexpr int bottomBarHeight  = 48;
 
 juce::String gainTextFromValue(double value)
 {
@@ -513,16 +513,16 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
 
     // Card.
     g.setColour(isMaster ? stripBackground.brighter(0.05f) : stripBackground);
-    g.fillRoundedRectangle(L.card.toFloat(), 8.0f);
+    g.fillRoundedRectangle(L.card.toFloat(), th::metrics::panelRadius);
     g.setColour((isMaster || isBus) ? accentColour.withAlpha(isMaster ? 0.7f : 0.45f) : stripStroke);
-    g.drawRoundedRectangle(L.card.toFloat().reduced(0.5f), 8.0f, isMaster ? 1.4f : 1.0f);
+    g.drawRoundedRectangle(L.card.toFloat().reduced(0.5f), th::metrics::panelRadius, isMaster ? 1.4f : 1.0f);
 
     // Name + colour dot.
     auto nameRow = L.nameRow;
     if (isMaster)
     {
         g.setColour(accentColour);
-        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
         g.drawText("MASTER", nameRow, juce::Justification::centred, false);
     }
     else
@@ -535,13 +535,13 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
             else       g.fillEllipse(dot.withSizeKeepingCentre(7, 7).toFloat());
         }
         g.setColour(juce::Colours::white.withAlpha(0.92f));
-        g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+        g.setFont(juce::FontOptions(13.5f, juce::Font::bold));
         g.drawText(stripName, nameRow, juce::Justification::centredLeft, true);
     }
 
     // Level readout (peak-hold dB).
     g.setColour(mutedText);
-    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+    g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
     g.drawText(levelDb <= -60.0f ? juce::String("-inf") : juce::String(levelDb, 1) + " dB",
                L.levelReadout, juce::Justification::centred, false);
 
@@ -576,7 +576,7 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
                 g.setColour(juce::Colour(0xff2f6df0).withAlpha(0.85f));   // Logic-blue chip
                 g.fillRoundedRectangle(row.toFloat(), 3.0f);
                 g.setColour(juce::Colours::white.withAlpha(0.95f));
-                g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
                 g.drawText(name, row.reduced(5, 0), juce::Justification::centredLeft, true);
             }
             y += rowH + rowGap;
@@ -586,7 +586,7 @@ void MixerPanelComponent::drawStrip(juce::Graphics& g, const StripLayout& L, Cha
         if (addRow.getBottom() > area.getY() && addRow.getY() < area.getBottom())
         {
             g.setColour(mutedText.withAlpha(0.75f));
-            g.setFont(juce::FontOptions(13.0f, juce::Font::plain));
+        g.setFont(juce::FontOptions(15.0f, juce::Font::plain));
             g.drawText("+", addRow, juce::Justification::centred, false);
         }
         g.restoreState();
@@ -701,12 +701,12 @@ void MixerPanelComponent::paint(juce::Graphics& g)
     auto inner = panel.reduced(panelPadding);
     auto titleRow = inner.removeFromTop(titleHeight);
     g.setColour(juce::Colours::white);
-    g.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     g.drawText("MIXER", titleRow, juce::Justification::centredLeft);
 
     const auto closeBounds = getCloseButtonBounds();
     g.setColour(mutedText);
-    g.setFont(juce::FontOptions(20.0f, juce::Font::plain));
+    g.setFont(juce::FontOptions(22.0f, juce::Font::plain));
     g.drawText("x", closeBounds, juce::Justification::centred);
 
     if (project.getTracks().empty())

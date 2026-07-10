@@ -37,7 +37,7 @@ public:
     TransportBarComponent();
     ~TransportBarComponent() override;
 
-    static constexpr int preferredHeight = 84;
+    static constexpr int preferredHeight = 104;
 
     std::function<void()> onPlay;
     std::function<void()> onStop;

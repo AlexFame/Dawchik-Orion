@@ -9,10 +9,10 @@ namespace orion
 {
 namespace
 {
-constexpr int kHeaderHeight = 32;
-constexpr int kRowHeight    = 36;
-constexpr int kRowGap       = 5;
-constexpr int kLeftPad      = 14;
+constexpr int kHeaderHeight = 40;
+constexpr int kRowHeight    = 44;
+constexpr int kRowGap       = 6;
+constexpr int kLeftPad      = 18;
 constexpr int kMuteWidth    = 22;
 constexpr int kNameWidth    = 148;
 constexpr int kColGap       = 12;   // gap between the name block and the step grid
@@ -305,10 +305,10 @@ void StepSequencerComponent::paint(juce::Graphics& g)
     // Header.
     auto header = getLocalBounds().removeFromTop(kHeaderHeight).reduced(kLeftPad, 0);
     g.setColour(theme::text::primary.withAlpha(0.95f));
-    g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
     g.drawText("STEP SEQUENCER", header.removeFromLeft(180), juce::Justification::centredLeft);
     g.setColour(theme::text::muted.withAlpha(0.8f));
-    g.setFont(juce::FontOptions(11.0f, juce::Font::plain));
+    g.setFont(juce::FontOptions(13.0f, juce::Font::plain));
     g.drawText("right-click a row for the piano roll", header, juce::Justification::centredRight);
 
     // "16 / 32" step-count toggle.
@@ -320,7 +320,7 @@ void StepSequencerComponent::paint(juce::Graphics& g)
             g.setColour(active ? theme::cool::cyan.withAlpha(0.85f) : theme::core::voidBlack.withAlpha(0.6f));
             g.fillRoundedRectangle(b.toFloat(), 5.0f);
             g.setColour(active ? theme::core::deepSpace : theme::text::muted);
-            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
             g.drawText(label, b, juce::Justification::centred);
         };
         drawSeg(b16, "16", ! is32);
@@ -338,11 +338,11 @@ void StepSequencerComponent::paint(juce::Graphics& g)
         juce::PathStrokeType(1.4f).createDashedStroke(dashed, border, dashes, 2);
         g.fillPath(dashed);
         g.setColour(theme::text::secondary);
-        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
         g.drawText("Drag drum samples here to add channels",
                    box.withTrimmedBottom(box.getHeight() / 2), juce::Justification::centred);
         g.setColour(theme::text::muted);
-        g.setFont(juce::FontOptions(12.0f, juce::Font::plain));
+        g.setFont(juce::FontOptions(14.0f, juce::Font::plain));
         g.drawText("each sample becomes a channel — click steps to build the beat",
                    box.withTrimmedTop(box.getHeight() / 2), juce::Justification::centred);
         return;
@@ -390,7 +390,7 @@ void StepSequencerComponent::paint(juce::Graphics& g)
         }
 
         g.setColour(theme::text::primary.withAlpha(track.muted ? 0.4f : 0.92f));
-        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+        g.setFont(juce::FontOptions(14.5f, juce::Font::bold));
         g.drawText(track.name, nameBox.reduced(10, 0), juce::Justification::centredLeft, true);
 
         // Mute LED (green = playing, dim = muted).
