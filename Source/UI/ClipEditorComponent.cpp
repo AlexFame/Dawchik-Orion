@@ -245,18 +245,34 @@ void ClipEditorComponent::mouseDoubleClick(const juce::MouseEvent& event)
     // clicked source point to the nearest grid beat (quantise a transient to the grid, Ableton-style).
     if (state.warpEnabled && state.isAudioClip && lastWaveformBounds.expanded(0, 8).contains(event.getPosition()))
     {
-        if (const int wm = warpMarkerAtX(static_cast<int>(event.position.x)); wm >= 0)
+        // Live's rules, verbatim from the manual:
+        //   "Double-click anywhere in the upper half of the Sample Editor to add a Warp Marker at
+        //    that location."
+        //   "To delete Warp Markers you can double-click them."
+        // So both gestures share the upper strip and are told apart purely by whether you hit an
+        // existing marker. That makes the delete radius critical: the old 12 px grab radius (fine
+        // for dragging) swallowed every nearby create, so markers could not be placed close
+        // together and placement felt random. Use a tight radius for the delete test only.
+        constexpr int deleteHitRadiusPx = 5;
+        if (event.position.y > static_cast<float>(lastWaveformBounds.getCentreY()))
+            return;   // lower half is not the warp-marker area in Live
+
+        if (const int wm = warpMarkerAtX(static_cast<int>(event.position.x), deleteHitRadiusPx); wm >= 0)
         {
             if (onWarpMarkerRemoved)
                 onWarpMarkerRemoved(wm);
         }
         else
         {
-            // Activate the nearest transient (Ableton-style) rather than dropping a marker blindly.
+            // Live's rule: "Double-click anywhere in the upper half of the Sample Editor to add a
+            // Warp Marker at that location" — the marker goes exactly where you click. Transients
+            // are a separate affordance: hovering directly over one shows a pseudo-marker you can
+            // activate. The old 14 px magnet pulled the marker visibly away from the cursor, which
+            // is not what Live does and made precise placement impossible.
             double sr = juce::jlimit(0.001, 0.999, xToWaveRatio(event.x));
-            const double maxDist = (14.0 / juce::jmax(1, lastWaveformBounds.getWidth())) * visibleWaveSpan();
+            const double maxDist = (4.0 / juce::jmax(1, lastWaveformBounds.getWidth())) * visibleWaveSpan();
             if (const double t = nearestTransient(sr, maxDist); t >= 0.0)
-                sr = juce::jlimit(0.001, 0.999, t);
+                sr = juce::jlimit(0.001, 0.999, t);   // clicked essentially ON a transient
             // Pin the point at the beat it ALREADY sits on (no grid snap) so adding a marker never shifts
             // the audio — Ableton-style. Warping only happens when the marker is then dragged.
             if (onWarpMarkerAdded)
@@ -309,7 +325,10 @@ void ClipEditorComponent::mouseMove(const juce::MouseEvent& event)
     if (active && wm < 0)
     {
         const double sr = xToWaveRatio(event.x);
-        const double maxDist = (26.0 / juce::jmax(1, lastWaveformBounds.getWidth())) * visibleWaveSpan();
+        // Only when the cursor is essentially on the transient, like Live's pseudo-warp marker.
+        // A wide magnet here drew the ghost far from the pointer, which read as "the marker
+        // lands somewhere else".
+        const double maxDist = (6.0 / juce::jmax(1, lastWaveformBounds.getWidth())) * visibleWaveSpan();
         cand = nearestTransient(sr, maxDist);
     }
 
@@ -940,12 +959,13 @@ double ClipEditorComponent::currentGridStepBeats() const noexcept
     return 256.0;
 }
 
-int ClipEditorComponent::warpMarkerAtX(int x) const noexcept
+int ClipEditorComponent::warpMarkerAtX(int x, int radiusPx) const noexcept
 {
     if (! state.warpEnabled)
         return -1;
+    const int radius = radiusPx >= 0 ? radiusPx : markerHitRadius;
     int best = -1;
-    int bestDist = markerHitRadius + 1;
+    int bestDist = radius + 1;
     for (int i = 0; i < static_cast<int>(state.warpMarkers.size()); ++i)
     {
         const int mx = waveRatioToX(juce::jlimit(0.0, 1.0, state.warpMarkers[static_cast<std::size_t>(i)].sourceRatio));

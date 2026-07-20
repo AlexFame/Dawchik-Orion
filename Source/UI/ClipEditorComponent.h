@@ -101,7 +101,9 @@ private:
     };
 
     // Index of the warp marker under x within the handle hit radius, or -1. Only when warp is on.
-    int warpMarkerAtX(int x) const noexcept;
+    // radiusPx defaults to the generous grab radius (dragging). Double-click delete passes a tight
+    // one, because in Live create and delete share the same strip — see mouseDoubleClick.
+    int warpMarkerAtX(int x, int radiusPx = -1) const noexcept;
     // Nearest grid beat for a source ratio, used when placing a new marker (quantise transient to grid).
     double snappedBeatForSourceRatio(double sourceRatio) const noexcept;
     // Detect onset positions from the waveform envelope (Ableton shows these; a warp marker snaps to

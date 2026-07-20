@@ -95,6 +95,7 @@ target_sources(
         Source/UI/MainComponentRecording.cpp
         Source/UI/MainComponentProject.cpp
         Source/UI/MainComponentInstruments.cpp
+        Source/UI/MainComponentPreview.cpp
         Source/UI/MacCharacterPalette.mm
         Source/UI/MidiEditorOverlayComponent.cpp
         Source/UI/AddTrackDialogComponent.cpp
