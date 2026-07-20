@@ -519,6 +519,11 @@ private:
     void cancelRecording();
     // Attaches/detaches the input callback so an armed audio track shows live input
     // level (monitoring) even before recording starts.
+    // Callback wiring lifted out of the constructor (which had grown past 1700 lines). Called
+    // from the constructor in this order; each is a straight cut of what used to be inline.
+    void wireBrowserAndDialogs();   // browser, sidebar, plugin picker, add-track dialog
+    void wireEditors();             // arrangement timeline, sampler panel, MIDI editor
+
     void updateInputMonitoring();
     bool ensureAudioInputReady(bool requestPermission);
     void beginAudioInputConfiguration();   // starts the audio device off the message thread
