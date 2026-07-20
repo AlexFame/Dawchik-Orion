@@ -341,3 +341,18 @@ target_compile_definitions(OrionLoudnessTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE
 target_link_libraries(OrionLoudnessTest
     PRIVATE juce::juce_audio_basics juce::juce_core
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+# Headless smoke tests for regressions that used to be caught only by ear.
+#   cmake --build <dir> --target OrionSmokeTest && ./OrionSmokeTest
+juce_add_console_app(OrionSmokeTest PRODUCT_NAME "Orion Smoke Test")
+target_sources(OrionSmokeTest PRIVATE
+    Source/Tools/SmokeTest.cpp
+    Source/Audio/AudioInputRecorder.cpp
+    Source/Core/ProjectSerializer.cpp
+    Source/Core/ProjectState.cpp
+    Source/Sampler/SamplerEngine.cpp)
+target_compile_definitions(OrionSmokeTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(OrionSmokeTest
+    PRIVATE juce::juce_audio_basics juce::juce_audio_devices juce::juce_audio_formats
+            juce::juce_core juce::juce_data_structures juce::juce_graphics
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
