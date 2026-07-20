@@ -53,7 +53,13 @@ juce_add_gui_app(Orion
     # Required on macOS so the OS lets the app open the microphone/audio input.
     # Without NSMicrophoneUsageDescription the app is killed when input is opened.
     MICROPHONE_PERMISSION_ENABLED TRUE
-    MICROPHONE_PERMISSION_TEXT "Orion needs access to your microphone/audio input to record audio.")
+    MICROPHONE_PERMISSION_TEXT "Orion needs access to your microphone/audio input to record audio."
+    CAMERA_PERMISSION_ENABLED TRUE
+    CAMERA_PERMISSION_TEXT "Orion needs access to your camera for Orion Jam video sessions.")
+
+# Embedded image assets (baked skeuomorphic panels, etc.). Available as BinaryData::<name>.
+juce_add_binary_data(OrionAssets SOURCES
+    Resources/images/mpc_sample_panel.png)
 
 target_sources(
     Orion
@@ -85,9 +91,14 @@ target_sources(
         Source/UI/ChordSelectorComponent.cpp
         Source/UI/ClipEditorComponent.cpp
         Source/UI/MainComponent.cpp
+        Source/UI/MacCharacterPalette.mm
         Source/UI/MidiEditorOverlayComponent.cpp
         Source/UI/AddTrackDialogComponent.cpp
         Source/UI/MixerPanelComponent.cpp
+        Source/UI/JamSessionComponent.cpp
+        Source/UI/MpcSampleHardwareBridge.cpp
+        Source/UI/MpcSampleMapping.cpp
+        Source/UI/MpcSamplePanelComponent.cpp
         Source/UI/PluginPickerComponent.cpp
         Source/UI/SelectionInspectorComponent.cpp
         Source/UI/SidebarNavComponent.cpp
@@ -107,6 +118,7 @@ target_compile_definitions(
     PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
+        JUCE_USE_CAMERA=1
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_PLUGINHOST_VST3=1
         ORION_HAVE_RUBBERBAND=${ORION_HAVE_RUBBERBAND}
@@ -127,7 +139,9 @@ target_link_libraries(
         juce::juce_graphics
         juce::juce_gui_basics
         juce::juce_gui_extra
+        juce::juce_video
         signalsmith-stretch
+        OrionAssets
         "-framework SoundAnalysis"
         "-framework CoreMedia"
         $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_LIBRARY}>

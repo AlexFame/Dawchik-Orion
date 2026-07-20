@@ -14,7 +14,7 @@ constexpr int kPanelHeight = 88;
 constexpr int kReadoutRowHeight = 40;   // shared readout band; the remaining band holds transport controls
 constexpr int kUtilityHeight = 56;
 constexpr int kBrandWidth = 272;
-constexpr int kSideGroupWidth = 330;   // holds three nav items: MIXER · CLIP EDITOR · STEPS
+constexpr int kSideGroupWidth = 540;   // holds MIXER · CLIP EDITOR · STEPS · MPC SAMPLE · JAM
 constexpr int kCpuWidth = 92;            // CPU readout (label + bars + %)
 constexpr int kMasterMeterWidth = 230;   // master meter is fixed-width, not edge-to-edge
 constexpr int kOuterPadding = 24;
@@ -236,20 +236,26 @@ void TransportBarComponent::setState(const TransportBarState& newState)
         && newState.keyText == o.keyText && newState.timeSignature == o.timeSignature
         && newState.positionText == o.positionText && newState.projectName == o.projectName
         && newState.scanName == o.scanName
+        && newState.midiSignalText == o.midiSignalText
+        && newState.midiSignalActive == o.midiSignalActive
         && newState.playing == o.playing && newState.recording == o.recording
         && newState.loop == o.loop && newState.metronome == o.metronome && newState.countIn == o.countIn
         && newState.scanVisible == o.scanVisible
         && newState.mixerOpen == o.mixerOpen && newState.clipEditorOpen == o.clipEditorOpen
-        && newState.stepSequencerOpen == o.stepSequencerOpen;
+        && newState.stepSequencerOpen == o.stepSequencerOpen
+        && newState.mpcSampleOpen == o.mpcSampleOpen && newState.jamOpen == o.jamOpen;
 
+    const bool jamLayoutChanged = newState.jamOpen != o.jamOpen;
     const bool staticLayoutChanged = newState.tempoBpm != o.tempoBpm
         || newState.keyText != o.keyText || newState.timeSignature != o.timeSignature
         || newState.projectName != o.projectName || newState.scanVisible != o.scanVisible
         || newState.scanName != o.scanName || newState.scanProgress != o.scanProgress
+        || newState.midiSignalText != o.midiSignalText || newState.midiSignalActive != o.midiSignalActive
         || newState.playing != o.playing || newState.recording != o.recording
         || newState.loop != o.loop || newState.metronome != o.metronome || newState.countIn != o.countIn
         || newState.mixerOpen != o.mixerOpen || newState.clipEditorOpen != o.clipEditorOpen
-        || newState.stepSequencerOpen != o.stepSequencerOpen;
+        || newState.stepSequencerOpen != o.stepSequencerOpen || newState.mpcSampleOpen != o.mpcSampleOpen
+        || newState.jamOpen != o.jamOpen;
     const bool positionChanged = newState.positionText != o.positionText;
     const bool masterMeterChanged = std::abs(newState.masterGainDb - o.masterGainDb) >= 0.05
         || std::abs(newState.masterLevel - o.masterLevel) >= 0.01f
@@ -258,6 +264,11 @@ void TransportBarComponent::setState(const TransportBarState& newState)
 
     state = newState;
     syncButtons();
+    if (jamLayoutChanged)
+    {
+        hoveredUtilityItem = UtilityItem::none;
+        resized();
+    }
     if (sameEnough)
         return;
 
@@ -295,6 +306,12 @@ juce::Rectangle<int> TransportBarComponent::getRecordOptionsBounds() const noexc
 
 void TransportBarComponent::paint(juce::Graphics& g)
 {
+    if (state.jamOpen)
+    {
+        paintJamTransport(g);
+        return;
+    }
+
     g.fillAll(theme::core::deepSpace);
 
     const auto area = getLocalBounds().toFloat();
@@ -376,8 +393,11 @@ void TransportBarComponent::paint(juce::Graphics& g)
     drawUtilityItem(g, UtilityItem::mixer, "MIXER", getUtilityItemBounds(UtilityItem::mixer));
     drawUtilityItem(g, UtilityItem::clipEditor, "CLIP EDITOR", getUtilityItemBounds(UtilityItem::clipEditor));
     drawUtilityItem(g, UtilityItem::stepSequencer, "STEPS", getUtilityItemBounds(UtilityItem::stepSequencer));
+    drawUtilityItem(g, UtilityItem::mpcSample, "MPC SAMPLE", getUtilityItemBounds(UtilityItem::mpcSample));
+    drawUtilityItem(g, UtilityItem::jam, "ORION JAM", getUtilityItemBounds(UtilityItem::jam));
 
     drawMasterMeter(g, masterMeterBounds);
+    drawMidiMonitor(g, midiMonitorBounds);
     drawCpuMeter(g, cpuMeterBounds);
 
     if (state.scanVisible)
@@ -392,6 +412,42 @@ void TransportBarComponent::paint(juce::Graphics& g)
 
 void TransportBarComponent::resized()
 {
+    if (state.jamOpen)
+    {
+        auto bounds = getLocalBounds().reduced(18, 7);
+        jamToggleBounds = bounds.removeFromLeft(150);
+
+        auto row = bounds;
+        row.removeFromLeft(14);
+        keyCardBounds = row.removeFromLeft(82);
+        timeSigCardBounds = row.removeFromLeft(82);
+        tempoCardBounds = row.removeFromLeft(82);
+        positionCardBounds = row.removeFromLeft(92);
+
+        constexpr int iconSize = 34;
+        constexpr int iconGap = 10;
+        constexpr int count = 6;
+        const int clusterW = count * iconSize + (count - 1) * iconGap;
+        int x = getWidth() / 2 - clusterW / 2;
+        const int y = getHeight() / 2 - iconSize / 2;
+        for (auto* button : { &prevButton, &stopButton, &recordButton, &playButton, &loopButton, &metronomeButton })
+        {
+            button->setBounds(x, y, iconSize, iconSize);
+            x += iconSize + iconGap;
+        }
+
+        auto meters = getLocalBounds().reduced(18, 8).removeFromRight(330);
+        masterMeterBounds = meters.removeFromLeft(220);
+        meters.removeFromLeft(14);
+        cpuMeterBounds = meters;
+        midiMonitorBounds = {};
+        utilityClusterBounds = {};
+        brandClusterBounds = {};
+        monitorClusterBounds = {};
+        return;
+    }
+
+    jamToggleBounds = {};
     auto panel = getLocalBounds().withSizeKeepingCentre(kPanelWidth, kPanelHeight);
     // Side clusters share the panel's exact vertical band, so brand / mixer-clip / master / cpu
     // all sit on the same line with the same top & bottom padding as the centre panel.
@@ -415,6 +471,8 @@ void TransportBarComponent::resized()
     // stretch all the way to the window edge); CPU follows it with a bit more room.
     masterMeterBounds = monitorContent.removeFromLeft(juce::jmin(kMasterMeterWidth, monitorContent.getWidth()));
     monitorContent.removeFromLeft(16);
+    midiMonitorBounds = monitorContent.removeFromLeft(juce::jmin(250, monitorContent.getWidth()));
+    monitorContent.removeFromLeft(14);
     cpuMeterBounds = monitorContent.removeFromLeft(juce::jmin(kCpuWidth, monitorContent.getWidth()));
 
     // Readouts: four equal columns (Key | Time Signature | Tempo | Time).
@@ -444,6 +502,14 @@ void TransportBarComponent::resized()
 
 void TransportBarComponent::mouseMove(const juce::MouseEvent& event)
 {
+    if (state.jamOpen)
+    {
+        setMouseCursor(event.eventComponent == this && jamToggleBounds.contains(event.getPosition())
+                           ? juce::MouseCursor::PointingHandCursor
+                           : juce::MouseCursor::NormalCursor);
+        return;
+    }
+
     const auto item = hitTestUtilityItem(event.getPosition());
     if (hoveredUtilityItem == item)
         return;
@@ -462,6 +528,23 @@ void TransportBarComponent::mouseExit(const juce::MouseEvent&)
 
 void TransportBarComponent::mouseDown(const juce::MouseEvent& event)
 {
+    if (state.jamOpen && event.eventComponent == this && jamToggleBounds.contains(event.getPosition()))
+    {
+        if (onJam)
+            onJam();
+        return;
+    }
+
+    if (event.eventComponent != this)
+    {
+        if (event.eventComponent == &recordButton && event.mods.isPopupMenu())
+        {
+            if (onRecordOptions)
+                onRecordOptions();
+        }
+        return;
+    }
+
     if (const auto item = hitTestUtilityItem(event.getPosition()); item != UtilityItem::none)
     {
         if (item == UtilityItem::mixer && onMixer)
@@ -470,6 +553,10 @@ void TransportBarComponent::mouseDown(const juce::MouseEvent& event)
             onClipEditor();
         else if (item == UtilityItem::stepSequencer && onStepSequencer)
             onStepSequencer();
+        else if (item == UtilityItem::mpcSample && onMpcSample)
+            onMpcSample();
+        else if (item == UtilityItem::jam && onJam)
+            onJam();
         return;
     }
 
@@ -535,21 +622,22 @@ juce::Rectangle<int> TransportBarComponent::getUtilityItemBounds(UtilityItem ite
 
     auto bounds = utilityClusterBounds;
     constexpr int gap = 8;
-    const auto itemWidth = (bounds.getWidth() - gap * 2) / 3;
-    if (item == UtilityItem::mixer)
-        return bounds.removeFromLeft(itemWidth);
-
-    bounds.removeFromLeft(itemWidth + gap);
-    if (item == UtilityItem::clipEditor)
-        return bounds.removeFromLeft(itemWidth);
-
-    bounds.removeFromLeft(itemWidth + gap);
-    return bounds;   // stepSequencer
+    const auto itemWidth = (bounds.getWidth() - gap * 4) / 5;
+    int index = -1;
+    if (item == UtilityItem::mixer) index = 0;
+    else if (item == UtilityItem::clipEditor) index = 1;
+    else if (item == UtilityItem::stepSequencer) index = 2;
+    else if (item == UtilityItem::mpcSample) index = 3;
+    else if (item == UtilityItem::jam) index = 4;
+    if (index < 0)
+        return {};
+    return { bounds.getX() + index * (itemWidth + gap), bounds.getY(), itemWidth, bounds.getHeight() };
 }
 
 TransportBarComponent::UtilityItem TransportBarComponent::hitTestUtilityItem(juce::Point<int> point) const noexcept
 {
-    for (const auto item : { UtilityItem::mixer, UtilityItem::clipEditor, UtilityItem::stepSequencer })
+    for (const auto item : { UtilityItem::mixer, UtilityItem::clipEditor, UtilityItem::stepSequencer,
+                             UtilityItem::mpcSample, UtilityItem::jam })
         if (getUtilityItemBounds(item).contains(point))
             return item;
 
@@ -563,7 +651,9 @@ void TransportBarComponent::drawUtilityItem(juce::Graphics& g, UtilityItem item,
 
     const auto active = (item == UtilityItem::mixer && state.mixerOpen)
                      || (item == UtilityItem::clipEditor && state.clipEditorOpen)
-                     || (item == UtilityItem::stepSequencer && state.stepSequencerOpen);
+                     || (item == UtilityItem::stepSequencer && state.stepSequencerOpen)
+                     || (item == UtilityItem::mpcSample && state.mpcSampleOpen)
+                     || (item == UtilityItem::jam && state.jamOpen);
     const auto hovered = hoveredUtilityItem == item;
     const auto fill = active ? theme::cool::cyan.withAlpha(0.10f)
                     : hovered ? theme::text::primary.withAlpha(0.055f)
@@ -632,6 +722,88 @@ void TransportBarComponent::drawUtilityIcon(juce::Graphics& g, UtilityItem item,
                 else     g.drawRoundedRectangle(cell, 1.5f, 1.0f);
             }
     }
+    else if (item == UtilityItem::mpcSample)
+    {
+        auto body = bounds.reduced(4.0f, 4.0f);
+        const float cw = body.getWidth() / 4.0f;
+        const float ch = body.getHeight() / 4.0f;
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 4; ++col)
+                g.drawRoundedRectangle(juce::Rectangle<float>(body.getX() + col * cw,
+                                                               body.getY() + row * ch,
+                                                               cw, ch).reduced(1.2f), 1.5f, 1.0f);
+    }
+    else if (item == UtilityItem::jam)
+    {
+        auto body = bounds.reduced(3.0f, 4.0f);
+        g.drawRoundedRectangle(body, 3.0f, 1.5f);
+        g.drawLine(body.getX() + 5.0f, body.getBottom() - 6.0f,
+                   body.getCentreX(), body.getY() + 6.0f, 1.5f);
+        g.drawLine(body.getCentreX(), body.getY() + 6.0f,
+                   body.getRight() - 5.0f, body.getBottom() - 6.0f, 1.5f);
+        g.fillEllipse(body.getX() + 4.0f, body.getY() + 3.0f, 5.0f, 5.0f);
+        g.fillEllipse(body.getRight() - 9.0f, body.getY() + 3.0f, 5.0f, 5.0f);
+    }
+}
+
+void TransportBarComponent::paintJamTransport(juce::Graphics& g)
+{
+    g.fillAll(theme::core::deepSpace);
+
+    const auto area = getLocalBounds().toFloat();
+    juce::ColourGradient glow(theme::cool::cyan.withAlpha(0.12f), area.getX(), area.getCentreY(),
+                              juce::Colours::transparentBlack, area.getRight(), area.getCentreY(), false);
+    g.setGradientFill(glow);
+    g.fillRect(area);
+    g.setColour(theme::line::subtle.withAlpha(0.70f));
+    g.drawLine(0.0f, area.getBottom() - 1.0f, area.getRight(), area.getBottom() - 1.0f, 1.0f);
+
+    auto pill = jamToggleBounds.toFloat();
+    g.setColour(theme::cool::cyan.withAlpha(0.12f));
+    g.fillRoundedRectangle(pill, theme::metrics::controlRadius);
+    g.setColour(theme::cool::cyan.withAlpha(0.92f));
+    g.drawRoundedRectangle(pill.reduced(0.5f), theme::metrics::controlRadius, 1.0f);
+
+    auto mark = jamToggleBounds.reduced(13, 10).removeFromLeft(24).toFloat();
+    g.setColour(theme::cool::cyan.withAlpha(0.95f));
+    g.drawEllipse(mark.reduced(2.0f), 1.5f);
+    g.fillEllipse(mark.withSizeKeepingCentre(6.0f, 6.0f));
+    g.setFont(transportFont(12.5f, true));
+    g.setColour(theme::text::primary.withAlpha(0.96f));
+    g.drawText("EXIT JAM", jamToggleBounds.withTrimmedLeft(44), juce::Justification::centredLeft);
+
+    auto drawInlineReadout = [&g](juce::Rectangle<int> bounds,
+                                  const juce::String& label,
+                                  const juce::String& value)
+    {
+        auto row = bounds.reduced(2, 0);
+        g.setColour(theme::text::tertiary.withAlpha(0.62f));
+        g.setFont(transportFont(10.5f));
+        g.drawText(label, row.removeFromTop(17), juce::Justification::centred);
+        g.setColour(theme::text::primary.withAlpha(0.94f));
+        g.setFont(transportFont(16.0f, true));
+        g.drawText(value, row, juce::Justification::centred);
+    };
+
+    drawInlineReadout(keyCardBounds, "Key", state.keyText);
+    drawInlineReadout(timeSigCardBounds, "Signature", state.timeSignature);
+    drawInlineReadout(tempoCardBounds, "Tempo", juce::String(state.tempoBpm, 0));
+    drawInlineReadout(positionCardBounds, "Time", state.positionText);
+
+    auto controlGroup = prevButton.getBounds();
+    controlGroup = controlGroup.getUnion(stopButton.getBounds())
+                             .getUnion(recordButton.getBounds())
+                             .getUnion(playButton.getBounds())
+                             .getUnion(loopButton.getBounds())
+                             .getUnion(metronomeButton.getBounds())
+                             .expanded(8, 3);
+    g.setColour(theme::surface::elevated.withAlpha(0.32f));
+    g.fillRoundedRectangle(controlGroup.toFloat(), theme::metrics::controlRadius);
+    g.setColour(theme::line::normal.withAlpha(0.20f));
+    g.drawRoundedRectangle(controlGroup.toFloat().reduced(0.5f), theme::metrics::controlRadius, 1.0f);
+
+    drawMasterMeter(g, masterMeterBounds);
+    drawCpuMeter(g, cpuMeterBounds);
 }
 
 void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const
@@ -665,6 +837,27 @@ void TransportBarComponent::drawMasterMeter(juce::Graphics& g, juce::Rectangle<i
     g.setColour(theme::text::primary.withAlpha(0.88f));
     g.setFont(transportFont(13.0f, true));
     g.drawText(formatDb(state.masterLevelDb), row.removeFromLeft(56), juce::Justification::centredRight);
+}
+
+void TransportBarComponent::drawMidiMonitor(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    auto box = bounds.withSizeKeepingCentre(bounds.getWidth(), 54);
+    g.setColour(theme::text::tertiary.withAlpha(0.60f));
+    g.setFont(transportFont(kLabelFontSize));
+    g.drawText("PLAYING", box.removeFromTop(kLabelRowH), juce::Justification::centredLeft);
+    box.removeFromTop(1);
+
+    const auto active = state.midiSignalActive;
+    auto content = box.withHeight(36);
+    g.setColour(active ? theme::text::primary.withAlpha(0.94f)
+                       : theme::text::tertiary.withAlpha(0.42f));
+    auto readoutFont = juce::Font(juce::FontOptions("Avenir Next", active ? 30.0f : 21.0f, juce::Font::bold));
+    readoutFont.setExtraKerningFactor(0.0f);
+    g.setFont(readoutFont);
+    g.drawFittedText(state.midiSignalText, content, juce::Justification::centredLeft, 1);
 }
 
 void TransportBarComponent::drawCpuMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const

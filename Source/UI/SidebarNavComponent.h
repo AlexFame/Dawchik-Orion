@@ -26,7 +26,7 @@ class SidebarNavComponent final : public juce::Component
 public:
     SidebarNavComponent();
 
-    static constexpr int preferredWidth = 72;
+    static constexpr int preferredWidth = 120;
 
     std::function<void(SidebarNavItem)> onItemSelected;
     std::function<void(const juce::File&)> onFolderSelected;

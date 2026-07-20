@@ -10,8 +10,8 @@
 
 namespace
 {
-// Match the main-screen button look (rounded 8px, soft drop shadow, thin border, red when active) so
-// the piano-roll toolbar doesn't look "from a different era" than the rest of the app.
+// Match the main-screen control language: Avenir Next, compact 6px controls and a
+// light coral active state shared with the Browser and left rail.
 class PianoRollButtonLookAndFeel final : public juce::LookAndFeel_V4
 {
 public:
@@ -21,29 +21,29 @@ public:
         const auto b = button.getLocalBounds().toFloat();
         const bool on = button.getToggleState();
         // Clearly-visible pill so the label reads against the dark red header (the previous fill blended in).
-        const auto fill = on ? orion::theme::warm::red
-                        : (down        ? juce::Colour(0xff2d3039)
-                        : (highlighted ? juce::Colour(0xff474b56)
-                                       : juce::Colour(0xff3a3e48)));
-        g.setColour(juce::Colours::black.withAlpha(0.30f));
-        g.fillRoundedRectangle(b.translated(0.0f, 1.5f), 8.0f);
+        const auto fill = on ? orion::theme::accent::activeCoral.withAlpha(0.90f)
+                        : (down        ? orion::theme::surface::hover
+                        : (highlighted ? orion::theme::surface::elevated
+                                       : orion::theme::surface::primary));
+        g.setColour(juce::Colours::black.withAlpha(0.18f));
+        g.fillRoundedRectangle(b.translated(0.0f, 1.0f), 6.0f);
         g.setColour(fill);
-        g.fillRoundedRectangle(b, 8.0f);
-        g.setColour(on ? orion::theme::warm::red.brighter(0.3f).withAlpha(0.8f)
+        g.fillRoundedRectangle(b, 6.0f);
+        g.setColour(on ? orion::theme::accent::activeCoralLight.withAlpha(0.9f)
                        : juce::Colours::white.withAlpha(0.16f));
-        g.drawRoundedRectangle(b.reduced(0.5f), 8.0f, 1.0f);
+        g.drawRoundedRectangle(b.reduced(0.5f), 6.0f, 1.0f);
     }
 
     juce::Font getTextButtonFont(juce::TextButton&, int) override
     {
-        return juce::Font(juce::FontOptions(12.5f, juce::Font::bold));
+        return juce::Font(juce::FontOptions("Avenir Next", 13.0f, juce::Font::bold));
     }
 
     void drawButtonText(juce::Graphics& g, juce::TextButton& button, bool, bool) override
     {
         g.setColour(juce::Colours::white.withAlpha(0.94f));
-        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
-        g.drawText(button.getButtonText(), button.getLocalBounds(), juce::Justification::centred, true);
+        g.setFont(juce::FontOptions("Avenir Next", 13.0f, juce::Font::bold));
+        g.drawText(button.getButtonText(), button.getLocalBounds().reduced(8, 0), juce::Justification::centred, true);
     }
 };
 
@@ -288,7 +288,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     slidePenButton.setClickingTogglesState(true);
     slidePenButton.setTooltip("Draw pitch slides directly in the piano roll");
     slidePenButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
-    slidePenButton.setColour(juce::TextButton::buttonOnColourId, theme::warm::red);
+    slidePenButton.setColour(juce::TextButton::buttonOnColourId, theme::accent::activeCoral);
     slidePenButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     slidePenButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
     slidePenButton.addListener(this);
@@ -305,7 +305,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     stepWriteButton.setClickingTogglesState(true);
     stepWriteButton.setTooltip("Step Write mode: type/play notes one grid step at a time");
     stepWriteButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
-    stepWriteButton.setColour(juce::TextButton::buttonOnColourId, theme::warm::red);
+    stepWriteButton.setColour(juce::TextButton::buttonOnColourId, theme::accent::activeCoral);
     stepWriteButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     stepWriteButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
     stepWriteButton.addListener(this);
@@ -370,7 +370,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     glideButton.setClickingTogglesState(true);
     glideButton.setTooltip("Glide: every note played slides from the previous pitch (mono portamento)");
     glideButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
-    glideButton.setColour(juce::TextButton::buttonOnColourId, theme::accent::brandCyan);
+    glideButton.setColour(juce::TextButton::buttonOnColourId, theme::accent::activeCoral);
     glideButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     glideButton.setColour(juce::TextButton::textColourOnId, theme::core::voidBlack);
     glideButton.addListener(this);
@@ -398,7 +398,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     chordToggle.setTooltip("Chord mode: one placed/played note becomes a diatonic chord in the project key. "
                            "Pick the chord size (triad / 7th / 9th / 11th / 13th) or turn it off.");
     chordToggle.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
-    chordToggle.setColour(juce::TextButton::buttonOnColourId, theme::warm::red);
+    chordToggle.setColour(juce::TextButton::buttonOnColourId, theme::accent::activeCoral);
     chordToggle.setColour(juce::TextButton::textColourOffId, theme::text::primary);
     chordToggle.setColour(juce::TextButton::textColourOnId, theme::text::primary);
     chordToggle.setButtonText("Chords");
@@ -772,7 +772,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
 
     // Flat dark header (no red gradient) so the toolbar matches the main screen's colour scheme.
     g.setColour(theme::core::studio);
-    g.fillRoundedRectangle(topBar.toFloat(), 20.0f);
+    g.fillRoundedRectangle(topBar.toFloat(), theme::metrics::panelRadius);
     g.setColour(panelBackground);
     g.fillRoundedRectangle(keyboardArea.toFloat(), 18.0f);
     g.fillRoundedRectangle(visibleGrid.toFloat(), 18.0f);
@@ -780,7 +780,7 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
     g.fillRoundedRectangle(velocityLane.toFloat(), 16.0f);
 
     g.setColour(panelStroke.withAlpha(0.92f));
-    g.drawRoundedRectangle(topBar.toFloat(), 20.0f, 1.0f);
+    g.drawRoundedRectangle(topBar.toFloat(), theme::metrics::panelRadius, 1.0f);
     g.drawRoundedRectangle(keyboardArea.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(visibleGrid.toFloat(), 18.0f, 1.0f);
     g.drawRoundedRectangle(velocityLane.toFloat(), 16.0f, 1.0f);
@@ -1540,6 +1540,23 @@ bool MidiEditorOverlayComponent::keyPressed(const juce::KeyPress& key)
         if (kc >= '1' && kc <= '9' && (kc - '1') < pianoRollToolButtonCount)
         {
             activateToolByIndex(kc - '1');
+            return true;
+        }
+    }
+
+    // Shift + arrows move selected notes by a full octave. Keep the plain arrows free for
+    // navigation, and make the opposite direction available for a predictable pair of shortcuts.
+    if (modifiers.isShiftDown() && ! modifiers.isCommandDown() && ! modifiers.isCtrlDown()
+        && ! modifiers.isAltDown())
+    {
+        if (key.getKeyCode() == juce::KeyPress::downKey)
+        {
+            transposeSelectedNotes(-12);
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::upKey)
+        {
+            transposeSelectedNotes(12);
             return true;
         }
     }
@@ -3424,8 +3441,8 @@ void MidiEditorOverlayComponent::paintEditToolbar(juce::Graphics& g)
         const auto active = isActive(tool);
         const auto b = getToolButtonBounds(i).toFloat();
         const auto hover = hoveredIndex == i;
-        // Selected tool is tinted the app's cyan accent (not red); idle icons are white.
-        const auto iconColour = active ? theme::cool::cyan.withAlpha(0.98f)
+        // Selected tool uses the shared coral active state; idle icons stay quiet.
+        const auto iconColour = active ? theme::accent::activeCoral.withAlpha(0.98f)
                                        : juce::Colours::white.withAlpha(0.72f);
         const auto accentColour = iconColour;
         const auto stroke = juce::PathStrokeType(1.75f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
@@ -3433,7 +3450,7 @@ void MidiEditorOverlayComponent::paintEditToolbar(juce::Graphics& g)
         g.setColour(hover ? theme::surface::primary.withAlpha(0.78f)
                           : theme::surface::primary.withAlpha(active ? 0.62f : 0.34f));
         g.fillRoundedRectangle(b, 4.0f);
-        g.setColour(active ? theme::cool::cyan.withAlpha(0.6f) : juce::Colours::white.withAlpha(0.16f));
+        g.setColour(active ? theme::accent::activeCoral.withAlpha(0.72f) : juce::Colours::white.withAlpha(0.16f));
         g.drawRoundedRectangle(b, 4.0f, active ? 1.4f : 1.0f);
         g.setColour(iconColour);
 
@@ -3780,12 +3797,28 @@ double MidiEditorOverlayComponent::getContentBeats() const noexcept
     return juce::jmax(1.0, clipLength) + editingHeadroomBeats;
 }
 
+// getPixelsPerBeat() divides the view width by getContentBeats(), so changing the clip length
+// (grow/shrink to fit) would silently rescale the whole grid — the piano roll appeared to zoom
+// in/out while you were only moving or deleting notes. Rescale horizontalZoom by the same ratio
+// so pixels-per-beat is unchanged: the clip length only affects the scrollable extent, not zoom.
+void MidiEditorOverlayComponent::preserveHorizontalScaleAcross(double oldContentBeats)
+{
+    const auto newContentBeats = getContentBeats();
+    if (oldContentBeats <= 0.0 || newContentBeats <= 0.0)
+        return;
+    const auto ratio = newContentBeats / oldContentBeats;
+    horizontalZoom       = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, horizontalZoom * ratio);
+    targetHorizontalZoom = juce::jlimit(minimumHorizontalZoom, maximumHorizontalZoom, targetHorizontalZoom * ratio);
+}
+
 void MidiEditorOverlayComponent::growClipToFit(double endBeat)
 {
     if (activeClip == nullptr || endBeat <= activeClip->lengthInBeats + beatEpsilon)
         return;
+    const auto oldContentBeats = getContentBeats();
     constexpr double barBeats = 4.0;   // visual bar (matches the grid)
     activeClip->lengthInBeats = std::ceil((endBeat - beatEpsilon) / barBeats) * barBeats;
+    preserveHorizontalScaleAcross(oldContentBeats);
     clampScrollOffsets();
 }
 
@@ -3802,7 +3835,9 @@ void MidiEditorOverlayComponent::shrinkClipToFitNotes()
     const auto fitted = juce::jmax(barBeats, std::ceil((maxEnd - beatEpsilon) / barBeats) * barBeats);
     if (fitted < activeClip->lengthInBeats - beatEpsilon)
     {
+        const auto oldContentBeats = getContentBeats();
         activeClip->lengthInBeats = fitted;
+        preserveHorizontalScaleAcross(oldContentBeats);
         clampScrollOffsets();
     }
 }
@@ -4065,6 +4100,47 @@ void MidiEditorOverlayComponent::selectSingleNote(int noteIndex)
     if (activeClip != nullptr && noteIndex >= 0 && noteIndex < static_cast<int>(activeClip->midiNotes.size()))
         lastNoteLengthInBeats = juce::jmax(minimumNoteLengthInBeats,
                                            activeClip->midiNotes[static_cast<std::size_t>(noteIndex)].lengthInBeats);
+}
+
+void MidiEditorOverlayComponent::transposeSelectedNotes(int semitones)
+{
+    if (activeClip == nullptr || selectedNotes.empty() || semitones == 0)
+        return;
+
+    OptionalAudioLock lk(audioEditLock);
+    pushUndoSnapshot();
+
+    // Remember the original pitch/start pairs so pitch slides remain attached to the
+    // notes they belong to after the note values are changed.
+    std::vector<std::pair<int, double>> movedNotes;
+    movedNotes.reserve(selectedNotes.size());
+    for (const auto index : selectedNotes)
+    {
+        if (index < 0 || index >= static_cast<int>(activeClip->midiNotes.size()))
+            continue;
+        const auto& note = activeClip->midiNotes[static_cast<std::size_t>(index)];
+        movedNotes.emplace_back(note.pitch, note.startBeat);
+        auto& moved = activeClip->midiNotes[static_cast<std::size_t>(index)];
+        moved.pitch = juce::jlimit(0, 127, moved.pitch + semitones);
+    }
+
+    for (auto& slide : activeClip->pitchSlides)
+    {
+        const auto belongsToMovedNote = std::any_of(movedNotes.begin(), movedNotes.end(),
+            [&slide](const auto& source)
+            {
+                return slide.sourcePitch == source.first
+                    && std::abs(slide.sourceNoteStartBeat - source.second) < 0.0001;
+            });
+        if (! belongsToMovedNote)
+            continue;
+
+        slide.sourcePitch = juce::jlimit(0, 127, slide.sourcePitch + semitones);
+        for (auto& point : slide.points)
+            point.pitch = juce::jlimit(0.0, 127.0, point.pitch + static_cast<double>(semitones));
+    }
+
+    repaint();
 }
 
 void MidiEditorOverlayComponent::duplicateSelectedNotes()

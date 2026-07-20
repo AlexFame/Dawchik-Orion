@@ -149,6 +149,139 @@ private:
     bool looping { false };
 };
 
+// File-backed browser preview. The audio thread only copies samples that the
+// producer has already decoded; the producer reads and resamples the file in
+// small chunks, so the same preview starts quickly and keeps filling without a
+// later raw-to-warped source swap.
+class StreamingFilePreviewSource final : public juce::PositionableAudioSource,
+                                          private juce::Thread
+{
+public:
+    StreamingFilePreviewSource(std::unique_ptr<juce::AudioFormatReader> formatReader,
+                               int outputSamples, double outputSampleRate, bool shouldLoop)
+        : juce::Thread("BrowserPreviewReader"),
+          reader(std::move(formatReader)),
+          sampleRate(outputSampleRate > 0.0 ? outputSampleRate : 44100.0),
+          totalOut(juce::jmax(1, outputSamples)),
+          looping(shouldLoop)
+    {
+        channels = juce::jlimit(1, 2, static_cast<int>(reader != nullptr ? reader->numChannels : 1));
+        sourceSamples = reader != nullptr ? juce::jmax<juce::int64>(1, reader->lengthInSamples) : 1;
+        out.setSize(channels, totalOut);
+        out.clear();
+        startThread();
+
+        // Keep the first transient intact without making the click feel like a load dialog.
+        const auto lead = juce::jmin(totalOut, 2048);
+        const auto deadline = juce::Time::getMillisecondCounter() + 45;
+        while (producedSamples.load(std::memory_order_acquire) < lead
+               && juce::Time::getMillisecondCounter() < deadline)
+            juce::Thread::sleep(1);
+    }
+
+    ~StreamingFilePreviewSource() override { stopThread(2000); }
+
+    void prepareToPlay(int, double) override {}
+    void releaseResources() override {}
+
+    void run() override
+    {
+        if (reader == nullptr)
+            return;
+
+        const auto ratio = static_cast<double>(sourceSamples) / static_cast<double>(totalOut);
+        juce::AudioBuffer<float> sourceChunk(channels, 4098);
+
+        int produced = 0;
+        while (produced < totalOut && ! threadShouldExit())
+        {
+            const auto outCount = juce::jmin(2048, totalOut - produced);
+            const auto sourceStart = static_cast<juce::int64>(std::floor(produced * ratio));
+            const auto sourceEnd = juce::jmin(sourceSamples,
+                                              static_cast<juce::int64>(std::ceil((produced + outCount) * ratio)) + 2);
+            const auto sourceCount = static_cast<int>(juce::jmax<juce::int64>(1, sourceEnd - sourceStart));
+
+            sourceChunk.setSize(channels, sourceCount, false, false, true);
+            sourceChunk.clear();
+            reader->read(&sourceChunk, 0, sourceCount, sourceStart, true, true);
+
+            for (int c = 0; c < channels; ++c)
+            {
+                auto* dst = out.getWritePointer(c) + produced;
+                const auto* src = sourceChunk.getReadPointer(juce::jmin(c, sourceChunk.getNumChannels() - 1));
+                for (int i = 0; i < outCount; ++i)
+                {
+                    const auto sourcePos = (produced + i) * ratio - sourceStart;
+                    const auto i0 = juce::jlimit(0, sourceCount - 1, static_cast<int>(std::floor(sourcePos)));
+                    const auto i1 = juce::jmin(sourceCount - 1, i0 + 1);
+                    const auto t = static_cast<float>(sourcePos - std::floor(sourcePos));
+                    dst[i] = src[i0] + (src[i1] - src[i0]) * t;
+                }
+            }
+
+            produced += outCount;
+            producedSamples.store(produced, std::memory_order_release);
+        }
+    }
+
+    void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
+    {
+        info.clearActiveBufferRegion();
+        if (info.numSamples <= 0)
+            return;
+
+        const auto requested = requestedPosition.exchange(-1, std::memory_order_acq_rel);
+        if (requested >= 0)
+            positionSamples = juce::jlimit<juce::int64>(0, totalOut, requested);
+
+        const auto ready = juce::jmin(totalOut, producedSamples.load(std::memory_order_acquire));
+        int written = 0;
+        while (written < info.numSamples)
+        {
+            if (positionSamples >= totalOut)
+            {
+                if (! looping)
+                    break;
+                positionSamples = 0;
+            }
+
+            if (positionSamples >= ready)
+                break; // producer will fill this region; silence avoids reading unwritten memory
+
+            const auto count = juce::jmin(info.numSamples - written,
+                                          juce::jmin(static_cast<int>(totalOut - positionSamples), ready - static_cast<int>(positionSamples)));
+            for (int c = 0; c < info.buffer->getNumChannels(); ++c)
+                info.buffer->copyFrom(c, info.startSample + written, out,
+                                      juce::jmin(c, channels - 1), static_cast<int>(positionSamples), count);
+            positionSamples += count;
+            written += count;
+        }
+    }
+
+    void setNextReadPosition(juce::int64 newPosition) override
+    {
+        requestedPosition.store(juce::jlimit<juce::int64>(0, totalOut, newPosition), std::memory_order_release);
+    }
+
+    juce::int64 getNextReadPosition() const override { return positionSamples.load(std::memory_order_acquire); }
+    juce::int64 getTotalLength() const override { return totalOut; }
+    bool isLooping() const override { return looping; }
+    void setLooping(bool shouldLoop) noexcept { looping = shouldLoop; }
+    double getSampleRate() const noexcept { return sampleRate; }
+
+private:
+    std::unique_ptr<juce::AudioFormatReader> reader;
+    double sampleRate { 44100.0 };
+    juce::int64 sourceSamples { 1 };
+    int totalOut { 1 };
+    int channels { 1 };
+    bool looping { false };
+    juce::AudioBuffer<float> out;
+    std::atomic<int> producedSamples { 0 };
+    std::atomic<juce::int64> positionSamples { 0 };
+    std::atomic<juce::int64> requestedPosition { -1 };
+};
+
 // Instant, length-independent clip-editor preview: time-stretches (and optionally
 // pitch-shifts) a region to a target length with signalsmith, but starts playing from
 // sample 0 IMMEDIATELY while a background producer thread fills the rest ahead of the
@@ -1772,7 +1905,13 @@ private:
                         const auto numCh = juce::jmax(1, targetBuffer.getNumChannels());
                         samplerMeterScratch.setSize(numCh, numSamples, false, false, true);
                         samplerMeterScratch.clear();
-                        samplerEngine.renderMidiClip(samplerMeterScratch,
+                        if (track.isMpcKit)
+                            samplerEngine.renderMpcKitClip(samplerMeterScratch, 0, numSamples,
+                                                           blockStartBeat, renderSampleRate, beatsPerSecond,
+                                                           loopStartBeat, loopEndBeat, repeatEndBeat,
+                                                           wrapToLoop, wrapToProject, track, clip);
+                        else
+                            samplerEngine.renderMidiClip(samplerMeterScratch,
                                                      0,
                                                      numSamples,
                                                      blockStartBeat,
@@ -1794,7 +1933,13 @@ private:
                     }
                     else
                     {
-                        samplerEngine.renderMidiClip(targetBuffer,
+                        if (track.isMpcKit)
+                            samplerEngine.renderMpcKitClip(targetBuffer, startSample, numSamples,
+                                                           blockStartBeat, renderSampleRate, beatsPerSecond,
+                                                           loopStartBeat, loopEndBeat, repeatEndBeat,
+                                                           wrapToLoop, wrapToProject, track, clip);
+                        else
+                            samplerEngine.renderMidiClip(targetBuffer,
                                                      startSample,
                                                      numSamples,
                                                      blockStartBeat,

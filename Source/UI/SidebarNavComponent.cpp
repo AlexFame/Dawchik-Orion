@@ -5,14 +5,20 @@
 namespace
 {
 namespace th = orion::theme;
-const auto railBackground = th::core::deepSpace;
-const auto railStroke     = th::line::subtle.withAlpha(0.45f);
-const auto activeColour   = th::warm::red;
+// The rail sits next to the browser panel, which shares the same near-black background, so a
+// flush deepSpace fill made the boundary invisible and the (centred) icons read as off-centre.
+// A darker "well" fill plus a crisp right divider makes the rail read as its own column.
+const auto railBackground = th::core::studio;
+const auto railStroke     = th::line::normal;
+const auto activeColour   = th::accent::activeCoral;
 const auto textColour     = th::text::secondary;
 const auto mutedText      = th::text::muted;
 constexpr int topPadding = 22;
 constexpr int itemHeight = 72;
 constexpr int itemGap = 10;
+// The rail includes a narrow visual inset at its left edge; this keeps the menu
+// cards centered in the visible rail rather than in the raw child bounds.
+constexpr int contentNudgeX = 2;
 }  // namespace
 
 namespace orion
@@ -35,13 +41,12 @@ void SidebarNavComponent::rebuildNavEntries()
 
     for (const auto& folder : customFolders)
     {
-        if (! folder.isDirectory())
-            continue;
-
         auto label = folder.getFileName().toUpperCase();
         if (label.isEmpty())
             label = "FOLDER";
-        navEntries.push_back({ SidebarNavItem::customFolder, label.substring(0, 8), folder });
+        // The rail is wide enough to show meaningful folder names; do not truncate them at
+        // the data layer. The label renderer will ellipsize only when a name truly exceeds it.
+        navEntries.push_back({ SidebarNavItem::customFolder, label, folder });
     }
 }
 
@@ -111,7 +116,7 @@ void SidebarNavComponent::paint(juce::Graphics& g)
             g.drawRoundedRectangle(itemBounds.toFloat().reduced(4.5f, 3.5f), th::metrics::controlRadius, 1.0f);
         }
 
-        const auto colour = active ? th::warm::coral.withAlpha(0.94f)
+        const auto colour = active ? activeColour.withAlpha(0.94f)
                                    : (hovered ? textColour : mutedText);
         drawIcon(g, entry.item, itemBounds.withSizeKeepingCentre(28, 28).toFloat().translated(0.0f, -8.0f), colour);
 
@@ -206,7 +211,9 @@ juce::Rectangle<int> SidebarNavComponent::getItemBounds(SidebarNavItem item) con
 
 juce::Rectangle<int> SidebarNavComponent::getEntryBounds(int index) const noexcept
 {
-    return { 0, topPadding + index * (itemHeight + itemGap), getWidth(), itemHeight };
+    const auto horizontalInset = contentNudgeX;
+    return { horizontalInset, topPadding + index * (itemHeight + itemGap),
+             juce::jmax(0, getWidth() - horizontalInset * 2), itemHeight };
 }
 
 std::optional<SidebarNavItem> SidebarNavComponent::hitTestNavItem(juce::Point<int>) const noexcept

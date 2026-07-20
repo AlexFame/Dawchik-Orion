@@ -135,6 +135,7 @@ public:
     bool duplicateSelectedClip();
     bool deleteSelectedClips();
     bool loopToSelectedClip();
+    juce::var createPlaylistBlocksDragPayload(const std::vector<SelectedClip>& clips) const;
     void addAudioTrack();
     void addMidiTrack();
     // --- Group / folder tracks ---
@@ -528,6 +529,7 @@ private:
     std::set<int> selectedTrackIndices;      // all selected track headers (Cmd/Shift-click)
     std::vector<SelectedClip> selectedClips;
     std::optional<DragState> dragState;
+    bool playlistBlocksDragStarted { false };
     std::optional<LoopSelectionState> loopSelectionState;
     PlayheadDragState playheadDragState;
     InspectorResizeState inspectorResizeState;

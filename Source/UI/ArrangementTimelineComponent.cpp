@@ -38,7 +38,7 @@ public:
             { "Guitar", "guitar" }, { "Piano", "piano" }, { "Other", "other" } }};
 
         title.setText("Separate stems", juce::dontSendNotification);
-        title.setFont(juce::Font(14.0f, juce::Font::bold));
+        title.setFont(juce::FontOptions("Avenir Next", 14.0f, juce::Font::bold));
         title.setColour(juce::Label::textColourId, orion::theme::text::primary);
         addAndMakeVisible(title);
 
@@ -119,7 +119,7 @@ constexpr auto minimumLaneHeight = 42;
 constexpr auto maximumLaneHeight = 176;
 constexpr auto minimumVerticalZoom = 0.54;
 constexpr auto maximumVerticalZoom = 2.26;
-constexpr auto editToolbarHeight = 34;
+constexpr auto editToolbarHeight = 40;
 constexpr auto timelineRulerHeight = 30;
 constexpr auto timelineTopChromeHeight = editToolbarHeight + timelineRulerHeight;
 constexpr auto chordLaneHeight = 46;   // arrangement chord lane, shown below the ruler when enabled
@@ -690,7 +690,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     const auto addTrackButton = getAddTrackButtonBounds().toFloat();
     g.setColour(theme::surface::primary.withAlpha(0.34f));
     g.fillRoundedRectangle(addTrackButton, orion::theme::metrics::controlRadius);
-    g.setColour(theme::warm::red.withAlpha(0.62f));
+    g.setColour(theme::accent::activeCoral.withAlpha(0.62f));
     g.drawRoundedRectangle(addTrackButton.reduced(0.5f), orion::theme::metrics::controlRadius, 1.2f);
     auto plus = addTrackButton.reduced(8.0f);
     g.setColour(theme::text::primary.withAlpha(0.90f));
@@ -700,12 +700,12 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     // Chord-lane toggle, immediately left of the "+".
     const auto chordBtn = getChordLaneToggleBounds().toFloat();
     const bool chordOn = project.isChordLaneVisible();
-    g.setColour(chordOn ? theme::cool::cyan.withAlpha(0.85f) : theme::surface::primary.withAlpha(0.34f));
+    g.setColour(chordOn ? theme::accent::activeCoral.withAlpha(0.85f) : theme::surface::primary.withAlpha(0.34f));
     g.fillRoundedRectangle(chordBtn, orion::theme::metrics::controlRadius);
-    g.setColour(chordOn ? theme::cool::cyan : juce::Colours::white.withAlpha(0.18f));
+    g.setColour(chordOn ? theme::accent::activeCoral : juce::Colours::white.withAlpha(0.18f));
     g.drawRoundedRectangle(chordBtn.reduced(0.5f), orion::theme::metrics::controlRadius, 1.2f);
     g.setColour(chordOn ? juce::Colours::black.withAlpha(0.9f) : theme::text::primary.withAlpha(0.9f));
-    g.setFont(juce::Font(13.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions("Avenir Next", 13.0f, juce::Font::bold));
     g.drawText("Ch", chordBtn, juce::Justification::centred);
 
     if (project.hasLoopRange())
@@ -859,7 +859,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
         const auto barNumber = 1 + beat / beatsPerBarInt;
         g.setColour(markerColour);
-        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions("Avenir Next", 13.0f, juce::Font::bold));
         g.drawText(juce::String(barNumber), static_cast<int>(x) + 6, markerLane.getY(), 48, markerLane.getHeight(), juce::Justification::centredLeft);
     }
     g.restoreState();
@@ -927,7 +927,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             }
         }
         const auto cardBounds = layout.card.toFloat();
-        const auto cardR = 9.0f;
+        const auto cardR = theme::metrics::controlRadius;
 
         // Header card is rounded only on the RIGHT — the left edge is square so it reads as
         // anchored to the timeline edge.
@@ -1015,11 +1015,11 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         }
 
         g.setColour(juce::Colours::white.withAlpha(0.70f));
-        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.setFont(juce::FontOptions("Avenir Next", 14.0f, juce::Font::bold));
         g.drawText(juce::String(trackIndex + 1), layout.number, juce::Justification::centred);
 
         g.setColour(textColour.withAlpha(0.94f));
-        g.setFont(juce::FontOptions(13.5f, juce::Font::bold));
+        g.setFont(juce::FontOptions("Avenir Next", 13.5f, juce::Font::bold));
         g.drawText(tracks[trackArrayIndex].name, layout.title, juce::Justification::centredLeft, true);
 
         const std::array<std::pair<juce::String, juce::Rectangle<int>>, 3> buttons {{
@@ -1033,9 +1033,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 || (buttonText == "S" && tracks[trackArrayIndex].solo)
                 || (buttonText == "R" && tracks[trackArrayIndex].recordArmed);
             g.setColour(active ? trackColour.withAlpha(0.74f) : juce::Colours::black.withAlpha(0.42f));
-            g.fillRoundedRectangle(buttonBounds.toFloat(), 6.0f);
+            g.fillRoundedRectangle(buttonBounds.toFloat(), theme::metrics::controlRadius);
             g.setColour(juce::Colours::white.withAlpha(active ? 0.98f : 0.84f));
-            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions("Avenir Next", 13.0f, juce::Font::bold));
             g.drawText(buttonText, buttonBounds, juce::Justification::centred);
         }
 
@@ -1046,7 +1046,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto hasInstrument = tracks[trackArrayIndex].instrumentPluginId.isNotEmpty();
             auto box = layout.instrumentButton.toFloat();
             g.setColour(hasInstrument ? trackColour.withAlpha(0.74f) : juce::Colours::black.withAlpha(0.42f));
-            g.fillRoundedRectangle(box, 6.0f);
+            g.fillRoundedRectangle(box, theme::metrics::controlRadius);
 
             // Mini keyboard: a white-key base with three black-key ticks.
             auto keys = box.reduced(box.getWidth() * 0.24f, box.getHeight() * 0.30f);
@@ -1321,12 +1321,12 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             // flush clips visually separable — without it adjacent clips read as one
             // continuous block (the issue raised when we removed the 2px inset gap).
             g.setColour(variant.waveform.withAlpha(isSelected ? 0.95f : 0.85f));
-            g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), 9.5f, 1.0f);
+            g.drawRoundedRectangle(clipBounds.reduced(0.5f, 0.5f), theme::metrics::controlRadius, 1.0f);
 
             if (isSelected)
             {
                 g.setColour(juce::Colours::white.withAlpha(0.92f));
-                g.drawRoundedRectangle(clipBounds.reduced(1.2f, 1.2f), 8.8f, 2.2f);
+                g.drawRoundedRectangle(clipBounds.reduced(1.2f, 1.2f), theme::metrics::controlRadius, 2.2f);
             }
 
             // Subtle 1px top highlight for a clean Studio One sheen (cheap — no blur, no
@@ -1343,7 +1343,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             if (clip.type == ClipType::midi && clip.lengthInBeats > beatEpsilon && clipBounds.getWidth() > 20.0f)
             {
                 juce::Path clipShape;
-                clipShape.addRoundedRectangle(clipBounds, 10.0f);
+                clipShape.addRoundedRectangle(clipBounds, theme::metrics::controlRadius);
                 g.saveState();
                 g.reduceClipRegion(clipShape);
 
@@ -1393,7 +1393,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                 // Clip the fade fills/strokes to the clip's rounded shape so they don't
                 // poke past the rounded corners (the outer clip region is rectangular).
                 juce::Path clipShape;
-                clipShape.addRoundedRectangle(clipBounds, 10.0f);
+                clipShape.addRoundedRectangle(clipBounds, theme::metrics::controlRadius);
                 g.saveState();
                 g.reduceClipRegion(clipShape);
 
@@ -1481,7 +1481,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                                                        15.0f,
                                                        juce::jmin(static_cast<float>(clipHeaderBounds.getHeight()) - 2.0f,
                                                                   11.0f + static_cast<float>(clipBoundsInt.getWidth()) / 150.0f));
-                g.setFont(juce::FontOptions(adaptiveSize, juce::Font::bold));
+                g.setFont(juce::FontOptions("Avenir Next", adaptiveSize, juce::Font::bold));
 
                 // Keep clip names readable by pinning them to a dedicated top header strip.
                 g.setColour(juce::Colours::black.withAlpha(0.46f));
@@ -1675,9 +1675,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto top = static_cast<float>(visibleGridArea.getY());
             const auto bottom = static_cast<float>(visibleGridArea.getBottom());
             const auto guideColour = isStretch ? theme::cool::cyan : theme::text::primary;
-            // During time-stretch the clip edge is already the direct snap indicator.
-            // Do not duplicate it with a full-height cyan guide; it reads as a delayed
-            // cursor and visually cuts through the entire arrangement.
+            // Full-height snap guide across the whole arrangement (Live-style). It only clears
+            // cleanly because the resize drag repaints a full-height strip (see mouseDrag); a
+            // plain per-clip repaint left a ghost of the line below the clip at the drag start.
             if (! isStretch)
             {
                 g.setColour(juce::Colours::black.withAlpha(0.45f));
@@ -2361,7 +2361,7 @@ juce::Rectangle<int> ArrangementTimelineComponent::getEditToolbarBounds() const 
 juce::Rectangle<int> ArrangementTimelineComponent::getToolButtonBounds(int index) const noexcept
 {
     auto toolbar = getEditToolbarBounds();
-    constexpr int w = 30, h = 26, gap = 12, padX = 0;
+    constexpr int w = 30, h = 28, gap = 10, padX = 0;
     return juce::Rectangle<int>(toolbar.getX() + padX + index * (w + gap),
                                 toolbar.getCentreY() - h / 2,
                                 w,
@@ -2384,7 +2384,7 @@ void ArrangementTimelineComponent::paintToolPalette(juce::Graphics& g)
     paintRegion.setBottom(juce::jmin(getLocalBounds().getBottom(), toolbar.getBottom() + 34));
     g.reduceClipRegion(paintRegion);
 
-    g.setColour(juce::Colours::black.withAlpha(0.10f));
+    g.setColour(theme::surface::elevated.withAlpha(0.46f));
     g.fillRect(toolbar);
     g.setColour(theme::line::subtle.withAlpha(0.60f));
     g.drawVerticalLine(toolbar.getX() + trackHeaderWidth, static_cast<float>(toolbar.getY()), static_cast<float>(toolbar.getBottom()));
@@ -2421,10 +2421,10 @@ void ArrangementTimelineComponent::paintToolPalette(juce::Graphics& g)
         const auto base = hover && enabled ? theme::surface::primary.withAlpha(0.72f)
                                            : theme::surface::primary.withAlpha(active ? 0.56f : 0.34f);
         g.setColour(base);
-        g.fillRoundedRectangle(b, 7.0f);
-        g.setColour(active ? theme::warm::red.withAlpha(0.82f)
+        g.fillRoundedRectangle(b, theme::metrics::controlRadius);
+        g.setColour(active ? theme::accent::activeCoral.withAlpha(0.82f)
                            : juce::Colours::white.withAlpha(enabled ? 0.18f : 0.07f));
-        g.drawRoundedRectangle(b, 7.0f, active ? 1.4f : 1.0f);
+        g.drawRoundedRectangle(b, theme::metrics::controlRadius, active ? 1.4f : 1.0f);
         return b;
     };
 
@@ -2433,7 +2433,7 @@ void ArrangementTimelineComponent::paintToolPalette(juce::Graphics& g)
         const auto active = currentTool == toolModeForIndex(i);
         const auto enabled = true;
         const auto b = drawButtonShell(i, active, enabled);
-        const auto iconColour = active ? theme::warm::red.withAlpha(0.98f)
+        const auto iconColour = active ? theme::accent::activeCoral.withAlpha(0.98f)
                                        : juce::Colours::white.withAlpha(enabled ? 0.78f : 0.28f);
         const auto icon = juce::Rectangle<float>(24.0f, 24.0f).withCentre(b.getCentre());
         const auto sx = icon.getX();
@@ -2815,8 +2815,61 @@ void ArrangementTimelineComponent::resized()
     repaint();
 }
 
+juce::var ArrangementTimelineComponent::createPlaylistBlocksDragPayload(const std::vector<SelectedClip>& clips) const
+{
+    auto* payload = new juce::DynamicObject();
+    payload->setProperty("type", "playlist-blocks");
+
+    const auto& tracks = project.getTracks();
+    double startBeat = std::numeric_limits<double>::max();
+    double endBeat = 0.0;
+    std::set<int> trackSet;
+    juce::String title;
+    int validClips = 0;
+
+    for (const auto& selected : clips)
+    {
+        if (selected.trackIndex < 0 || selected.trackIndex >= static_cast<int>(tracks.size()))
+            continue;
+
+        const auto& track = tracks[static_cast<std::size_t>(selected.trackIndex)];
+        if (selected.clipIndex < 0 || selected.clipIndex >= static_cast<int>(track.clips.size()))
+            continue;
+
+        const auto& clip = track.clips[static_cast<std::size_t>(selected.clipIndex)];
+        startBeat = juce::jmin(startBeat, clip.startBeat);
+        endBeat = juce::jmax(endBeat, clip.startBeat + clip.lengthInBeats);
+        trackSet.insert(selected.trackIndex);
+        if (title.isEmpty())
+            title = clip.name.isNotEmpty() ? clip.name : track.name;
+        ++validClips;
+    }
+
+    if (validClips == 0)
+    {
+        payload->setProperty("clipCount", 0);
+        payload->setProperty("trackCount", 0);
+        payload->setProperty("startBeat", 0.0);
+        payload->setProperty("endBeat", 0.0);
+        payload->setProperty("title", "Empty selection");
+        return juce::var(payload);
+    }
+
+    if (validClips > 1)
+        title = juce::String(validClips) + " playlist blocks";
+
+    payload->setProperty("clipCount", validClips);
+    payload->setProperty("trackCount", static_cast<int>(trackSet.size()));
+    payload->setProperty("startBeat", startBeat);
+    payload->setProperty("endBeat", endBeat);
+    payload->setProperty("title", title);
+    return juce::var(payload);
+}
+
 void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
 {
+    playlistBlocksDragStarted = false;
+
     if (volumeEditorTrackIndex.has_value() && ! trackVolumeInlineEditor.getBounds().contains(event.getPosition()))
         commitTrackVolumeEditor(true);
 
@@ -3418,6 +3471,43 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    if (! playlistBlocksDragStarted && dragState.has_value() && dragState->mode == DragMode::move
+        && event.getDistanceFromDragStart() > 8)
+    {
+        std::vector<SelectedClip> clips;
+        clips.reserve(dragState->clipItems.size());
+        for (const auto& item : dragState->clipItems)
+            clips.push_back(item.clip);
+
+        if (! clips.empty())
+        {
+            if (auto* dragContainer = juce::DragAndDropContainer::findParentDragContainerFor(this))
+            {
+                auto payload = createPlaylistBlocksDragPayload(clips);
+                juce::Image dragImage(juce::Image::ARGB, 220, 56, true);
+                juce::Graphics dg(dragImage);
+                dg.setColour(juce::Colour(0xff151d29).withAlpha(0.94f));
+                dg.fillRoundedRectangle(dragImage.getBounds().toFloat().reduced(0.5f), 8.0f);
+                dg.setColour(theme::cool::cyan.withAlpha(0.86f));
+                dg.drawRoundedRectangle(dragImage.getBounds().toFloat().reduced(1.0f), 8.0f, 1.2f);
+                dg.setColour(theme::text::primary);
+                dg.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+                const auto* object = payload.getDynamicObject();
+                const auto title = object != nullptr ? object->getProperty("title").toString() : juce::String("Playlist block");
+                dg.drawFittedText(title, dragImage.getBounds().reduced(14, 8), juce::Justification::centredLeft, 1);
+                dg.setColour(theme::text::secondary);
+                dg.setFont(juce::FontOptions(11.0f));
+                const auto clipCount = object != nullptr ? static_cast<int>(object->getProperty("clipCount")) : 1;
+                dg.drawFittedText(juce::String(clipCount) + (clipCount == 1 ? " clip" : " clips"),
+                                  dragImage.getBounds().reduced(14, 8).withTrimmedTop(24),
+                                  juce::Justification::centredLeft, 1);
+
+                dragContainer->startDragging(payload, this, juce::ScaledImage(dragImage), true, nullptr, &event.source);
+                playlistBlocksDragStarted = true;
+            }
+        }
+    }
+
     // Move selected chords in time.
     if (chordMoving)
     {
@@ -3634,8 +3724,22 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     const auto repaintEditedClip = [&]
     {
         const auto clipBoundsAfterEdit = getClipBounds(clip, dragState->clip.trackIndex);
-        repaint(clipBoundsBeforeEdit.getUnion(clipBoundsAfterEdit).expanded(14, 12)
-                    .getIntersection(getLocalBounds()));
+        auto region = clipBoundsBeforeEdit.getUnion(clipBoundsAfterEdit).expanded(14, 12);
+
+        // Edge edits draw a full-height snap guide at the clip edge. That line extends far below
+        // the clip, so a clip-bounds-only repaint left its old position on screen as a ghost.
+        // Extend the repaint to the full track-area height (its horizontal span already covers
+        // the edge's old and new positions), so the moving line clears cleanly.
+        const bool edgeEdit = dragState->mode == DragMode::resizeLeft  || dragState->mode == DragMode::resizeRight
+                           || dragState->mode == DragMode::stretchLeft || dragState->mode == DragMode::stretchRight;
+        if (edgeEdit)
+        {
+            const auto trackArea = getVisibleTrackAreaBounds(*this);
+            region.setY(juce::jmin(region.getY(), trackArea.getY()));
+            region.setBottom(juce::jmax(region.getBottom(), trackArea.getBottom()));
+        }
+
+        repaint(region.getIntersection(getLocalBounds()));
     };
     const auto beatDelta = snapBeatValue(xToBeatDelta(event.getDistanceFromDragStartX()));
     // Edge edits should lock the edge directly to the cursor's snapped grid position.
@@ -3904,6 +4008,8 @@ void ArrangementTimelineComponent::modifierKeysChanged(const juce::ModifierKeys&
 
 void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 {
+    playlistBlocksDragStarted = false;
+
     if (chordMoving)
     {
         // Dropped below the lane → bake the progression into a MIDI clip on the target track.

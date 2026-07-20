@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <functional>
+#include <memory>
 
 namespace orion
 {
@@ -28,6 +29,10 @@ struct TransportBarState
     bool mixerOpen { false };
     bool clipEditorOpen { false };
     bool stepSequencerOpen { false };
+    bool mpcSampleOpen { false };
+    bool jamOpen { false };
+    bool midiSignalActive { false };
+    juce::String midiSignalText { "MIDI --" };
 };
 
 class TransportBarComponent final : public juce::Component,
@@ -38,6 +43,7 @@ public:
     ~TransportBarComponent() override;
 
     static constexpr int preferredHeight = 104;
+    static constexpr int jamPreferredHeight = 58;
 
     std::function<void()> onPlay;
     std::function<void()> onStop;
@@ -51,6 +57,8 @@ public:
     std::function<void()> onMixer;
     std::function<void()> onClipEditor;
     std::function<void()> onStepSequencer;
+    std::function<void()> onMpcSample;
+    std::function<void()> onJam;
 
     void setState(const TransportBarState& newState);
     juce::Rectangle<int> getTempoEditorBounds() const noexcept;
@@ -70,7 +78,9 @@ private:
         none,
         mixer,
         clipEditor,
-        stepSequencer
+        stepSequencer,
+        mpcSample,
+        jam
     };
 
     void buttonClicked(juce::Button* button) override;
@@ -81,8 +91,10 @@ private:
     void drawUtilityItem(juce::Graphics& g, UtilityItem item, const juce::String& label, juce::Rectangle<int> bounds) const;
     void drawUtilityIcon(juce::Graphics& g, UtilityItem item, juce::Rectangle<float> bounds, juce::Colour colour) const;
     void drawMasterMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawMidiMonitor(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawBrandCluster(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawCpuMeter(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void paintJamTransport(juce::Graphics& g);
 
     TransportBarState state;
     bool syncingButtons { false };
@@ -101,7 +113,9 @@ private:
     juce::Rectangle<int> brandClusterBounds;
     juce::Rectangle<int> utilityClusterBounds;
     juce::Rectangle<int> monitorClusterBounds;
+    juce::Rectangle<int> midiMonitorBounds;
     juce::Rectangle<int> masterMeterBounds;
     juce::Rectangle<int> cpuMeterBounds;
+    juce::Rectangle<int> jamToggleBounds;
 };
 }  // namespace orion

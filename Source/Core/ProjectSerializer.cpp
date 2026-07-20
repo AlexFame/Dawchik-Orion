@@ -125,6 +125,20 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("trackGainDb", track.trackGainDb);
     object->setProperty("pan", track.pan);
     object->setProperty("samplerSourcePath", track.samplerSourcePath);
+    object->setProperty("isMpcKit", track.isMpcKit);
+    {
+        juce::Array<juce::var> kit;
+        for (const auto& s : track.mpcKitSamples)
+            kit.add(s);
+        object->setProperty("mpcKitSamples", kit);
+    }
+    object->setProperty("isMpcTuneMode", track.isMpcTuneMode);
+    object->setProperty("mpcTuneSample", track.mpcTuneSample);
+    object->setProperty("mpcTuneRoot", track.mpcTuneRoot);
+    object->setProperty("isMpcChopMode", track.isMpcChopMode);
+    object->setProperty("mpcChopSample", track.mpcChopSample);
+    object->setProperty("mpcChopRootPad", track.mpcChopRootPad);
+    object->setProperty("mpcChopSliceCount", track.mpcChopSliceCount);
     object->setProperty("samplerRootMidiNote", track.samplerRootMidiNote);
     object->setProperty("samplerMode", samplerModeToString(track.samplerMode));
     object->setProperty("samplerKeyboardOctaveOffset", track.samplerKeyboardOctaveOffset);
@@ -345,6 +359,17 @@ orion::TrackState trackStateFromVar(const juce::var& value)
     track.trackGainDb                 = getDouble(*obj, "trackGainDb", track.trackGainDb);
     track.pan                         = juce::jlimit(-1.0, 1.0, getDouble(*obj, "pan", track.pan));
     track.samplerSourcePath           = getString(*obj, "samplerSourcePath");
+    track.isMpcKit                    = getBool(*obj, "isMpcKit", track.isMpcKit);
+    if (const auto* kit = obj->getProperty("mpcKitSamples").getArray())
+        for (int i = 0; i < juce::jmin(kit->size(), 16); ++i)
+            track.mpcKitSamples[static_cast<std::size_t>(i)] = (*kit)[i].toString();
+    track.isMpcTuneMode               = getBool(*obj, "isMpcTuneMode", track.isMpcTuneMode);
+    track.mpcTuneSample               = getString(*obj, "mpcTuneSample");
+    track.mpcTuneRoot                 = getInt(*obj, "mpcTuneRoot", track.mpcTuneRoot);
+    track.isMpcChopMode               = getBool(*obj, "isMpcChopMode", track.isMpcChopMode);
+    track.mpcChopSample               = getString(*obj, "mpcChopSample");
+    track.mpcChopRootPad              = juce::jlimit(0, 15, getInt(*obj, "mpcChopRootPad", track.mpcChopRootPad));
+    track.mpcChopSliceCount           = juce::jlimit(1, 64, getInt(*obj, "mpcChopSliceCount", track.mpcChopSliceCount));
     track.samplerRootMidiNote         = getInt(*obj, "samplerRootMidiNote", track.samplerRootMidiNote);
     track.samplerMode                 = samplerModeFromString(getString(*obj, "samplerMode"));
     track.samplerKeyboardOctaveOffset = getInt(*obj, "samplerKeyboardOctaveOffset", track.samplerKeyboardOctaveOffset);

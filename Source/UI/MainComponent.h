@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include "../Audio/ExportService.h"
@@ -22,9 +23,13 @@
 #include "ArrangementTimelineComponent.h"
 #include "BrowserPanelComponent.h"
 #include "ClipEditorComponent.h"
+#include "JamSessionComponent.h"
 #include "MidiEditorOverlayComponent.h"
 #include "AddTrackDialogComponent.h"
 #include "MixerPanelComponent.h"
+#include "MpcSampleHardwareBridge.h"
+#include "MpcSampleMapping.h"
+#include "MpcSamplePanelComponent.h"
 #include "PluginPickerComponent.h"
 #include "SelectionInspectorComponent.h"
 #include "StepSequencerComponent.h"
@@ -36,6 +41,7 @@ namespace orion
 // Audio render sources now live in Audio/PlaybackSources.h. Forward-declared
 // here so the unique_ptr members below only need the definition in the .cpp.
 class BufferPreviewSource;
+class StreamingFilePreviewSource;
 class StreamingWarpPreviewSource;
 class ArrangementPlaybackSource;
 class ClickTrackSource;
@@ -78,9 +84,15 @@ private:
     // plays it through the active track's instrument/sampler, records it when armed,
     // forwards controllers to hosted VST instruments, and step-writes into the MIDI
     // editor when it's open.
-    void routeLiveMidiMessage(const juce::MidiMessage& message);
+    void routeLiveMidiMessage(const juce::MidiMessage& message, const juce::String& sourceName = {});
     int  resolveLiveMidiTargetTrack();
     int  resolveArmedMidiTrack();
+    void triggerMpcPad(int padIndex, int velocity);
+    void handleMpcCommand(MpcSamplePanelComponent::Command command);
+    void beginMpcCommandLearn(MpcSamplePanelComponent::Command command);
+    int  mpcTuneMidiNoteForPad(int padIndex) const;
+    void updateMpcPerformanceState();
+    void mpcTapTempo();
     void liveMidiNoteOn(int trackIndex, int midiNote, int velocity);
     void liveMidiNoteOff(int trackIndex, int midiNote);
     // Chord-lane audition: play a chord through the selected (or first) instrument track, auto-released.
@@ -103,6 +115,11 @@ private:
     void syncChordModeToSurfaces();
     std::map<int, std::vector<int>> liveChordVoicing;      // hardware-MIDI held keys → sounded pitches
     std::map<int, std::vector<int>> samplerChordVoicing;   // sampler-keyboard held keys → sounded pitches
+    std::map<int, std::vector<int>> mpcChordVoicing;       // MPC 16 Levels held pads → sounded pitches
+    std::map<int, int> mpcPadActiveNotes;                  // pad index → exact note sounded at note-on
+    std::set<int> mpcHeldHardwareNoteKeys;                 // channel/note latch: ignore repeat note-ons while held
+    std::map<int, double> mpcHardwareNoteReleaseTimes;     // delayed re-arm: filters MPC pressure/note-repeat chatter
+    std::map<int, int> mpcHardwareNotePads;                // channel/note → Orion pad index for delayed note-off
     // Enables + attaches every available MIDI input device, skipping ones already
     // connected. Called at launch and polled so freshly plugged-in keyboards work
     // without a restart.
@@ -159,6 +176,8 @@ private:
     void toggleMixerFromUi();
     void toggleClipEditorFromUi();
     void toggleStepSequencerFromUi();
+    void toggleMpcSampleFromUi();
+    void toggleJamSessionFromUi();
     void saveProjectInteractively();
     void openProjectInteractively();
     void loadProjectFromFile(const juce::File& file);
@@ -224,11 +243,31 @@ private:
     std::vector<juce::File> sidebarBrowserFolders;
     SelectionInspectorComponent selectionInspector;
     TransportBarComponent transportBar;
+    JamSessionComponent jamSession;
     MidiEditorOverlayComponent midiEditorOverlay;
     ClipEditorComponent clipEditorPanel;
     SamplerPanelComponent samplerPanel;
     StepSequencerComponent stepSequencer { projectState, transportEngine };
     MixerPanelComponent mixerPanel;
+    MpcSamplePanelComponent mpcSamplePanel;
+    MpcSampleHardwareBridge mpcHardwareBridge;
+    bool mpcFullLevel { false };
+    bool mpcSixteenLevels { false };
+    bool mpcChopMode { false };
+    juce::String mpcTuneSourcePath;
+    juce::String mpcChopSourcePath;
+    int mpcTuneRootNote { 36 };
+    int mpcTuneOctaveOffset { 0 };
+    int mpcRepeatedRootNoteCount { 0 };
+    void appendLiveMidiDebugLog(const juce::MidiMessage& message,
+                                const juce::String& sourceName,
+                                int mappedPadIndex);
+    std::optional<MpcSamplePanelComponent::Command> pendingMpcCommandLearn;
+    std::map<int, MpcSamplePanelComponent::Command> mpcCcCommandMap;
+    int mpcPadBank { 0 };
+    int mpcSelectedPad { 0 };
+    double mpcLastTapMs { 0.0 };
+    std::vector<double> mpcTapIntervalsMs;
     AddTrackDialogComponent addTrackDialog;
     PluginPickerComponent pluginPicker;
     int pluginPickerTargetTrack { 0 };
@@ -337,12 +376,20 @@ private:
     std::map<juce::String, std::unique_ptr<juce::MidiInput>> directMidiInputs;
     std::optional<double> globalSpacePreviewRestoreBeat;
     bool globalSpacePreviewWasRecordArmed { false };
+    bool jamSessionOpen { false };
     juce::StringArray seenMidiInputDeviceIds;     // devices auto-enabled once (plug-and-play)
+    bool mpcInputConnected { false };
+    juce::String mpcInputName;
+    double lastLiveMidiActivityMs { -10000.0 };
+    juce::String lastLiveMidiSignalText { "MIDI --" };
+    std::set<int> liveMidiDisplayNotes;
+    int visibleMidiInputCount { 0 };
     int midiDeviceRescanCounter { 0 };            // throttles hot-plug rescans in timerCallback
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;
     std::unique_ptr<BufferPreviewSource> previewBufferSource;
+    std::unique_ptr<StreamingFilePreviewSource> previewFileSource;
     juce::AudioTransportSource clipEditorPreviewTransportSource;
     std::unique_ptr<BufferPreviewSource> clipEditorPreviewBufferSource;
     // Instant streaming stand-in used while the high-quality buffer renders in the
@@ -357,6 +404,7 @@ private:
     std::unique_ptr<MasterStripSource> masterStripSource;
     std::unique_ptr<AudioInputRecorder> audioInputRecorder;
     bool audioRecorderCallbackAttached { false };
+    std::atomic<bool> audioInputConfiguring { false };   // background device start in flight
     double masterGainDb { 0.0 };
     // Decayed per-track output levels (0..1) for the timeline + mixer meters.
     // MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks
@@ -391,6 +439,7 @@ private:
     juce::File currentPreviewFile;
     double currentPreviewTempoBpm { 0.0 };
     bool   currentPreviewBpmSync { false };
+    bool   currentPreviewLooping { false };
     bool   pendingBrowserPreviewStart { false };
     int    pendingBrowserPreviewGeneration { 0 };
     double pendingBrowserPreviewStartBeat { 0.0 };
@@ -403,6 +452,9 @@ private:
     std::atomic<int> previewRequestGeneration { 0 };
     void startPreviewPlayback(juce::AudioBuffer<float> buffer, double sampleRate,
                               const juce::File& file, const juce::String& displayName);
+    void startStreamingPreviewPlayback(std::unique_ptr<juce::AudioFormatReader> reader,
+                                       int outputSamples, double sampleRate,
+                                       const juce::File& file, const juce::String& displayName);
     std::optional<std::pair<int, int>> selectedArrangementClip;
     std::optional<std::pair<int, int>> clipEditorPreviewClip;
     std::map<std::pair<int, int>, std::pair<double, double>> clipEditorSelectionRanges;
@@ -448,6 +500,17 @@ private:
     void ensureMidiRecordingSession(int armedTrack);   // open the record clip/session if needed
     void recordNoteOn(int pitch, int velocity);
     void recordNoteOff(int pitch);
+    // Trigger/stop an MPC Sample pad's own sample through the shared sampler engine (+ record).
+    void playMpcPad(int padIndex, int velocity);
+    // Ensure the MPC panel has an armed MIDI track to record pad hits into; returns its index.
+    int ensureMpcRecordTrack();
+    // Index of the MPC kit track (isMpcKit), creating one named "MPC" if none exists.
+    int mpcKitTrackIndex();
+    int findMpcKitTrack() const;   // like above but never creates (-1 if none)
+    // Mirror a pad's sample into the MPC kit track so recorded MIDI plays it back.
+    void assignMpcKitSample(int padIndex, const juce::String& sourcePath);
+    // Push the panel's Tune (16-Levels) state into the kit track for playback + live.
+    void syncMpcTuneMode();
     void finalizeRecordingClip();
     void startAudioRecordingClip(int trackIndex);
     void finalizeAudioRecordingClip();
@@ -456,8 +519,9 @@ private:
     // Attaches/detaches the input callback so an armed audio track shows live input
     // level (monitoring) even before recording starts.
     void updateInputMonitoring();
-    void requestMicrophonePermissionAtLaunch();
     bool ensureAudioInputReady(bool requestPermission);
+    void beginAudioInputConfiguration();   // starts the audio device off the message thread
+    bool ensureCameraReady(bool requestPermission);
     // Mirror each folder track's volume/mute onto its group bus (one-way), and propagate
     // the folder's solo state down to its children, so the timeline folder controls drive
     // the whole group via the existing bus engine.
@@ -492,5 +556,6 @@ private:
     double pluginScanProgress { 0.0 };
     bool pluginScanVisible { false };
     bool audioInputPermissionRequestInFlight { false };
+    bool cameraPermissionRequestInFlight { false };
 };
 }  // namespace orion

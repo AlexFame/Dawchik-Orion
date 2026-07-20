@@ -590,6 +590,103 @@ void SamplerEngine::renderMidiClip(juce::AudioBuffer<float>& targetBuffer,
     }
 }
 
+void SamplerEngine::renderMpcKitClip(juce::AudioBuffer<float>& targetBuffer,
+                                     int startSample,
+                                     int numSamples,
+                                     double blockStartBeat,
+                                     double renderSampleRate,
+                                     double beatsPerSecond,
+                                     double loopStartBeat,
+                                     double loopEndBeat,
+                                     double repeatEndBeat,
+                                     bool wrapToLoop,
+                                     bool wrapToProjectEnd,
+                                     const TrackState& track,
+                                     const TimelineClip& clip)
+{
+    if (clip.type != ClipType::midi || clip.muted || clip.recording || clip.midiNotes.empty())
+        return;
+
+    // A punchy one-shot "track view" at native pitch — no slices/warp/glide. Scalars only, so
+    // no heap traffic on the audio thread (the scratch objects keep their vector capacities).
+    kitScratchTrack.volumeDb                = track.volumeDb;
+    kitScratchTrack.trackGainDb             = track.trackGainDb;
+    kitScratchTrack.pan                     = track.pan;
+    kitScratchTrack.samplerMode             = SamplerPlaybackMode::oneShot;
+    kitScratchTrack.samplerWarpEnabled      = false;
+    kitScratchTrack.samplerSliceCount       = 1;
+    kitScratchTrack.samplerSlicePoints.clear();
+    kitScratchTrack.samplerTransposeSemitones = 0;
+    kitScratchTrack.samplerAmpAttackSeconds  = 0.001;
+    kitScratchTrack.samplerAmpDecaySeconds   = 0.0;
+    kitScratchTrack.samplerAmpSustain        = 1.0;
+    kitScratchTrack.samplerAmpReleaseSeconds = 0.004;
+
+    kitScratchClip.type          = ClipType::midi;
+    kitScratchClip.startBeat     = clip.startBeat;
+    kitScratchClip.lengthInBeats = clip.lengthInBeats;
+    kitScratchClip.gainDb        = clip.gainDb;
+    kitScratchClip.muted         = false;
+    kitScratchClip.recording     = false;
+    kitScratchClip.pitchSlides.clear();
+
+    // Tune/melodic mode: one sample pitched across ALL notes (keygroup style), rendered in a
+    // single pass by the pitch path (root == mpcTuneRoot plays at original pitch).
+    if (track.isMpcTuneMode && track.mpcTuneSample.isNotEmpty())
+    {
+        kitScratchClip.midiNotes = clip.midiNotes;   // all notes; pitched by (note - root)
+        kitScratchTrack.samplerSourcePath   = track.mpcTuneSample;
+        kitScratchTrack.samplerRootMidiNote = track.mpcTuneRoot;
+        renderMidiClip(targetBuffer, startSample, numSamples, blockStartBeat, renderSampleRate,
+                       beatsPerSecond, loopStartBeat, loopEndBeat, repeatEndBeat,
+                       wrapToLoop, wrapToProjectEnd, kitScratchTrack, kitScratchClip);
+        return;
+    }
+
+    // Chop mode: all 16 pads trigger equal slices from one selected sample.
+    if (track.isMpcChopMode && track.mpcChopSample.isNotEmpty())
+    {
+        kitScratchTrack.samplerSourcePath   = track.mpcChopSample;
+        kitScratchTrack.samplerRootMidiNote = 36;
+        kitScratchTrack.samplerMode         = SamplerPlaybackMode::slice;
+        kitScratchTrack.samplerSliceCount   = juce::jlimit(1, 64, track.mpcChopSliceCount);
+        kitScratchTrack.samplerSlicePoints.clear();
+        kitScratchClip.midiNotes.clear();
+        for (const auto& n : clip.midiNotes)
+            if (n.pitch >= 36 && n.pitch < 36 + kitScratchTrack.samplerSliceCount)
+                kitScratchClip.midiNotes.push_back(n);
+        if (! kitScratchClip.midiNotes.empty())
+            renderMidiClip(targetBuffer, startSample, numSamples, blockStartBeat, renderSampleRate,
+                           beatsPerSecond, loopStartBeat, loopEndBeat, repeatEndBeat,
+                           wrapToLoop, wrapToProjectEnd, kitScratchTrack, kitScratchClip);
+        return;
+    }
+
+    for (int pad = 0; pad < 16; ++pad)
+    {
+        const auto& path = track.mpcKitSamples[static_cast<std::size_t>(pad)];
+        if (path.isEmpty())
+            continue;
+
+        const int note = 36 + pad;   // MPC pad note range C1..D#2
+        kitScratchClip.midiNotes.clear();
+        for (const auto& n : clip.midiNotes)
+            if (n.pitch == note)
+                kitScratchClip.midiNotes.push_back(n);
+        if (kitScratchClip.midiNotes.empty())
+            continue;
+
+        kitScratchTrack.samplerSourcePath   = path;   // COW string assign — no deep copy
+        kitScratchTrack.samplerRootMidiNote = note;   // root == note → ratio 1.0 (native pitch)
+
+        // Reuse the proven single-sample renderer for just this pad's notes; it mixes
+        // additively into targetBuffer, so all 16 pads sum correctly.
+        renderMidiClip(targetBuffer, startSample, numSamples, blockStartBeat, renderSampleRate,
+                       beatsPerSecond, loopStartBeat, loopEndBeat, repeatEndBeat,
+                       wrapToLoop, wrapToProjectEnd, kitScratchTrack, kitScratchClip);
+    }
+}
+
 void SamplerEngine::noteOn(const juce::String& sourcePath,
                            int midiNote,
                            int velocity,

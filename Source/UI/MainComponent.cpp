@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -21,7 +22,7 @@ namespace
 namespace th = orion::theme;
 const auto backgroundColour      = th::core::canvas;
 const auto panelColour           = th::core::studio;
-const auto accentColour          = th::warm::red;
+const auto accentColour          = th::accent::activeCoral;
 const auto panelStroke           = th::line::subtle;
 const auto mutedText             = th::text::muted;
 const auto transportShelfColour  = th::core::voidBlack;
@@ -32,7 +33,6 @@ const auto transportDarkPanel    = th::core::voidBlack;
 const auto transportSectionFill  = th::core::canvas;
 const auto transportSectionStroke = th::line::subtle.withAlpha(0.45f);
 const auto recordAccent          = th::status::error;
-constexpr double previewMaxLengthSeconds = 12.0;
 constexpr int minBrowserPanelWidth = 220;
 constexpr int maxBrowserPanelWidth = 520;
 constexpr int browserResizeHandleWidth = 10;
@@ -107,6 +107,86 @@ juce::String formatTransportTime(double playheadBeat, double bpm)
     return juce::String(mins) + ":" + juce::String(secs, 1).paddedLeft('0', 4);
 }
 
+juce::String midiNoteName(int midiNote)
+{
+    static constexpr const char* names[] {
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+    };
+
+    const auto note = juce::jlimit(0, 127, midiNote);
+    return juce::String(names[note % 12]) + juce::String(note / 12 - 1);
+}
+
+juce::String pitchClassName(int pitchClass)
+{
+    static constexpr const char* names[] {
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+    };
+
+    return names[(pitchClass % 12 + 12) % 12];
+}
+
+bool containsInterval(const std::set<int>& pitchClasses, int root, int interval)
+{
+    return pitchClasses.count((root + interval) % 12) > 0;
+}
+
+juce::String chordNameForPitchClasses(const std::set<int>& pitchClasses)
+{
+    if (pitchClasses.size() < 2)
+        return {};
+
+    for (const auto root : pitchClasses)
+    {
+        const bool min3 = containsInterval(pitchClasses, root, 3);
+        const bool maj3 = containsInterval(pitchClasses, root, 4);
+        const bool p5   = containsInterval(pitchClasses, root, 7);
+        const bool dim5 = containsInterval(pitchClasses, root, 6);
+        const bool aug5 = containsInterval(pitchClasses, root, 8);
+        const bool min7 = containsInterval(pitchClasses, root, 10);
+        const bool maj7 = containsInterval(pitchClasses, root, 11);
+        const bool sus2 = containsInterval(pitchClasses, root, 2);
+        const bool sus4 = containsInterval(pitchClasses, root, 5);
+
+        if (min3 && dim5)
+            return pitchClassName(root) + (min7 ? "m7b5" : "dim");
+        if (maj3 && aug5)
+            return pitchClassName(root) + "aug";
+        if (min3 && p5)
+            return pitchClassName(root) + (min7 ? "m7" : (maj7 ? "mMaj7" : "m"));
+        if (maj3 && p5)
+            return pitchClassName(root) + (min7 ? "7" : (maj7 ? "maj7" : ""));
+        if (sus4 && p5)
+            return pitchClassName(root) + (min7 ? "7sus4" : "sus4");
+        if (sus2 && p5)
+            return pitchClassName(root) + "sus2";
+    }
+
+    return {};
+}
+
+juce::String liveMidiDisplayText(const std::set<int>& notes)
+{
+    if (notes.empty())
+        return "No MIDI";
+
+    if (notes.size() == 1)
+        return midiNoteName(*notes.begin());
+
+    std::set<int> pitchClasses;
+    for (const auto note : notes)
+        pitchClasses.insert(note % 12);
+
+    if (const auto chord = chordNameForPitchClasses(pitchClasses); chord.isNotEmpty())
+        return chord;
+
+    juce::StringArray parts;
+    for (const auto pitchClass : pitchClasses)
+        parts.add(pitchClassName(pitchClass));
+
+    return parts.joinIntoString("+");
+}
+
 std::unique_ptr<juce::PropertiesFile> makeUserSettingsFile()
 {
     juce::PropertiesFile::Options options;
@@ -114,6 +194,39 @@ std::unique_ptr<juce::PropertiesFile> makeUserSettingsFile()
     options.filenameSuffix = "settings";
     options.osxLibrarySubFolder = "Application Support";
     return std::make_unique<juce::PropertiesFile>(options);
+}
+
+int mpcCcKey(int channel, int controller) noexcept
+{
+    return juce::jlimit(1, 16, channel) * 128 + juce::jlimit(0, 127, controller);
+}
+
+juce::String mpcCommandName(orion::MpcSamplePanelComponent::Command command)
+{
+    using Command = orion::MpcSamplePanelComponent::Command;
+    switch (command)
+    {
+        case Command::sampleMode:   return "Sample";
+        case Command::seqMode:      return "Seq";
+        case Command::padFx:        return "Pad FX";
+        case Command::knobFx:       return "Knob FX";
+        case Command::shift:        return "Shift";
+        case Command::padBank:      return "Pad Bank";
+        case Command::chop:         return "Chop";
+        case Command::mute:         return "Mute";
+        case Command::loop:         return "Loop";
+        case Command::levels16:     return "16 Levels";
+        case Command::sampleSelect: return "Sample Select";
+        case Command::tapTempo:     return "Tap Tempo";
+        case Command::rewind:       return "Rewind";
+        case Command::stop:         return "Stop";
+        case Command::record:       return "Record";
+        case Command::play:         return "Play";
+        case Command::undo:         return "Undo";
+        case Command::redo:         return "Redo";
+        case Command::count:        break;
+    }
+    return "Command";
 }
 
 // A modern, rounded popup menu look (dark panel, accent hover) — for the app's own menus
@@ -125,7 +238,7 @@ public:
     {
         setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff1b2027));
         setColour(juce::PopupMenu::textColourId, juce::Colours::white.withAlpha(0.92f));
-        setColour(juce::PopupMenu::highlightedBackgroundColourId, th::warm::red);
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, th::accent::activeCoral);
         setColour(juce::PopupMenu::highlightedTextColourId, th::text::inverse);
     }
 
@@ -1098,6 +1211,10 @@ MainComponent::MainComponent()
     {
         recordButton.setToggleState(shouldRecord, juce::dontSendNotification);
         transportController.setRecordArmed(shouldRecord);
+        // The MPC panel isn't bound to a track, so arming record with it open would have no
+        // target and silently fail to start. Give it a MIDI track to capture pad hits.
+        if (shouldRecord && mpcSamplePanel.isVisible())
+            ensureMpcRecordTrack();
         if (! transportEngine.isRecordArmed())
         {
             finalizeRecordingClip();
@@ -1151,8 +1268,45 @@ MainComponent::MainComponent()
     transportBar.onMixer = [this]() { toggleMixerFromUi(); };
     transportBar.onClipEditor = [this]() { toggleClipEditorFromUi(); };
     transportBar.onStepSequencer = [this]() { toggleStepSequencerFromUi(); };
+    transportBar.onMpcSample = [this]() { toggleMpcSampleFromUi(); };
+    transportBar.onJam = [this]() { toggleJamSessionFromUi(); };
     addAndMakeVisible(transportBar);
 
+    jamSession.setEmbeddedArrangementMode(true);
+    jamSession.setVisible(false);
+    jamSession.onClose = [this]() { toggleJamSessionFromUi(); };
+    jamSession.onMicEnabledChanged = [this](bool enabled)
+    {
+        return ! enabled || ensureAudioInputReady(true);
+    };
+    jamSession.onCameraEnabledChanged = [this](bool enabled)
+    {
+        return ! enabled || ensureCameraReady(true);
+    };
+    addChildComponent(jamSession);
+
+    mpcSamplePanel.onClose = [this]
+    {
+        mpcSamplePanel.setVisible(false);
+        resized();
+        updateTransportLabels();
+    };
+    mpcSamplePanel.onPadTriggered = [this](int pad, int velocity)
+    {
+        triggerMpcPad(pad, velocity);
+    };
+    mpcSamplePanel.onPadSampleAssigned = [this](int pad, const juce::String& path)
+    {
+        assignMpcKitSample(pad, path);
+    };
+    mpcSamplePanel.onCommand = [this](MpcSamplePanelComponent::Command command)
+    {
+        handleMpcCommand(command);
+    };
+    mpcSamplePanel.onCommandLearnRequested = [this](MpcSamplePanelComponent::Command command)
+    {
+        beginMpcCommandLearn(command);
+    };
     stepSequencer.onOpenPianoRoll = [this](int trackIndex, int clipIndex)
     {
         auto& tracks = projectState.getTracks();
@@ -1251,18 +1405,17 @@ MainComponent::MainComponent()
     addAndMakeVisible(midiEditorOverlay);
     addChildComponent(clipEditorPanel);
     addAndMakeVisible(samplerPanel);
+    addChildComponent(mpcSamplePanel);
     addChildComponent(mixerPanel);
     audioFormatManager.registerBasicFormats();
     arrangementPlaybackSource = std::make_unique<ArrangementPlaybackSource>(projectState, transportEngine, audioFormatManager);
     clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine,
                                                           [this]() { return metronomeButton.getToggleState(); });
     audioInputRecorder = std::make_unique<AudioInputRecorder>();
-    // Open output only at launch. Audio input is enabled lazily when an audio track is
-    // armed/recorded. We request mic permission separately below, without opening input,
-    // so macOS shows one first-run prompt instead of a second CoreAudio prompt.
+    // Open output only at launch. Audio input and mic permission are enabled lazily
+    // when the user actually records or monitors input.
     audioDeviceManager.initialise(0, 2, nullptr, true);
     refreshMidiInputDevices();
-    requestMicrophonePermissionAtLaunch();
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
     masterMixerSource.addInputSource(&previewTransportSource, false);
     masterMixerSource.addInputSource(&clipEditorPreviewTransportSource, false);
@@ -2545,22 +2698,28 @@ void MainComponent::paint(juce::Graphics& g)
     // Horizontal extents MUST match resized() (which works off getLocalBounds().reduced(8)),
     // otherwise the painted panel card sits 8px off from where the component is positioned —
     // which made the browser's internal padding asymmetric (24px left vs 8px right).
-    auto workArea = bounds.reduced(8, 0).withTrimmedTop(workspaceTopGap);
-    workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 2);
+    // Match resized(): keep the small left inset, but let the application surface run flush
+    // to the right edge. The panels themselves are square, so no outer corner mask is needed.
+    auto workArea = bounds.withTrimmedLeft(8).withTrimmedRight(0).withTrimmedTop(workspaceTopGap);
+    // The visible rail includes the small outer breathing room around the nav component.
+    // Reserve that same full width here so its cards are centered in the visual rail, not
+    // shifted toward the browser seam.
+    // Keep the painted seam identical to the component layout below:
+    // left inset 8 + rail width 120 + the 2 px workspace gap.
+    workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 6);
     juce::Rectangle<int> browserPanelBounds;
     if (browserPanelShown())
         browserPanelBounds = workArea.removeFromLeft(currentBrowserWidth());
     auto arrangementPanel = workArea;
 
     g.setColour(panelColour);
-    // Round only the OUTER corners of each panel; the corners that face the neighbouring
-    // panel stay square so the two cards abut cleanly along the seam. Rounding both sides
-    // left little dark triangular wedges at the top/bottom of the browser↔playlist seam.
+    // The main workspace is a continuous DAW surface. Rounded corners belong to controls and
+    // dialogs, not to the outer edges of the browser/playlist canvas.
     auto paintPanel = [&](juce::Rectangle<int> panel, bool roundLeft, bool roundRight, bool border)
     {
         if (panel.isEmpty())
             return;
-        const auto r = 14.0f;
+        const auto r = 0.0f;
         const auto b = panel.toFloat();
         juce::Path p;
         p.addRoundedRectangle(b.getX(), b.getY(), b.getWidth(), b.getHeight(),
@@ -2573,12 +2732,10 @@ void MainComponent::paint(juce::Graphics& g)
             g.strokePath(p, juce::PathStrokeType(1.0f));
         }
     };
-    // Panels abut their neighbours flush with no borders. The only rounded corner is the
-    // playlist's outer (right) edge — the far right of the window. Everything to its left
-    // (sidebar seam, browser seam) is square so the panels meet perfectly.
+    // Panels abut their neighbours flush with no borders.
     if (browserPanelShown())
         paintPanel(browserPanelBounds, false, false, false);   // browser: square, flush, no border
-    paintPanel(arrangementPanel, false, true, false);          // playlist: square left, round right only
+    paintPanel(arrangementPanel, false, false, false);         // playlist: square on every edge
 
     // Keep the browser resize hit area invisible; a visible handle reads as a stray divider.
 }
@@ -2623,14 +2780,15 @@ bool MainComponent::browserPanelShown() const noexcept
 
 void MainComponent::resized()
 {
-    transportBar.setBounds(getLocalBounds().removeFromTop(transportShelfHeight));
+    const int activeTransportHeight = jamSessionOpen ? TransportBarComponent::jamPreferredHeight : transportShelfHeight;
+    transportBar.setBounds(getLocalBounds().removeFromTop(activeTransportHeight));
     transportBar.toFront(false);
     cachedKeyCardBounds = transportBar.getKeyBounds().translated(transportBar.getX(), transportBar.getY());
     // Reduced padding for a sleeker edge-to-edge floating layout
     // Keep the horizontal inset while letting the vertical rhythm be controlled explicitly by
     // workspaceTopGap; reducing the whole rectangle here used to cancel that gap later on.
     auto bounds = getLocalBounds().withTrimmedLeft(8).withTrimmedRight(8);
-    auto topStrip = bounds.removeFromTop(transportShelfHeight).reduced(18, 10);
+    auto topStrip = bounds.removeFromTop(activeTransportHeight).reduced(18, 10);
     bounds.setBottom(getLocalBounds().getBottom());
     const auto contentWidth = transportBrandWidth + transportClusterWidth + transportTempoWidth + transportModeWidth
         + transportUtilityWidth + transportSectionGap * 4;
@@ -2648,7 +2806,7 @@ void MainComponent::resized()
     headerLabel.setBounds({});
     statusLabel.setBounds({});
 
-    auto scanTopArea = getLocalBounds().reduced(8).removeFromTop(transportShelfHeight).reduced(18, 0);
+    auto scanTopArea = getLocalBounds().reduced(8).removeFromTop(activeTransportHeight).reduced(18, 0);
     auto scanLabelArea = scanTopArea.withY(scanTopArea.getBottom() - 22).withHeight(12);
     pluginScanNameLabel.setBounds(scanLabelArea);
     pluginScanNameLabel.setVisible(pluginScanVisible);
@@ -2722,8 +2880,11 @@ void MainComponent::resized()
     // Only the left/top insets come from `bounds`; right/bottom go flush to the window.
     auto workArea = bounds.withTrimmedTop(workspaceTopGap);
     workArea.setRight(getLocalBounds().getRight());
-    auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth);
-    sidebarNav.setBounds(sidebarBounds);
+    // The rail fills flush from the window's left edge to the browser seam, so its visible
+    // extent IS the component bounds and the centred icons read as centred. `railContentInset`
+    // (below, in SidebarNavComponent) is the ONLY horizontal inset — do not add another here.
+    auto sidebarBounds = workArea.removeFromLeft(SidebarNavComponent::preferredWidth + 4);
+    sidebarNav.setBounds(0, sidebarBounds.getY(), sidebarBounds.getRight() + 2, sidebarBounds.getHeight());
     sidebarNav.toFront(false);
     workArea.removeFromLeft(2);   // tight gap between the sidebar and the browser/playlist
 
@@ -2743,12 +2904,25 @@ void MainComponent::resized()
     auto playlistArea = arrangementPanel;
     playlistArea.removeFromTop(2);
 
+    auto timelineLayoutArea = playlistArea;
+    if (jamSessionOpen)
+    {
+        constexpr int jamVideoHeight = 184;  // component inset + 156 px video strip + breathing room
+        constexpr int jamChatWidth = 354;    // component inset + 326 px chat dock + gutter
+        timelineLayoutArea.removeFromTop(juce::jmin(jamVideoHeight, timelineLayoutArea.getHeight()));
+        if (timelineLayoutArea.getWidth() > jamChatWidth + 360)
+            timelineLayoutArea.removeFromRight(jamChatWidth);
+    }
+
     const auto samplerOpen = samplerPanel.isVisible();
     const auto clipEditorOpen = clipEditorPanel.isVisible();
     const auto stepSequencerOpen = stepSequencer.isVisible();
+    const auto mpcSampleOpen = mpcSamplePanel.isVisible();
+    // The MPC panel is a large full-height device view (not a compact bottom strip), so it is
+    // NOT part of the shared lower-panel; it covers the whole arrangement area when open.
     const auto bottomPanelOpen = samplerOpen || clipEditorOpen || stepSequencerOpen;
-    const auto closedArrangementArea = playlistArea;
-    auto openArrangementArea = playlistArea;
+    const auto closedArrangementArea = timelineLayoutArea;
+    auto openArrangementArea = timelineLayoutArea;
     // Sampler and clip editor share one compact lower-panel height.
     auto lowerPanelArea = openArrangementArea.removeFromBottom(juce::jmin(samplerPanelHeight, openArrangementArea.getHeight()));
     const auto arrangementArea = bottomPanelOpen ? openArrangementArea : closedArrangementArea;
@@ -2800,6 +2974,38 @@ void MainComponent::resized()
     samplerPanel.setVisible(samplerOpen);
     stepSequencer.setBounds(stepSequencerOpen ? lowerPanelArea : juce::Rectangle<int>());
     stepSequencer.setVisible(stepSequencerOpen);
+    if (mpcSampleOpen)
+    {
+        auto desired = mpcSamplePanel.getBounds();
+        if (desired.isEmpty())
+            desired = playlistArea.withSizeKeepingCentre(juce::jmin(980, playlistArea.getWidth() - 32),
+                                                          juce::jmin(700, playlistArea.getHeight() - 32));
+
+        // Preserve the user's dragged position while keeping the floating surface inside
+        // the playlist workspace after a resize or browser-width change.
+        const auto maxX = juce::jmax(playlistArea.getX(), playlistArea.getRight() - desired.getWidth());
+        const auto maxY = juce::jmax(playlistArea.getY(), playlistArea.getBottom() - desired.getHeight());
+        desired.setX(juce::jlimit(playlistArea.getX(), maxX, desired.getX()));
+        desired.setY(juce::jlimit(playlistArea.getY(), maxY, desired.getY()));
+        mpcSamplePanel.setBounds(desired);
+    }
+    else
+        mpcSamplePanel.setBounds({});
+    mpcSamplePanel.setVisible(mpcSampleOpen);
+    if (mpcSampleOpen)
+        mpcSamplePanel.toFront(false);
+
+    if (jamSessionOpen)
+    {
+        jamSession.setBounds(playlistArea);
+        jamSession.setVisible(true);
+        jamSession.toFront(false);
+    }
+    else
+    {
+        jamSession.setBounds({});
+        jamSession.setVisible(false);
+    }
 
     // The sidebar / transport were just raised with toFront above; if the mixer overlay
     // is open it must stay on top of them, otherwise they overlap and clip it.
@@ -3020,6 +3226,17 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key != juce::KeyPress::spaceKey)
         return false;
 
+    // Browser preview has priority for the first Space press, matching Ableton: stop the
+    // audition first; the next Space belongs to the project transport.
+    if (previewTransportSource.isPlaying() || pendingBrowserPreviewStart)
+    {
+        pendingBrowserPreviewStart = false;
+        browserPanel.setPreviewArmed(false);
+        stopBrowserPreview(true);
+        browserPanel.setPreviewPlayback(false, 0.0f);
+        return true;
+    }
+
     if (transportEngine.isPlaying() || transportEngine.isCountInActive())
         stopTransportFromUi();
     else
@@ -3197,6 +3414,29 @@ void MainComponent::updateTrackMeterLevels()
 
 void MainComponent::timerCallback()
 {
+    static constexpr double mpcPadRearmDelayMs = 140.0;
+    if (! mpcHardwareNoteReleaseTimes.empty())
+    {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        for (auto it = mpcHardwareNoteReleaseTimes.begin(); it != mpcHardwareNoteReleaseTimes.end();)
+        {
+            if (now - it->second < mpcPadRearmDelayMs)
+            {
+                ++it;
+                continue;
+            }
+
+            const auto key = it->first;
+            const auto padIt = mpcHardwareNotePads.find(key);
+            if (padIt != mpcHardwareNotePads.end())
+                playMpcPad(padIt->second, 0);
+
+            mpcHeldHardwareNoteKeys.erase(key);
+            mpcHardwareNotePads.erase(key);
+            it = mpcHardwareNoteReleaseTimes.erase(it);
+        }
+    }
+
     // Smoothly slide the browser panel open/closed.
     {
         const float target = browserPanelVisible ? 1.0f : 0.0f;
@@ -3355,9 +3595,12 @@ void MainComponent::timerCallback()
             }
         }
     }
-    else if (! playing && recordingSession.has_value())
+    else if (! playing && ! countingIn && recordingSession.has_value())
     {
-        // Playback stopped externally (loop end / user stop / count-in cancel) — finalise.
+        // Playback stopped externally (loop end / user stop) — finalise. NOT during count-in:
+        // an early note (played before the downbeat) opens a session while still counting in,
+        // and firing this here would finalise that one note and disarm recording, dropping the
+        // whole take. During count-in the session must survive until real playback begins.
         finishRecordingAndDisarm();
     }
 
@@ -3478,21 +3721,209 @@ void MainComponent::buttonClicked(juce::Button* button)
     }
 }
 
-void MainComponent::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& message)
+void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
     // Called on the MIDI thread. Copy the message and hand it to the message
     // thread, where it's safe to touch the project state and UI.
     juce::Component::SafePointer<MainComponent> safeThis(this);
     const juce::MidiMessage msg(message);
-    juce::MessageManager::callAsync([safeThis, msg]
+    const juce::String sourceName = source != nullptr ? source->getName() : juce::String();
+    juce::MessageManager::callAsync([safeThis, msg, sourceName]
     {
         if (safeThis != nullptr)
-            safeThis->routeLiveMidiMessage(msg);
+            safeThis->routeLiveMidiMessage(msg, sourceName);
     });
 }
 
-void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
+void MainComponent::appendLiveMidiDebugLog(const juce::MidiMessage& message,
+                                           const juce::String& sourceName,
+                                           int mappedPadIndex)
 {
+    juce::String line = juce::Time::getCurrentTime().formatted("%H:%M:%S.%ms")
+        + " src=\"" + sourceName + "\""
+        + " ch=" + juce::String(message.getChannel())
+        + " mappedPad=" + (mappedPadIndex >= 0 ? juce::String(mappedPadIndex + 1) : juce::String("-"));
+
+    if (message.isNoteOnOrOff())
+        line += " note=" + juce::String(message.getNoteNumber())
+              + " vel=" + juce::String(message.isNoteOn() ? static_cast<int>(message.getVelocity()) : 0)
+              + (message.isNoteOn() ? " on" : " off");
+    else if (message.isController())
+        line += " cc=" + juce::String(message.getControllerNumber())
+              + " val=" + juce::String(message.getControllerValue());
+    else if (message.isPitchWheel())
+        line += " pitchWheel=" + juce::String(message.getPitchWheelValue());
+    else if (message.isAftertouch())
+        line += " aftertouch note=" + juce::String(message.getNoteNumber())
+              + " val=" + juce::String(message.getAfterTouchValue());
+    else if (message.isChannelPressure())
+        line += " pressure=" + juce::String(message.getChannelPressureValue());
+    else
+        line += " other";
+
+    line += "\n";
+    juce::File("/tmp/orion-midi.log").appendText(line, false, false, "\n");
+}
+
+void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const juce::String& sourceName)
+{
+    lastLiveMidiActivityMs = juce::Time::getMillisecondCounterHiRes();
+    if (message.isNoteOn())
+    {
+        liveMidiDisplayNotes.insert(message.getNoteNumber());
+        lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
+    }
+    else if (message.isNoteOff())
+    {
+        liveMidiDisplayNotes.erase(message.getNoteNumber());
+        lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
+    }
+    else if (message.isController() && liveMidiDisplayNotes.empty())
+        lastLiveMidiSignalText = "CC " + juce::String(message.getControllerNumber())
+            + "  " + juce::String(message.getControllerValue());
+    else
+        lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
+
+    if (pendingMpcCommandLearn && message.isController()
+        && mpcHardwareBridge.shouldHandleInput(message, sourceName, mpcSamplePanel.isVisible()))
+    {
+        const auto command = *pendingMpcCommandLearn;
+        pendingMpcCommandLearn.reset();
+        mpcCcCommandMap[mpcCcKey(message.getChannel(), message.getControllerNumber())] = command;
+        appendLiveMidiDebugLog(message, sourceName, -1);
+        lastLiveMidiSignalText = "MPC map cc " + juce::String(message.getControllerNumber())
+            + " -> " + mpcCommandName(command);
+        statusLabel.setText("MPC Learn: CC " + juce::String(message.getControllerNumber())
+                            + " mapped to " + mpcCommandName(command),
+                            juce::dontSendNotification);
+        mpcSamplePanel.setHardwareStatus(mpcHardwareBridge.getDeviceState().inputName,
+                                         mpcHardwareBridge.getDeviceState().outputName,
+                                         lastLiveMidiSignalText);
+        return;
+    }
+
+    // The MPC surface only *visualises* the live MIDI stream (pad glow + hardware status).
+    // It must never consume the message: earlier this returned while the panel was visible,
+    // which swallowed every note from every source — so both the pads and a plain MIDI
+    // keyboard went silent. Let the message fall through to the musical routing below so
+    // pads actually play (and record) through the armed track / sampler.
+    if (mpcHardwareBridge.shouldHandleInput(message, sourceName, mpcSamplePanel.isVisible()))
+    {
+        const auto pad = mpcHardwareBridge.handleIncomingMessage(message, sourceName);
+        if (message.isController())
+        {
+            const auto mapped = mpcCcCommandMap.find(mpcCcKey(message.getChannel(), message.getControllerNumber()));
+            if (mapped != mpcCcCommandMap.end())
+            {
+                appendLiveMidiDebugLog(message, sourceName, -1);
+                if (message.getControllerValue() >= 64)
+                {
+                    statusLabel.setText("MPC CC: " + mpcCommandName(mapped->second), juce::dontSendNotification);
+                    handleMpcCommand(mapped->second);
+                }
+                mpcSamplePanel.setHardwareStatus(mpcHardwareBridge.getDeviceState().inputName,
+                                                 mpcHardwareBridge.getDeviceState().outputName,
+                                                 mpcHardwareBridge.getLastMidiDescription());
+                return;
+            }
+        }
+        if (pad)
+        {
+            appendLiveMidiDebugLog(message, sourceName, pad->padIndex);
+            mpcSamplePanel.setPadActivity(pad->padIndex, pad->velocity);
+            if (message.isNoteOnOrOff())
+                lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
+        }
+        mpcSamplePanel.setHardwareStatus(mpcHardwareBridge.getDeviceState().inputName,
+                                         mpcHardwareBridge.getDeviceState().outputName,
+                                         mpcHardwareBridge.getLastMidiDescription());
+
+        // Kit mode: only loaded pads sound. 16 Levels/Tune mode: one selected sample
+        // is pitched across all 16 pad notes, so empty pads must still be consumed here.
+        const bool tuneMode = mpcSixteenLevels && mpcTuneSourcePath.isNotEmpty();
+        const bool chopMode = mpcChopMode && mpcChopSourcePath.isNotEmpty();
+        if (mpcSamplePanel.isVisible() && pad && (tuneMode || chopMode || mpcSamplePanel.isPadLoaded(pad->padIndex)))
+        {
+            int tunePadIndex = pad->padIndex;
+            if (tuneMode)
+            {
+                // Some MPC 16-Levels modes output the same MIDI note for every physical pad,
+                // encoding the "level" as channel or velocity variation instead of chromatic notes.
+                // If all hits map to the selected root pad, use channel first and velocity buckets
+                // so Orion still produces 16 pitched levels instead of replaying one note.
+                const int rootPad = juce::jlimit(0, 15, mpcTuneRootNote - 36);
+                if (pad->padIndex == rootPad)
+                {
+                    if (message.getChannel() >= 1 && message.getChannel() <= 16)
+                        tunePadIndex = message.getChannel() - 1;
+                    else if (message.isNoteOn())
+                        tunePadIndex = juce::jlimit(0, 15, static_cast<int>(std::round((pad->velocity - 1) * 15.0 / 126.0)));
+
+                    if (message.isNoteOn() && tunePadIndex == rootPad && pad->velocity == 127)
+                    {
+                        ++mpcRepeatedRootNoteCount;
+                        if (mpcRepeatedRootNoteCount >= 4)
+                            statusLabel.setText("MPC 16 Levels: hardware is sending only note "
+                                                + juce::String(message.getNoteNumber())
+                                                + " / pad " + juce::String(rootPad + 1)
+                                                + ". Turn off MPC hardware 16 Levels; use Orion 16 Levels with normal pad MIDI.",
+                                                juce::dontSendNotification);
+                    }
+                    else
+                    {
+                        mpcRepeatedRootNoteCount = 0;
+                    }
+                }
+            }
+
+            static constexpr double mpcPadRearmDelayMs = 140.0;
+            const int hardwareNoteKey = message.getChannel() * 128 + message.getNoteNumber();
+            if (message.isNoteOn())
+            {
+                if (mpcHeldHardwareNoteKeys.count(hardwareNoteKey) > 0)
+                {
+                    const auto releaseIt = mpcHardwareNoteReleaseTimes.find(hardwareNoteKey);
+                    const auto now = juce::Time::getMillisecondCounterHiRes();
+                    if (releaseIt == mpcHardwareNoteReleaseTimes.end()
+                        || now - releaseIt->second < mpcPadRearmDelayMs)
+                    {
+                        mpcHardwareNoteReleaseTimes.erase(hardwareNoteKey);
+                        return;
+                    }
+
+                    mpcHeldHardwareNoteKeys.erase(hardwareNoteKey);
+                    mpcHardwareNoteReleaseTimes.erase(hardwareNoteKey);
+                    mpcHardwareNotePads.erase(hardwareNoteKey);
+                }
+
+                mpcHeldHardwareNoteKeys.insert(hardwareNoteKey);
+                mpcHardwareNotePads[hardwareNoteKey] = tunePadIndex;
+                if (tuneMode)
+                {
+                    liveMidiDisplayNotes.erase(message.getNoteNumber());
+                    liveMidiDisplayNotes.insert(mpcTuneRootNote + (tunePadIndex - juce::jlimit(0, 15, mpcTuneRootNote - 36)));
+                    lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
+                }
+                playMpcPad(tunePadIndex, pad->velocity);
+            }
+            else if (message.isNoteOff())
+            {
+                if (tuneMode)
+                {
+                    liveMidiDisplayNotes.erase(mpcTuneRootNote + (tunePadIndex - juce::jlimit(0, 15, mpcTuneRootNote - 36)));
+                    lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
+                }
+                mpcHardwareNoteReleaseTimes[hardwareNoteKey] = juce::Time::getMillisecondCounterHiRes();
+            }
+
+            return;
+        }
+        else
+        {
+            appendLiveMidiDebugLog(message, sourceName, -1);
+        }
+    }
+
     const auto targetTrack = resolveLiveMidiTargetTrack();
 
     // Note on (a note-on with velocity 0 is a note-off by MIDI convention, which
@@ -3522,6 +3953,10 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
         if (! consumedByEditor)
         {
             liveChordVoicing[note] = pitches;
+            liveMidiDisplayNotes.erase(note);
+            for (const auto p : pitches)
+                liveMidiDisplayNotes.insert(p);
+            lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
             if (targetTrack >= 0)
                 for (const auto p : pitches)
                     liveMidiNoteOn(targetTrack, p, velocity);
@@ -3553,6 +3988,11 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message)
             pitches = it->second;
             liveChordVoicing.erase(it);
         }
+
+        liveMidiDisplayNotes.erase(note);
+        for (const auto p : pitches)
+            liveMidiDisplayNotes.erase(p);
+        lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
 
         if (! consumedByEditor && targetTrack >= 0)
             for (const auto p : pitches)
@@ -3629,6 +4069,537 @@ int MainComponent::resolveArmedMidiTrack()
     return -1;
 }
 
+void MainComponent::triggerMpcPad(int padIndex, int velocity)
+{
+    padIndex = juce::jlimit(0, 15, padIndex);
+    if (velocity > 0)
+    {
+        mpcSelectedPad = padIndex;
+        updateMpcPerformanceState();
+    }
+
+    // Play the pad's own sample through the shared sampler engine (+ record).
+    playMpcPad(padIndex, velocity);
+
+    mpcHardwareBridge.sendPadToHardware(padIndex, velocity);
+    if (velocity > 0 && ! mpcHardwareBridge.getDeviceState().outputConnected && ! mpcSamplePanel.isPadLoaded(padIndex))
+        statusLabel.setText("MPC MIDI OUT not found. Check USB/TRS MIDI output.", juce::dontSendNotification);
+}
+
+void MainComponent::playMpcPad(int padIndex, int velocity)
+{
+    if (padIndex < 0 || padIndex > 15 || arrangementPlaybackSource == nullptr)
+        return;
+
+    if (velocity > 0 && mpcPadActiveNotes.count(padIndex) > 0)
+        return;
+
+    // Tune/melodic mode: one sample pitched across the pads. For live play, keep the
+    // source of truth local to the MPC surface so hardware hits don't depend on the
+    // project track sync happening first.
+    const int kit = findMpcKitTrack();
+    const bool trackTune = kit >= 0
+                        && projectState.getTracks()[static_cast<std::size_t>(kit)].isMpcTuneMode
+                        && projectState.getTracks()[static_cast<std::size_t>(kit)].mpcTuneSample.isNotEmpty();
+    const bool trackChop = kit >= 0
+                        && projectState.getTracks()[static_cast<std::size_t>(kit)].isMpcChopMode
+                        && projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample.isNotEmpty();
+    const bool tune = mpcSixteenLevels && (mpcTuneSourcePath.isNotEmpty() || trackTune);
+    const bool chop = ! tune && mpcChopMode && (mpcChopSourcePath.isNotEmpty() || trackChop);
+    const int note = (velocity > 0 || mpcPadActiveNotes.count(padIndex) == 0)
+        ? (tune ? mpcTuneMidiNoteForPad(padIndex) : 36 + padIndex)
+        : mpcPadActiveNotes[padIndex];
+
+    juce::String sourcePath;
+    int rootNote = tune ? (mpcTuneRootNote + mpcTuneOctaveOffset * 12) : note;
+    if (chop)
+    {
+        if (mpcChopSourcePath.isNotEmpty())
+            sourcePath = mpcChopSourcePath;
+        else
+            sourcePath = projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample;
+        rootNote = 36;
+    }
+    else if (tune)
+    {
+        if (mpcTuneSourcePath.isNotEmpty())
+        {
+            sourcePath = mpcTuneSourcePath;
+            rootNote = mpcTuneRootNote;
+        }
+        else
+        {
+            const auto& t = projectState.getTracks()[static_cast<std::size_t>(kit)];
+            sourcePath = t.mpcTuneSample;
+            rootNote = t.mpcTuneRoot;
+        }
+    }
+    else
+    {
+        if (! mpcSamplePanel.isPadLoaded(padIndex))
+            return;   // empty pad — nothing to sound
+        sourcePath = mpcSamplePanel.getPadSourcePath(padIndex);
+    }
+
+    if (velocity > 0)
+    {
+        // Kit mode is drum-style: each pad is one sound. Tune/16 Levels is melodic, so let
+        // Orion's shared Chord Mode expand a pad into a chord just like the sampler keyboard.
+        const auto pitches = tune ? chordPitchesForNote(note) : std::vector<int>{ note };
+        mpcPadActiveNotes[padIndex] = note;
+        mpcChordVoicing[note] = pitches;
+        for (const auto p : pitches)
+        {
+            arrangementPlaybackSource->samplerNoteOn(sourcePath, p, velocity, rootNote, 0.0,
+                                                     chop ? SamplerPlaybackMode::slice : SamplerPlaybackMode::oneShot,
+                                                     chop ? padIndex : 0,
+                                                     chop ? 16 : 1,
+                                                     false, 0.0, true);
+            recordNoteOn(p, velocity);
+        }
+    }
+    else
+    {
+        auto pitches = std::vector<int>{ note };
+        if (const auto it = mpcChordVoicing.find(note); it != mpcChordVoicing.end())
+        {
+            pitches = it->second;
+            mpcChordVoicing.erase(it);
+        }
+
+        for (const auto p : pitches)
+        {
+            arrangementPlaybackSource->samplerNoteOff(p, SamplerPlaybackMode::oneShot, false);
+            recordNoteOff(p);
+        }
+        mpcPadActiveNotes.erase(padIndex);
+    }
+}
+
+int MainComponent::mpcTuneMidiNoteForPad(int padIndex) const
+{
+    const int rootPad = juce::jlimit(0, 15, mpcTuneRootNote - 36);
+    const int degreeOffset = juce::jlimit(0, 15, padIndex) - rootPad;
+    const int chromatic = mpcTuneRootNote + degreeOffset + mpcTuneOctaveOffset * 12;
+
+    if (! projectState.isKeyEnabled() || ! projectState.isScaleLockEnabled())
+        return juce::jlimit(0, 127, chromatic);
+
+    static constexpr std::array<int, 7> majorScale { 0, 2, 4, 5, 7, 9, 11 };
+    static constexpr std::array<int, 7> minorScale { 0, 2, 3, 5, 7, 8, 10 };
+    const auto& scale = projectState.isKeyMinor() ? minorScale : majorScale;
+    const int keyRoot = ((projectState.getKeyRoot() % 12) + 12) % 12;
+
+    const int rootPc = (((mpcTuneRootNote - keyRoot) % 12) + 12) % 12;
+    int rootDegree = 0;
+    int bestDistance = 128;
+    int bestDelta = 0;
+    for (int i = 0; i < 7; ++i)
+    {
+        int delta = scale[static_cast<std::size_t>(i)] - rootPc;
+        if (delta > 6) delta -= 12;
+        if (delta < -6) delta += 12;
+        const int distance = std::abs(delta);
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestDelta = delta;
+            rootDegree = i;
+        }
+    }
+
+    const int snappedRoot = mpcTuneRootNote + bestDelta + mpcTuneOctaveOffset * 12;
+    const int snappedRootOctave = (snappedRoot - keyRoot - scale[static_cast<std::size_t>(rootDegree)]) / 12;
+    const int totalDegree = rootDegree + degreeOffset;
+    const int octaveCarry = totalDegree >= 0 ? totalDegree / 7 : -((-totalDegree + 6) / 7);
+    const int degree = ((totalDegree % 7) + 7) % 7;
+
+    return juce::jlimit(0, 127,
+                        keyRoot
+                            + (snappedRootOctave + octaveCarry) * 12
+                            + scale[static_cast<std::size_t>(degree)]);
+}
+
+int MainComponent::mpcKitTrackIndex()
+{
+    auto& tracks = projectState.getTracks();
+    if (const auto selected = arrangementTimeline.getSelectedTrackIndex(); selected.has_value()
+        && *selected >= 0 && *selected < static_cast<int>(tracks.size()))
+    {
+        auto& t = tracks[static_cast<std::size_t>(*selected)];
+        if (t.isMpcKit)
+            return *selected;
+        if (t.isMidiTrack && t.clips.empty())
+        {
+            const juce::ScopedLock sl(projectState.getAudioEditLock());
+            t.isMpcKit = true;
+            if (! t.name.startsWithIgnoreCase("MPC"))
+                t.name = "MPC " + t.name;
+            return *selected;
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        if (tracks[static_cast<std::size_t>(i)].isMpcKit && tracks[static_cast<std::size_t>(i)].recordArmed)
+            return i;
+
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        if (tracks[static_cast<std::size_t>(i)].isMpcKit)
+            return i;
+
+    // None yet — create a dedicated "MPC" kit track (sanctioned path: undo snapshot + select).
+    arrangementTimeline.addMidiTrack();
+    const int idx = static_cast<int>(projectState.getTracks().size()) - 1;
+    if (idx >= 0)
+    {
+        const juce::ScopedLock sl(projectState.getAudioEditLock());
+        auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
+        t.isMpcKit = true;
+        t.name = "MPC";
+    }
+    return idx;
+}
+
+int MainComponent::findMpcKitTrack() const
+{
+    const auto& tracks = projectState.getTracks();
+    if (const auto selected = arrangementTimeline.getSelectedTrackIndex(); selected.has_value()
+        && *selected >= 0 && *selected < static_cast<int>(tracks.size())
+        && tracks[static_cast<std::size_t>(*selected)].isMpcKit)
+        return *selected;
+
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        if (tracks[static_cast<std::size_t>(i)].isMpcKit && tracks[static_cast<std::size_t>(i)].recordArmed)
+            return i;
+
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        if (tracks[static_cast<std::size_t>(i)].isMpcKit)
+            return i;
+    return -1;
+}
+
+void MainComponent::syncMpcTuneMode()
+{
+    const int idx = mpcKitTrackIndex();   // ensure the kit track exists
+    if (idx < 0 || idx >= static_cast<int>(projectState.getTracks().size()))
+        return;
+
+    int selPad = juce::jlimit(0, 15, mpcSamplePanel.getSelectedPad());
+    if (! mpcSamplePanel.isPadLoaded(selPad))
+        for (int pad = 0; pad < 16; ++pad)
+            if (mpcSamplePanel.isPadLoaded(pad))
+            {
+                selPad = pad;
+                break;
+            }
+
+    const auto tunePath = mpcSamplePanel.getPadSourcePath(selPad);
+    mpcTuneSourcePath = mpcSixteenLevels ? tunePath : juce::String();
+    mpcTuneRootNote = 36 + selPad;
+
+    {
+        const juce::ScopedLock sl(projectState.getAudioEditLock());
+        auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
+        if (tunePath.isNotEmpty())
+            t.mpcKitSamples[static_cast<std::size_t>(selPad)] = tunePath;
+        t.isMpcTuneMode = mpcSixteenLevels && tunePath.isNotEmpty();
+        t.mpcTuneSample = tunePath;
+        t.mpcTuneRoot   = 36 + selPad;   // the selected pad plays at original pitch
+        if (t.isMpcTuneMode)
+        {
+            t.isMpcChopMode = false;
+            t.mpcChopSample = {};
+        }
+    }
+}
+
+void MainComponent::assignMpcKitSample(int padIndex, const juce::String& sourcePath)
+{
+    if (padIndex < 0 || padIndex > 15)
+        return;
+
+    const int idx = mpcKitTrackIndex();
+    if (idx < 0 || idx >= static_cast<int>(projectState.getTracks().size()))
+        return;
+
+    {
+        // The audio thread reads mpcKitSamples in renderMpcKitClip — guard the write.
+        const juce::ScopedLock sl(projectState.getAudioEditLock());
+        auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
+        t.isMpcKit = true;
+        t.mpcKitSamples[static_cast<std::size_t>(padIndex)] = sourcePath;
+        if (mpcChopMode && padIndex == mpcSamplePanel.getSelectedPad())
+        {
+            mpcChopSourcePath = sourcePath;
+            t.isMpcTuneMode = false;
+            t.mpcTuneSample = {};
+            t.isMpcChopMode = true;
+            t.mpcChopSample = sourcePath;
+            t.mpcChopRootPad = padIndex;
+            t.mpcChopSliceCount = 16;
+        }
+    }
+    if (mpcSixteenLevels)
+    {
+        mpcRepeatedRootNoteCount = 0;
+        syncMpcTuneMode();
+    }
+    arrangementTimeline.repaint();
+    mixerPanel.repaint();
+}
+
+int MainComponent::ensureMpcRecordTrack()
+{
+    // Record pad hits into the MPC kit track, so playback plays the pad samples back.
+    const int target = mpcKitTrackIndex();
+    if (target >= 0 && target < static_cast<int>(projectState.getTracks().size()))
+    {
+        auto& tracks = projectState.getTracks();
+        for (auto& track : tracks)
+            if (track.isMidiTrack)
+                track.recordArmed = false;
+        tracks[static_cast<std::size_t>(target)].recordArmed = true;
+        arrangementTimeline.selectTrack(target);
+        arrangementTimeline.repaint();
+        mixerPanel.repaint();
+    }
+    return target;
+}
+
+void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
+{
+    switch (command)
+    {
+        case MpcSamplePanelComponent::Command::sampleMode:
+            statusLabel.setText("MPC: hardware shell active", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::seqMode:
+            statusLabel.setText("MPC: sequence mode selected", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::padFx:
+            mpcFullLevel = ! mpcFullLevel;
+            statusLabel.setText(mpcFullLevel ? "MPC: Full Level on" : "MPC: Full Level off", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::knobFx:
+            statusLabel.setText("MPC: knob FX is hardware-side", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::shift:
+            mpcSixteenLevels = false;
+            mpcChopMode = false;
+            mpcChopSourcePath = {};
+            mpcFullLevel = false;
+            mpcPadBank = 0;
+            mpcTuneOctaveOffset = 0;
+            mpcHeldHardwareNoteKeys.clear();
+            mpcHardwareNoteReleaseTimes.clear();
+            mpcHardwareNotePads.clear();
+            mpcPadActiveNotes.clear();
+            mpcChordVoicing.clear();
+            statusLabel.setText("MPC: performance reset", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::padBank:
+            mpcPadBank = (mpcPadBank + 1) % 4;
+            statusLabel.setText("MPC: Pad bank " + juce::String(static_cast<juce::juce_wchar>('A' + mpcPadBank)),
+                                juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::chop:
+        {
+            int sourcePad = mpcSamplePanel.getSelectedPad();
+            if (! mpcSamplePanel.isPadLoaded(sourcePad))
+                for (int pad = 0; pad < 16; ++pad)
+                    if (mpcSamplePanel.isPadLoaded(pad))
+                    {
+                        sourcePad = pad;
+                        break;
+                    }
+
+            const auto chopPath = mpcSamplePanel.getPadSourcePath(sourcePad);
+            if (chopPath.isEmpty())
+            {
+                mpcChopMode = false;
+                mpcChopSourcePath = {};
+                statusLabel.setText("MPC Chop: drop a sample on a pad first", juce::dontSendNotification);
+                break;
+            }
+
+            mpcChopMode = ! mpcChopMode;
+            mpcSixteenLevels = false;
+            mpcTuneSourcePath = {};
+            mpcTuneOctaveOffset = 0;
+            mpcChopSourcePath = mpcChopMode ? chopPath : juce::String();
+            mpcSelectedPad = sourcePad;
+            mpcHeldHardwareNoteKeys.clear();
+            mpcHardwareNoteReleaseTimes.clear();
+            mpcHardwareNotePads.clear();
+            mpcPadActiveNotes.clear();
+            mpcChordVoicing.clear();
+
+            if (const int idx = mpcKitTrackIndex(); idx >= 0 && idx < static_cast<int>(projectState.getTracks().size()))
+            {
+                const juce::ScopedLock sl(projectState.getAudioEditLock());
+                auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
+                t.isMpcTuneMode = false;
+                t.mpcTuneSample = {};
+                t.isMpcChopMode = mpcChopMode;
+                t.mpcChopSample = mpcChopSourcePath;
+                t.mpcChopRootPad = sourcePad;
+                t.mpcChopSliceCount = 16;
+            }
+
+            statusLabel.setText(mpcChopMode ? "MPC Chop: pads trigger 16 slices"
+                                            : "MPC Chop: off",
+                                juce::dontSendNotification);
+            break;
+        }
+        case MpcSamplePanelComponent::Command::mute:
+            statusLabel.setText("MPC: mute is hardware-side", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::loop:
+            toggleLoopFromUi();
+            break;
+        case MpcSamplePanelComponent::Command::levels16:
+        {
+            bool hasSampleForTune = mpcSamplePanel.isPadLoaded(mpcSamplePanel.getSelectedPad());
+            if (! hasSampleForTune)
+                for (int pad = 0; pad < 16; ++pad)
+                    if (mpcSamplePanel.isPadLoaded(pad))
+                    {
+                        hasSampleForTune = true;
+                        break;
+                    }
+
+            if (! hasSampleForTune)
+            {
+                mpcSixteenLevels = false;
+                mpcTuneSourcePath = {};
+                mpcChopMode = false;
+                mpcChopSourcePath = {};
+                mpcHeldHardwareNoteKeys.clear();
+                mpcHardwareNoteReleaseTimes.clear();
+                mpcHardwareNotePads.clear();
+                mpcPadActiveNotes.clear();
+                mpcChordVoicing.clear();
+                statusLabel.setText("MPC: drop a sample on a pad before 16 Levels", juce::dontSendNotification);
+                break;
+            }
+
+            mpcSixteenLevels = ! mpcSixteenLevels;
+            mpcChopMode = false;
+            mpcChopSourcePath = {};
+            mpcRepeatedRootNoteCount = 0;
+            mpcHeldHardwareNoteKeys.clear();
+            mpcHardwareNoteReleaseTimes.clear();
+            mpcHardwareNotePads.clear();
+            mpcPadActiveNotes.clear();
+            mpcChordVoicing.clear();
+            syncMpcTuneMode();   // Tune/melodic: one sample pitched across the pads
+            statusLabel.setText(mpcSixteenLevels ? "MPC: Tune — scale pads, +/- octave"
+                                                 : "MPC: Kit mode", juce::dontSendNotification);
+            break;
+        }
+        case MpcSamplePanelComponent::Command::sampleSelect:
+            statusLabel.setText("MPC: sample select is hardware-side", juce::dontSendNotification);
+            break;
+        case MpcSamplePanelComponent::Command::tapTempo:
+            mpcTapTempo();
+            break;
+        case MpcSamplePanelComponent::Command::rewind:
+            rewindTransportFromUi();
+            break;
+        case MpcSamplePanelComponent::Command::stop:
+            stopTransportFromUi();
+            break;
+        case MpcSamplePanelComponent::Command::record:
+            recordButton.triggerClick();
+            break;
+        case MpcSamplePanelComponent::Command::play:
+            toggleTransportFromUi();
+            break;
+        case MpcSamplePanelComponent::Command::undo:
+            if (mpcSixteenLevels)
+            {
+                if (arrangementPlaybackSource != nullptr)
+                    arrangementPlaybackSource->allSamplerNotesOff();
+                mpcTuneOctaveOffset = juce::jlimit(-4, 4, mpcTuneOctaveOffset - 1);
+                mpcHeldHardwareNoteKeys.clear();
+                mpcHardwareNoteReleaseTimes.clear();
+                mpcHardwareNotePads.clear();
+                mpcPadActiveNotes.clear();
+                mpcChordVoicing.clear();
+                statusLabel.setText("MPC: Octave " + juce::String(mpcTuneOctaveOffset), juce::dontSendNotification);
+            }
+            else
+            {
+                arrangementTimeline.undo();
+            }
+            break;
+        case MpcSamplePanelComponent::Command::redo:
+            if (mpcSixteenLevels)
+            {
+                if (arrangementPlaybackSource != nullptr)
+                    arrangementPlaybackSource->allSamplerNotesOff();
+                mpcTuneOctaveOffset = juce::jlimit(-4, 4, mpcTuneOctaveOffset + 1);
+                mpcHeldHardwareNoteKeys.clear();
+                mpcHardwareNoteReleaseTimes.clear();
+                mpcHardwareNotePads.clear();
+                mpcPadActiveNotes.clear();
+                mpcChordVoicing.clear();
+                statusLabel.setText("MPC: Octave " + juce::String(mpcTuneOctaveOffset), juce::dontSendNotification);
+            }
+            else
+            {
+                arrangementTimeline.redo();
+            }
+            break;
+        case MpcSamplePanelComponent::Command::count:
+            break;
+    }
+
+    updateMpcPerformanceState();
+    arrangementTimeline.repaint();
+}
+
+void MainComponent::beginMpcCommandLearn(MpcSamplePanelComponent::Command command)
+{
+    pendingMpcCommandLearn = command;
+    statusLabel.setText("MPC Learn: press hardware control for " + mpcCommandName(command),
+                        juce::dontSendNotification);
+    lastLiveMidiSignalText = "MPC learn " + mpcCommandName(command);
+    mpcSamplePanel.setHardwareStatus(mpcHardwareBridge.getDeviceState().inputName,
+                                     mpcHardwareBridge.getDeviceState().outputName,
+                                     "MPC Learn: waiting for CC -> " + mpcCommandName(command));
+}
+
+void MainComponent::updateMpcPerformanceState()
+{
+    mpcSamplePanel.setPerformanceState(mpcFullLevel, mpcSixteenLevels, mpcChopMode, mpcPadBank, mpcSelectedPad);
+}
+
+void MainComponent::mpcTapTempo()
+{
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+    if (mpcLastTapMs > 0.0)
+    {
+        const auto interval = now - mpcLastTapMs;
+        if (interval > 250.0 && interval < 2000.0)
+        {
+            mpcTapIntervalsMs.push_back(interval);
+            while (mpcTapIntervalsMs.size() > 4)
+                mpcTapIntervalsMs.erase(mpcTapIntervalsMs.begin());
+
+            const auto sum = std::accumulate(mpcTapIntervalsMs.begin(), mpcTapIntervalsMs.end(), 0.0);
+            const auto bpm = 60000.0 / (sum / static_cast<double>(mpcTapIntervalsMs.size()));
+            transportController.setTempoBpm(bpm);
+            updateTransportLabels();
+            statusLabel.setText("MPC: Tap tempo " + juce::String(projectState.getTempoBpm(), 1) + " BPM",
+                                juce::dontSendNotification);
+        }
+        else
+            mpcTapIntervalsMs.clear();
+    }
+    mpcLastTapMs = now;
+}
+
 std::vector<int> MainComponent::chordPitchesForNote(int midiNote) const
 {
     // Chord mode needs a project key to be diatonic. Off → the note plays as-is.
@@ -3700,6 +4671,61 @@ void MainComponent::liveMidiNoteOn(int trackIndex, int midiNote, int velocity)
         return;
     }
 
+    if (track.isMpcKit)
+    {
+        if (track.isMpcChopMode && track.mpcChopSample.isNotEmpty())
+        {
+            const int slice = juce::jlimit(0, juce::jmax(0, track.mpcChopSliceCount - 1), midiNote - 36);
+            arrangementPlaybackSource->samplerNoteOn(track.mpcChopSample,
+                                                     midiNote,
+                                                     velocity,
+                                                     36,
+                                                     track.volumeDb,
+                                                     SamplerPlaybackMode::slice,
+                                                     slice,
+                                                     juce::jlimit(1, 64, track.mpcChopSliceCount),
+                                                     false,
+                                                     0.0,
+                                                     true);
+            return;
+        }
+
+        if (track.isMpcTuneMode && track.mpcTuneSample.isNotEmpty())
+        {
+            arrangementPlaybackSource->samplerNoteOn(track.mpcTuneSample,
+                                                     midiNote,
+                                                     velocity,
+                                                     track.mpcTuneRoot,
+                                                     track.volumeDb,
+                                                     SamplerPlaybackMode::oneShot,
+                                                     0,
+                                                     1,
+                                                     false,
+                                                     0.0,
+                                                     true);
+            return;
+        }
+
+        const int pad = midiNote - 36;
+        if (pad >= 0 && pad < 16)
+        {
+            const auto& sample = track.mpcKitSamples[static_cast<std::size_t>(pad)];
+            if (sample.isNotEmpty())
+                arrangementPlaybackSource->samplerNoteOn(sample,
+                                                         midiNote,
+                                                         velocity,
+                                                         midiNote,
+                                                         track.volumeDb,
+                                                         SamplerPlaybackMode::oneShot,
+                                                         0,
+                                                         1,
+                                                         false,
+                                                         0.0,
+                                                         true);
+        }
+        return;
+    }
+
     if (track.samplerSourcePath.isNotEmpty())
         arrangementPlaybackSource->samplerNoteOn(track.samplerSourcePath,
                                                  midiNote,
@@ -3759,37 +4785,44 @@ void MainComponent::stopArrangementChordAudition()
 void MainComponent::refreshMidiInputDevices()
 {
     const auto devices = juce::MidiInput::getAvailableDevices();
+    const auto outputDevices = juce::MidiOutput::getAvailableDevices();
+    visibleMidiInputCount = devices.size();
+    const auto mpcState = mpcHardwareBridge.refreshDevices(devices, outputDevices);
+    if (mpcState.inputConnected != mpcInputConnected || mpcState.inputName != mpcInputName)
+    {
+        mpcInputConnected = mpcState.inputConnected;
+        mpcInputName = mpcState.inputName;
+        statusLabel.setText(mpcInputConnected ? "MPC MIDI IN: " + mpcInputName : "MPC MIDI IN: listening",
+                            juce::dontSendNotification);
+    }
+    mpcSamplePanel.setConnectionState(mpcState.inputConnected, mpcState.inputName);
+    mpcSamplePanel.setHardwareStatus(mpcState.inputName, mpcState.outputName, mpcHardwareBridge.getLastMidiDescription());
 
-    // Plug-and-play: enable a device the first time we ever see it, but only once.
-    // After that its on/off state belongs to the user (the Settings toggles), so we
-    // never re-enable something they switched off, and never re-disable on a poll.
+    // Open each visible input DIRECTLY and be its ONLY client. Two things bit us here:
+    //  1. On this Mac the AudioDeviceManager callback path never delivers messages.
+    //  2. Registering an AudioDeviceManager callback makes it also open the CoreMIDI
+    //     endpoint; several class-compliant USB devices (Keystation, MPC Sample) are
+    //     single-client, so that second opener starves our openDevice and NOBODY gets
+    //     messages. So: no setMidiInputDeviceEnabled, no addMidiInputDeviceCallback —
+    //     just juce::MidiInput::openDevice + start(), which is the reliable path.
     for (const auto& d : devices)
     {
+        // Match the last-known-good path exactly: enable in AudioDeviceManager (first-seen),
+        // then be the direct openDevice client. No addMidiInputDeviceCallback (that opened a
+        // second, conflicting client on single-client USB gear).
         if (! seenMidiInputDeviceIds.contains(d.identifier))
         {
             seenMidiInputDeviceIds.add(d.identifier);
             audioDeviceManager.setMidiInputDeviceEnabled(d.identifier, true);
         }
-    }
 
-    // Open each enabled device DIRECTLY (AudioDeviceManager registered the callback but never
-    // delivered messages on this macOS). juce::MidiInput::openDevice + start() is the reliable path.
-    for (const auto& d : devices)
-    {
-        const bool enabled = audioDeviceManager.isMidiInputDeviceEnabled(d.identifier);
-        const bool opened  = directMidiInputs.count(d.identifier) > 0;
+        if (directMidiInputs.count(d.identifier) > 0)
+            continue;
 
-        if (enabled && ! opened)
+        if (auto input = juce::MidiInput::openDevice(d.identifier, this))
         {
-            if (auto input = juce::MidiInput::openDevice(d.identifier, this))
-            {
-                input->start();
-                directMidiInputs[d.identifier] = std::move(input);
-            }
-        }
-        else if (! enabled && opened)
-        {
-            directMidiInputs.erase(d.identifier);   // unique_ptr dtor stops + closes
+            input->start();
+            directMidiInputs[d.identifier] = std::move(input);
         }
     }
 
@@ -3848,7 +4881,7 @@ void MainComponent::updateTransportLabels()
 
     TransportBarState transportState;
     transportState.tempoBpm = projectState.getTempoBpm();
-    transportState.projectName = currentProjectFile.existsAsFile()
+    transportState.projectName = currentProjectFile != juce::File()
         ? currentProjectFile.getFileNameWithoutExtension()
         : juce::String("Untitled");
     transportState.keyText = projectState.isKeyEnabled()
@@ -3875,6 +4908,13 @@ void MainComponent::updateTransportLabels()
     transportState.mixerOpen = mixerPanel.isVisible();
     transportState.clipEditorOpen = clipEditorPanel.isVisible();
     transportState.stepSequencerOpen = stepSequencer.isVisible();
+    transportState.mpcSampleOpen = mpcSamplePanel.isVisible();
+    transportState.jamOpen = jamSessionOpen;
+    transportState.midiSignalActive = ! liveMidiDisplayNotes.empty()
+        || (juce::Time::getMillisecondCounterHiRes() - lastLiveMidiActivityMs) < 320.0;
+    transportState.midiSignalText = transportState.midiSignalActive && lastLiveMidiSignalText.isNotEmpty()
+        ? lastLiveMidiSignalText
+        : "No MIDI";
     transportBar.setState(transportState);
 
     // menuItemsChanged() triggers an async menu-bar rebuild; calling it every 60 Hz tick churned the
@@ -3890,7 +4930,8 @@ void MainComponent::updateTransportLabels()
         | (projectState.isRecordWithCountIn()       ? 128u : 0u)
         | (mixerPanel.isVisible()                   ? 256u : 0u)
         | (clipEditorPanel.isVisible()              ? 512u : 0u)
-        | (stepSequencer.isVisible()                ? 1024u: 0u);
+        | (stepSequencer.isVisible()                ? 1024u: 0u)
+        | (jamSessionOpen                           ? 2048u: 0u);
     if (menuHash != lastMenuStateHash)
     {
         lastMenuStateHash = menuHash;
@@ -3907,7 +4948,7 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
     }
 
     // Same file already loaded at the current tempo and sync mode → just restart instantly.
-    if (previewBufferSource != nullptr
+    if ((previewBufferSource != nullptr || previewFileSource != nullptr)
         && item.file == currentPreviewFile
         && std::abs(currentPreviewTempoBpm - projectState.getTempoBpm()) < 0.001
         && currentPreviewBpmSync == browserPanel.isPreviewBpmSyncEnabled())
@@ -3920,6 +4961,11 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
 
     statusLabel.setText("Previewing: " + item.file.getFileName(), juce::dontSendNotification);
 
+    // Ableton's browser treats a one-bar preview as a one-shot and loops longer musical
+    // material. BrowserPanelComponent estimates the musical length from its metadata.
+    currentPreviewLooping = item.defaultClipLengthInBeats
+                            > static_cast<double>(juce::jmax(1, projectState.getNumerator()));
+
     // Read + decode on a background thread so flipping through samples on a slow / external
     // drive never freezes the UI. A generation token discards stale loads when the user has
     // already moved on to another sample.
@@ -3930,6 +4976,17 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
     const auto tempoNow = projectState.getTempoBpm();
     const auto numerator = projectState.getNumerator();
     const auto fitToTempo = browserPanel.isPreviewBpmSyncEnabled();
+    currentPreviewBpmSync = fitToTempo;
+    currentPreviewLooping = item.defaultClipLengthInBeats
+                            > static_cast<double>(juce::jmax(1, projectState.getNumerator()));
+
+    // Stop the previous preview immediately. The new source below owns one continuous
+    // tempo-fitted stream, so there is no raw-then-warped handoff and no double start.
+    previewTransportSource.stop();
+    previewTransportSource.setSource(nullptr);
+    previewBufferSource.reset();
+    previewFileSource.reset();
+    browserPanel.setPreviewPlayback(false, 0.0f);
     juce::Component::SafePointer<MainComponent> safeThis(this);
 
     previewLoadPool.addJob([this, safeThis, generation, file, displayName, tempoNow, numerator, fitToTempo]
@@ -3939,30 +4996,59 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
             return;
 
         const auto sampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 44100.0;
-        const auto maxPreviewSamples = static_cast<juce::int64>(previewMaxLengthSeconds * sampleRate);
-        const auto samplesToRead = static_cast<int>(juce::jmin(reader->lengthInSamples, maxPreviewSamples));
-        if (samplesToRead <= 0)
+        const auto sourceSamples = juce::jmax<juce::int64>(1, reader->lengthInSamples);
+        const auto analysis = fitToTempo ? analyzeAudioWarpMetadata(file, tempoNow, numerator, false)
+                                         : AudioWarpAnalysis {};
+        const auto tempoRatio = fitToTempo && analysis.sourceBpm > 0.0 && tempoNow > 0.0
+                              ? analysis.sourceBpm / tempoNow : 1.0;
+        const auto outputSamples64 = juce::jmax<juce::int64>(1, static_cast<juce::int64>(std::llround(
+            static_cast<double>(sourceSamples) * tempoRatio)));
+        const auto outputSamples = static_cast<int>(juce::jmin<juce::int64>(
+            outputSamples64, static_cast<juce::int64>(std::numeric_limits<int>::max())));
+        if (outputSamples <= 0)
             return;
-
-        auto buffer = std::make_shared<juce::AudioBuffer<float>>(static_cast<int>(reader->numChannels), samplesToRead);
-        reader->read(buffer.get(), 0, samplesToRead, 0, true, true);
-
-        if (fitToTempo)
-        {
-            const auto analysis = analyzeAudioWarpMetadata(file, tempoNow, numerator);
-            *buffer = makeTempoFittedPreviewBuffer(*buffer, analysis.sourceBpm, tempoNow, sampleRate, file.getFullPathName());
-        }
 
         // If a newer preview was requested while we were reading, drop this one.
         if (generation != previewRequestGeneration.load())
             return;
 
-        juce::MessageManager::callAsync([safeThis, generation, buffer, sampleRate, file, displayName]
+        juce::MessageManager::callAsync([safeThis, generation, reader = std::move(reader), outputSamples,
+                                         sampleRate, file, displayName]() mutable
         {
             if (safeThis == nullptr || generation != safeThis->previewRequestGeneration.load())
                 return;
-            safeThis->startPreviewPlayback(std::move(*buffer), sampleRate, file, displayName);
+            safeThis->startStreamingPreviewPlayback(std::move(reader), outputSamples, sampleRate, file, displayName);
         });
+
+        // Waveform analysis is deliberately decoupled from audio start. It can finish later
+        // without affecting the already-playing stream.
+        std::unique_ptr<juce::AudioFormatReader> waveformReader(audioFormatManager.createReaderFor(file));
+        if (waveformReader != nullptr && waveformReader->lengthInSamples > 0)
+        {
+            const auto waveformSamples = static_cast<int>(juce::jmin<juce::int64>(
+                waveformReader->lengthInSamples, static_cast<juce::int64>(std::numeric_limits<int>::max())));
+            juce::AudioBuffer<float> waveformBuffer(static_cast<int>(waveformReader->numChannels), waveformSamples);
+            waveformReader->read(&waveformBuffer, 0, waveformSamples, 0, true, true);
+            constexpr int columns = 480;
+            std::vector<float> peaks(columns, 0.0f);
+            float globalMax = 1.0e-6f;
+            for (int c = 0; c < columns; ++c)
+            {
+                const auto s0 = static_cast<juce::int64>(c) * waveformSamples / columns;
+                const auto s1 = juce::jmax(s0 + 1, static_cast<juce::int64>(c + 1) * waveformSamples / columns);
+                for (int ch = 0; ch < waveformBuffer.getNumChannels(); ++ch)
+                    for (auto s = s0; s < s1 && s < waveformSamples; ++s)
+                        peaks[static_cast<std::size_t>(c)] = juce::jmax(peaks[static_cast<std::size_t>(c)],
+                                                                       std::abs(waveformBuffer.getSample(ch, static_cast<int>(s))));
+                globalMax = juce::jmax(globalMax, peaks[static_cast<std::size_t>(c)]);
+            }
+            for (auto& p : peaks) p /= globalMax;
+            juce::MessageManager::callAsync([safeThis, generation, displayName, peaks = std::move(peaks)]() mutable
+            {
+                if (safeThis != nullptr && generation == safeThis->previewRequestGeneration.load())
+                    safeThis->browserPanel.setPreviewWaveform(displayName, std::move(peaks));
+            });
+        }
     });
 }
 
@@ -3972,10 +5058,11 @@ void MainComponent::armOrStartBrowserPreview()
 
     const auto synced = browserPanel.isPreviewBpmSyncEnabled();
 
-    // Ableton: "Audio previews are looped when Raw is deactivated and unlooped when Raw is
-    // enabled." Synced here is the inverse of Raw, so a synced preview loops.
+    // Preview loop is decided from the item's musical length; tempo sync is independent.
     if (previewBufferSource != nullptr)
-        previewBufferSource->setLooping(synced);
+        previewBufferSource->setLooping(currentPreviewLooping);
+    if (previewFileSource != nullptr)
+        previewFileSource->setLooping(currentPreviewLooping);
 
     // Launch quantize: only when synced to project tempo AND the transport is actually
     // running — without a moving playhead there's no beat to lock onto.
@@ -4007,6 +5094,7 @@ void MainComponent::startPreviewPlayback(juce::AudioBuffer<float> previewBuffer,
     previewTransportSource.stop();
     previewTransportSource.setSource(nullptr);
     previewBufferSource.reset();
+    previewFileSource.reset();
 
     // Compact waveform (normalised abs peaks) for the browser's preview bar.
     {
@@ -4041,6 +5129,25 @@ void MainComponent::startPreviewPlayback(juce::AudioBuffer<float> previewBuffer,
     // Browser preview plays with headroom (quieter than unity), like Ableton — so a
     // sample audibly "opens up" / gets louder the moment you drop it into the playlist,
     // where it plays at its true level.
+    previewTransportSource.setGain(juce::Decibels::decibelsToGain(browserPreviewHeadroomDb));
+    currentPreviewFile = file;
+    currentPreviewTempoBpm = projectState.getTempoBpm();
+    currentPreviewBpmSync = browserPanel.isPreviewBpmSyncEnabled();
+    armOrStartBrowserPreview();
+}
+
+void MainComponent::startStreamingPreviewPlayback(std::unique_ptr<juce::AudioFormatReader> reader,
+                                                   int outputSamples, double sampleRate,
+                                                   const juce::File& file, const juce::String& displayName)
+{
+    previewTransportSource.stop();
+    previewTransportSource.setSource(nullptr);
+    previewBufferSource.reset();
+    previewFileSource.reset();
+
+    previewFileSource = std::make_unique<StreamingFilePreviewSource>(std::move(reader), outputSamples,
+                                                                       sampleRate, currentPreviewLooping);
+    previewTransportSource.setSource(previewFileSource.get(), 0, nullptr, sampleRate);
     previewTransportSource.setGain(juce::Decibels::decibelsToGain(browserPreviewHeadroomDb));
     currentPreviewFile = file;
     currentPreviewTempoBpm = projectState.getTempoBpm();
@@ -5571,29 +6678,6 @@ void MainComponent::updateInputMonitoring()
     }
 }
 
-void MainComponent::requestMicrophonePermissionAtLaunch()
-{
-    if (! juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
-        || juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio)
-        || audioInputPermissionRequestInFlight)
-    {
-        return;
-    }
-
-    audioInputPermissionRequestInFlight = true;
-    juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
-                                      [safeThis](bool granted)
-                                      {
-                                          if (safeThis == nullptr)
-                                              return;
-
-                                          safeThis->audioInputPermissionRequestInFlight = false;
-                                          if (granted)
-                                              safeThis->updateInputMonitoring();
-                                      });
-}
-
 bool MainComponent::ensureAudioInputReady(bool requestPermission)
 {
     if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
@@ -5621,28 +6705,106 @@ bool MainComponent::ensureAudioInputReady(bool requestPermission)
     }
 
     auto* currentDevice = audioDeviceManager.getCurrentAudioDevice();
-    if (currentDevice == nullptr)
-        return false;
 
-    if (currentDevice->getActiveInputChannels().countNumberOfSetBits() > 0)
+    // Already have input channels running → attach immediately.
+    if (currentDevice != nullptr
+        && currentDevice->getActiveInputChannels().countNumberOfSetBits() > 0)
         return true;
 
-    auto setup = audioDeviceManager.getAudioDeviceSetup();
-    setup.inputChannels.clear();
-    const auto inputCount = currentDevice->getInputChannelNames().size();
-    setup.inputChannels.setRange(0, juce::jmin(2, inputCount), true);
-    if (setup.inputChannels.countNumberOfSetBits() <= 0)
-        return false;
+    // Not ready yet: configure the device on a BACKGROUND thread and return false for now —
+    // the caller re-checks when it completes (via updateInputMonitoring). Starting a CoreAudio
+    // device — especially JUCE's combiner for a separate input vs output device (e.g. the MPC
+    // Sample as input + your monitors as output) — can block, and doing it synchronously on the
+    // message thread SELF-DEADLOCKS: CoreAudio needs the main run loop to service the start, but
+    // the main thread is stuck inside it (confirmed by a process sample: setAudioDeviceSetup →
+    // AudioIODeviceCombiner::start → HALB_IOThread::_WaitForState). Off-thread start keeps the
+    // run loop free, so separate input/output devices just work (Ableton-style, no aggregate)
+    // and the UI never freezes.
+    beginAudioInputConfiguration();
+    return false;
+}
 
-    const auto error = audioDeviceManager.setAudioDeviceSetup(setup, true);
-    if (error.isNotEmpty())
+void MainComponent::beginAudioInputConfiguration()
+{
+    if (audioInputConfiguring.exchange(true))
+        return;   // a configuration attempt is already in flight
+
+    auto setup = audioDeviceManager.getAudioDeviceSetup();
+    if (setup.inputDeviceName.isEmpty())
     {
-        statusLabel.setText("Audio input failed: " + error, juce::dontSendNotification);
-        return false;
+        if (auto* type = audioDeviceManager.getCurrentDeviceTypeObject())
+        {
+            const auto inputNames = type->getDeviceNames(true);
+            if (inputNames.isEmpty())
+            {
+                statusLabel.setText("No audio input device found.", juce::dontSendNotification);
+                audioInputConfiguring = false;
+                return;
+            }
+
+            const auto defaultIndex = juce::jlimit(0, inputNames.size() - 1, type->getDefaultDeviceIndex(true));
+            setup.inputDeviceName = inputNames[defaultIndex];
+        }
     }
 
-    return audioDeviceManager.getCurrentAudioDevice() != nullptr
-        && audioDeviceManager.getCurrentAudioDevice()->getActiveInputChannels().countNumberOfSetBits() > 0;
+    setup.inputChannels.clear();
+    setup.inputChannels.setRange(0, 2, true);
+
+    statusLabel.setText("Starting audio input " + setup.inputDeviceName + juce::String::fromUTF8(" \xE2\x80\xA6"),
+                        juce::dontSendNotification);
+
+    auto* adm = &audioDeviceManager;
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::Thread::launch([adm, setup, safeThis]
+    {
+        const auto error = adm->setAudioDeviceSetup(setup, true);
+        juce::MessageManager::callAsync([safeThis, error]
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->audioInputConfiguring = false;
+
+            auto* dev = safeThis->audioDeviceManager.getCurrentAudioDevice();
+            const bool ready = dev != nullptr && dev->getActiveInputChannels().countNumberOfSetBits() > 0;
+            if (error.isNotEmpty())
+                safeThis->statusLabel.setText("Audio input failed: " + error, juce::dontSendNotification);
+            else if (! ready)
+                safeThis->statusLabel.setText("Audio input not available. Check the device / macOS Privacy.",
+                                              juce::dontSendNotification);
+
+            safeThis->updateInputMonitoring();   // attach the recorder now the device is up
+        });
+    });
+}
+
+bool MainComponent::ensureCameraReady(bool requestPermission)
+{
+    if (! juce::RuntimePermissions::isRequired(juce::RuntimePermissions::camera))
+        return true;
+
+    if (juce::RuntimePermissions::isGranted(juce::RuntimePermissions::camera))
+        return true;
+
+    if (requestPermission && ! cameraPermissionRequestInFlight)
+    {
+        cameraPermissionRequestInFlight = true;
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::RuntimePermissions::request(juce::RuntimePermissions::camera,
+                                          [safeThis](bool granted)
+                                          {
+                                              if (safeThis == nullptr)
+                                                  return;
+
+                                              safeThis->cameraPermissionRequestInFlight = false;
+                                              safeThis->statusLabel.setText(granted
+                                                  ? "Camera permission granted. Press Camera again to start video."
+                                                  : "Camera permission denied. Enable it in macOS Privacy settings.",
+                                                  juce::dontSendNotification);
+                                          });
+    }
+
+    return false;
 }
 
 void MainComponent::startAudioRecordingClip(int trackIndex)
@@ -5917,6 +7079,32 @@ void MainComponent::toggleStepSequencerFromUi()
     updateTransportLabels();
 }
 
+void MainComponent::toggleMpcSampleFromUi()
+{
+    const auto shouldOpen = ! mpcSamplePanel.isVisible();
+    if (shouldOpen)
+    {
+        // The MPC surface shares the lower-panel slot with the editor and sampler.
+        samplerPanel.setVisible(false);
+        clipEditorPanel.setVisible(false);
+        stepSequencer.setVisible(false);
+        stopClipEditorPreview(true);
+    }
+
+    mpcSamplePanel.setVisible(shouldOpen);
+    resized();
+    updateTransportLabels();
+}
+
+void MainComponent::toggleJamSessionFromUi()
+{
+    jamSessionOpen = ! jamSessionOpen;
+    jamSession.setVisible(jamSessionOpen);
+    updateTransportLabels();
+    resized();
+    repaint();
+}
+
 void MainComponent::saveProjectInteractively()
 {
     // Pull the latest plugin state into the project before it is serialized.
@@ -5984,10 +7172,10 @@ void MainComponent::loadSidebarBrowserFolders()
 
     for (const auto& path : paths)
     {
-        const auto folder = juce::File(path);
-        if (! folder.isDirectory())
+        if (path == "/Volumes" || path.startsWith("/Volumes/"))
             continue;
 
+        const auto folder = juce::File(path);
         const auto folderPath = folder.getFullPathName();
         const auto alreadyAdded = std::any_of(sidebarBrowserFolders.begin(), sidebarBrowserFolders.end(),
                                               [&folderPath](const juce::File& existing)
@@ -6010,8 +7198,13 @@ void MainComponent::saveSidebarBrowserFolders() const
 
     juce::StringArray paths;
     for (const auto& folder : sidebarBrowserFolders)
-        if (folder.isDirectory())
-            paths.addIfNotAlreadyThere(folder.getFullPathName());
+    {
+        const auto path = folder.getFullPathName();
+        if (path == "/Volumes" || path.startsWith("/Volumes/"))
+            continue;
+
+        paths.addIfNotAlreadyThere(path);
+    }
 
     settings->setValue(sidebarFoldersSettingsKey, paths.joinIntoString("\n"));
     settings->saveIfNeeded();
@@ -6087,6 +7280,26 @@ void MainComponent::loadProjectFromFile(const juce::File& file)
     // any selection/history that referred to the previous project.
     restoreInstrumentsFromProject();
     restoreInsertsFromProject();
+
+    // Rebuild the MPC panel (pad waveforms + live playback) from the loaded kit track, so the
+    // panel matches what the arrangement will play back.
+    for (const auto& t : projectState.getTracks())
+        if (t.isMpcKit)
+        {
+            for (int pad = 0; pad < 16; ++pad)
+                if (t.mpcKitSamples[static_cast<std::size_t>(pad)].isNotEmpty())
+                    mpcSamplePanel.loadSampleOntoPad(pad, juce::File(t.mpcKitSamples[static_cast<std::size_t>(pad)]));
+            mpcSixteenLevels = t.isMpcTuneMode;   // restore Tune toggle for the panel indicator
+            mpcTuneSourcePath = t.isMpcTuneMode ? t.mpcTuneSample : juce::String();
+            mpcTuneRootNote = t.mpcTuneRoot;
+            mpcChopMode = t.isMpcChopMode;
+            mpcChopSourcePath = t.isMpcChopMode ? t.mpcChopSample : juce::String();
+            if (mpcChopMode)
+                mpcSixteenLevels = false;
+            updateMpcPerformanceState();
+            break;
+        }
+
     arrangementTimeline.resetForNewProject();
     selectedArrangementClip.reset();
 

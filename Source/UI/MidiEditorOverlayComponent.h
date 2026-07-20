@@ -205,6 +205,7 @@ private:
     double getContentBeats() const noexcept;   // clip length + editing headroom (drawable width)
     void   growClipToFit(double endBeat);       // extend the clip (snapped up to a bar) so notes fit
     void   shrinkClipToFitNotes();              // pull the clip back to its content (bar-snapped, min 1 bar)
+    void   preserveHorizontalScaleAcross(double oldContentBeats); // keep pixels-per-beat when the clip length changes
     std::optional<NoteHit> hitTestNote(juce::Point<int> position) const;
     std::optional<SlideHit> hitTestSlide(juce::Point<int> position) const;
     std::optional<int> hitTestVelocityBar(juce::Point<int> position) const;
@@ -226,6 +227,7 @@ private:
     bool isBlackKey(int pitch) const noexcept;
     bool isNoteSelected(int noteIndex) const noexcept;
     void selectSingleNote(int noteIndex);
+    void transposeSelectedNotes(int semitones);
     void duplicateSelectedNotes();
     void deleteSelectedNotes();
     // MPE-style glide: JOIN merges the selected notes into one voice that glides between

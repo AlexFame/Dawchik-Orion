@@ -6,6 +6,7 @@
 #include "ChordTheory.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -280,6 +281,25 @@ struct TrackState
     double pan { 0.0 };
     std::vector<TimelineClip> clips;
     juce::String samplerSourcePath;
+    // --- MPC Sample kit --------------------------------------------------------------
+    // When isMpcKit is true this track is an MPC drum kit: MIDI note 36+pad triggers
+    // mpcKitSamples[pad] as a one-shot at native pitch. Separate playback path from the
+    // single-sample sampler below — see SamplerEngine::renderMpcKitClip. Populated by the
+    // MPC panel as samples are dropped on pads (guarded by the audio edit lock).
+    bool isMpcKit { false };
+    std::array<juce::String, 16> mpcKitSamples {};
+    // Tune/melodic mode (mirrors the hardware's 16-Levels Tune): instead of the 16-sample kit,
+    // ONE sample (mpcTuneSample) is played chromatically across the pads, with mpcTuneRoot the
+    // note that plays at original pitch. Rendered by the single-sample pitch path.
+    bool isMpcTuneMode { false };
+    juce::String mpcTuneSample;
+    int mpcTuneRoot { 36 };
+    // Chop mode: the selected pad sample is split into 16 equal slices, mapped to pads 1..16.
+    bool isMpcChopMode { false };
+    juce::String mpcChopSample;
+    int mpcChopRootPad { 0 };
+    int mpcChopSliceCount { 16 };
+    // ---------------------------------------------------------------------------------
     int samplerRootMidiNote { 60 };
     SamplerPlaybackMode samplerMode { SamplerPlaybackMode::classic };
     int samplerKeyboardOctaveOffset { 0 };

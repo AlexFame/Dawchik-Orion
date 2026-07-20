@@ -74,6 +74,10 @@ static const juce::Colour warningAmber { 0xffffb020 };
 static const juce::Colour successGreen { 0xff22c55e };
 static const juce::Colour infoBlue     { 0xff4da3ff };
 static const juce::Colour previewSlate { 0xff7182a8 };
+static const juce::Colour orangeRed    { 0xffff4500 };
+static const juce::Colour brightOrange { 0xffff6b32 };
+static const juce::Colour activeCoral  { 0xffff5b68 };
+static const juce::Colour activeCoralLight { 0xffff7b83 };
 }  // namespace accent
 
 // Legacy warm/cool families, remapped onto the new track palette bases so old call

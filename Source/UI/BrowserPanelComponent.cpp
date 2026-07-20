@@ -35,6 +35,12 @@ const juce::String mountedDevicesHubName = "Mounted Devices";
 const auto bpmBadgeColour = th::surface::panel;
 const auto keyBadgeColour = th::surface::hover;
 
+bool isMountedVolumePath(const juce::File& file)
+{
+    const auto path = file.getFullPathName();
+    return path == "/Volumes" || path.startsWith("/Volumes/");
+}
+
 juce::Font browserFont(float size, bool bold = false)
 {
     auto font = bold
@@ -55,21 +61,21 @@ public:
         auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
         const auto active = button.getToggleState();
         const auto radius = th::metrics::controlRadius;
-        auto fill = active ? th::accent::brandCyan.withAlpha(0.18f)
+        auto fill = active ? th::accent::activeCoral.withAlpha(0.18f)
                            : th::surface::elevated.withAlpha(isMouseOverButton ? 0.78f : 0.46f);
         if (isButtonDown)
-            fill = active ? th::accent::brandCyan.withAlpha(0.28f)
+            fill = active ? th::accent::activeCoralLight.withAlpha(0.28f)
                           : th::surface::hover.withAlpha(0.92f);
         g.setColour(fill);
         g.fillRoundedRectangle(bounds, radius);
 
-        const auto outline = active ? th::accent::brandCyan.withAlpha(0.86f)
+        const auto outline = active ? th::accent::activeCoral.withAlpha(0.86f)
                                     : th::line::normal.withAlpha(isMouseOverButton ? 0.92f : 0.72f);
         g.setColour(outline);
         g.drawRoundedRectangle(bounds, radius, active ? 1.2f : 1.0f);
         if (active)
         {
-            g.setColour(th::accent::brandCyan);
+            g.setColour(th::accent::activeCoralLight);
             g.fillRoundedRectangle(bounds.withTrimmedTop(bounds.getHeight() - 2.0f), 1.0f);
         }
     }
@@ -1310,14 +1316,7 @@ bool BrowserPanelComponent::keyPressed(const juce::KeyPress& key)
     }
 
     if (key.getKeyCode() != juce::KeyPress::returnKey)
-    {
-        if (key.getKeyCode() == juce::KeyPress::spaceKey && onTogglePreviewPlayback)
-        {
-            onTogglePreviewPlayback();
-            return true;
-        }
         return false;
-    }
 
     if (! selectedIndex.has_value())
         return false;
@@ -1444,44 +1443,16 @@ void BrowserPanelComponent::refreshEntries()
             false
         });
 
-        const auto volumesRoot = juce::File("/Volumes");
-        if (volumesRoot.isDirectory())
-        {
-            juce::Array<juce::File> mountedVolumes;
-            volumesRoot.findChildFiles(mountedVolumes, juce::File::findDirectories, false);
-            std::sort(mountedVolumes.begin(), mountedVolumes.end(),
-                      [](const juce::File& a, const juce::File& b)
-                      {
-                          return a.getFileName().compareNatural(b.getFileName()) < 0;
-                      });
-
-            bool hasMountedDevices = false;
-            for (const auto& volume : mountedVolumes)
-            {
-                auto volumeName = volume.getFileName();
-                if (volumeName.isEmpty())
-                    continue;
-
-                if (volumeName == systemName)
-                    continue;
-
-                hasMountedDevices = true;
-            }
-
-            if (hasMountedDevices)
-            {
-                refreshedItems.push_back(BrowserItem {
-                    mountedDevicesHubName,
-                    "Volume",
-                    "Open mounted devices",
-                    juce::Colour(0xff7a8ba0),
-                    4.0,
-                    volumesRoot,
-                    true,
-                    false
-                });
-            }
-        }
+        refreshedItems.push_back(BrowserItem {
+            mountedDevicesHubName,
+            "Volume",
+            "Open mounted devices",
+            juce::Colour(0xff7a8ba0),
+            4.0,
+            juce::File("/Volumes"),
+            true,
+            false
+        });
     }
     else if (showingMacRootOverview)
     {
@@ -1972,6 +1943,7 @@ void BrowserPanelComponent::navigateTo(const juce::File& directory, bool addToHi
     showingMacRootOverview = false;
     showingUserHomeOverview = isUserHomeDirectory(directory);
     currentDirectory = directory;
+    scrollOffsetY = 0.0;
     refreshEntries();
 }
 
@@ -1997,6 +1969,7 @@ void BrowserPanelComponent::showLocationRoots(bool addToHistory)
     showingMacRootOverview = false;
     showingUserHomeOverview = false;
     currentDirectory = getMacBrowseRoot();
+    scrollOffsetY = 0.0;
     refreshEntries();
 }
 
@@ -2012,10 +1985,17 @@ BrowserPanelComponent::BrowserLocationState BrowserPanelComponent::getCurrentLoc
 
 void BrowserPanelComponent::restoreLocationState(const BrowserLocationState& state)
 {
+    if (isMountedVolumePath(state.directory))
+    {
+        showLocationRoots(false);
+        return;
+    }
+
     currentDirectory = state.directory;
     showingLocationRoots = state.locationRoots;
     showingMacRootOverview = state.macRootOverview;
     showingUserHomeOverview = state.userHomeOverview;
+    scrollOffsetY = 0.0;
     refreshEntries();
 }
 
@@ -2276,7 +2256,7 @@ juce::String BrowserPanelComponent::subtitleForFile(const juce::File& file) cons
 juce::Time BrowserPanelComponent::getWatchedLocationTimestamp() const
 {
     if (showingLocationRoots)
-        return juce::File("/Volumes").getLastModificationTime();
+        return juce::Time();
 
     if (showingMacRootOverview)
         return juce::Time();

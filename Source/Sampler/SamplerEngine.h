@@ -38,6 +38,23 @@ public:
                         const TrackState& track,
                         const TimelineClip& clip);
 
+    // MPC drum-kit playback: for a track with isMpcKit, each MIDI note 36+pad plays
+    // mpcKitSamples[pad] as a one-shot at native pitch. Reuses renderMidiClip per pad
+    // (filtered to that pad's notes) so the proven, click-free voice rendering is shared.
+    void renderMpcKitClip(juce::AudioBuffer<float>& targetBuffer,
+                          int startSample,
+                          int numSamples,
+                          double blockStartBeat,
+                          double renderSampleRate,
+                          double beatsPerSecond,
+                          double loopStartBeat,
+                          double loopEndBeat,
+                          double repeatEndBeat,
+                          bool wrapToLoop,
+                          bool wrapToProjectEnd,
+                          const TrackState& track,
+                          const TimelineClip& clip);
+
     void noteOn(const juce::String& sourcePath,
                 int midiNote,
                 int velocity,
@@ -119,6 +136,11 @@ private:
 
     juce::AudioFormatManager& audioFormatManager;
     StretchBufferCallback stretchBuffer;
+
+    // Reused per-block by renderMpcKitClip so it allocates nothing on the audio thread
+    // after warm-up (vector capacities are retained across clear()).
+    TrackState kitScratchTrack;
+    TimelineClip kitScratchClip;
     std::mutex cacheMutex;
     std::map<std::string, std::unique_ptr<SampleData>> sampleCache;
     std::map<std::string, std::unique_ptr<SampleData>> warpedSampleCache;

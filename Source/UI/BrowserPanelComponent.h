@@ -6,6 +6,7 @@
 #include "../Analysis/AudioTagger.h"
 #include "../Analysis/SampleEmbedding.h"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -61,6 +62,12 @@ public:
     // Pre-indexes them in the background (Ableton-style) so search results are ready + stable.
     void setLibraryRoots(std::vector<juce::File> roots)
     {
+        roots.erase(std::remove_if(roots.begin(), roots.end(), [](const juce::File& root)
+        {
+            const auto path = root.getFullPathName();
+            return path == "/Volumes" || path.startsWith("/Volumes/");
+        }), roots.end());
+
         juce::String signature;
         for (const auto& root : roots)
             signature << root.getFullPathName() << "\n";
@@ -70,7 +77,6 @@ public:
         libraryRootsSignature = signature;
         libraryRoots = std::move(roots);
         recursiveScanValid = false;   // library changed → global search cache is stale
-        sampleEmbedding.indexFolders(libraryRoots);   // incremental, persisted, skips cached files
     }
     void chooseRootFolder();
     void openFolder(const juce::File& directory);
