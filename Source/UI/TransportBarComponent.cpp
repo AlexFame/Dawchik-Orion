@@ -287,11 +287,12 @@ void TransportBarComponent::setState(const TransportBarState& newState)
 
 juce::Rectangle<int> TransportBarComponent::getTempoEditorBounds() const noexcept
 {
-    // A compact field over the tempo VALUE (which now sits below the label), sized to the
-    // number and left-aligned with it — so clicking to edit doesn't blow the field up wide.
-    auto column = tempoCardBounds.reduced(2, 0);
-    column.removeFromTop(15);   // skip the "Tempo" label row
-    return column.removeFromTop(24).withSizeKeepingCentre(juce::jmin(80, column.getWidth()), 24);
+    // Return EXACTLY the rectangle the tempo value is painted in (see drawReadout), so the text
+    // editor sits right on top of the number with no shift or resize when you double-click.
+    auto col = tempoCardBounds.reduced(2, 0).withSizeKeepingCentre(tempoCardBounds.getWidth() - 4, kContentBand);
+    col.removeFromTop(kLabelRowH);
+    col.removeFromTop(kLabelGap);
+    return col;
 }
 
 juce::Rectangle<int> TransportBarComponent::getKeyBounds() const noexcept
@@ -386,7 +387,7 @@ void TransportBarComponent::paint(juce::Graphics& g)
     const auto valueWhite = theme::text::primary.withAlpha(0.96f);
     drawReadout(keyCardBounds,     "Key",            state.keyText,                  valueWhite, true);
     drawReadout(timeSigCardBounds, "Time Signature", state.timeSignature,            valueWhite, false);
-    drawReadout(tempoCardBounds,   "Tempo",          juce::String(state.tempoBpm, 0), valueWhite, false);
+    drawReadout(tempoCardBounds,   "Tempo",          state.tempoEditing ? juce::String() : juce::String(state.tempoBpm, 0), valueWhite, false);
     drawReadout(positionCardBounds, "Time",          state.positionText,             valueWhite, false);
 
     drawBrandCluster(g, brandClusterBounds);
@@ -787,7 +788,7 @@ void TransportBarComponent::paintJamTransport(juce::Graphics& g)
 
     drawInlineReadout(keyCardBounds, "Key", state.keyText);
     drawInlineReadout(timeSigCardBounds, "Signature", state.timeSignature);
-    drawInlineReadout(tempoCardBounds, "Tempo", juce::String(state.tempoBpm, 0));
+    drawInlineReadout(tempoCardBounds, "Tempo", state.tempoEditing ? juce::String() : juce::String(state.tempoBpm, 0));
     drawInlineReadout(positionCardBounds, "Time", state.positionText);
 
     auto controlGroup = prevButton.getBounds();

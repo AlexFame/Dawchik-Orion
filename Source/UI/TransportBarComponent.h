@@ -10,6 +10,9 @@ namespace orion
 struct TransportBarState
 {
     double tempoBpm { 126.0 };
+    // While the BPM text editor is open over the tempo readout, the bar must not paint the
+    // value underneath it — otherwise the live number shows through the editor (they overlap).
+    bool tempoEditing { false };
     juce::String keyText { "Cm" };
     juce::String timeSignature { "4/4" };
     juce::String positionText { "0:00.0" };

@@ -521,6 +521,7 @@ private:
     // level (monitoring) even before recording starts.
     // Callback wiring lifted out of the constructor (which had grown past 1700 lines). Called
     // from the constructor in this order; each is a straight cut of what used to be inline.
+    void buildLabelsAndInspector(); // header labels, clip inspector widgets, selection inspector
     void wireBrowserAndDialogs();   // browser, sidebar, plugin picker, add-track dialog
     void wireEditors();             // arrangement timeline, sampler panel, MIDI editor
 

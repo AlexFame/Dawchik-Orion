@@ -16,41 +16,21 @@
 #include "../Audio/WarpEngine.h"
 #include "../Sampler/SamplerEngine.h"
 #include "OrionTheme.h"
+#include "MainComponentInternal.h"
 
 namespace
 {
 namespace th = orion::theme;
-const auto backgroundColour      = th::core::canvas;
-const auto panelColour           = th::core::studio;
-const auto accentColour          = th::accent::activeCoral;
-const auto panelStroke           = th::line::subtle;
-const auto mutedText             = th::text::muted;
-const auto transportShelfColour  = th::core::voidBlack;
-const auto transportShelfStroke  = th::line::subtle;
-const auto transportButtonColour = th::core::studio;
-const auto transportButtonText   = th::text::secondary;
-const auto transportDarkPanel    = th::core::voidBlack;
-const auto transportSectionFill  = th::core::canvas;
-const auto transportSectionStroke = th::line::subtle.withAlpha(0.45f);
-const auto recordAccent          = th::status::error;
-constexpr int minBrowserPanelWidth = 220;
-constexpr int maxBrowserPanelWidth = 520;
-constexpr int browserResizeHandleWidth = 10;
-constexpr int transportShelfHeight = orion::TransportBarComponent::preferredHeight;
-// The transport panel is already vertically centred inside the shelf with an 8 px inset.
-// Keep the workspace flush to the shelf so the panel has the same visual air above and below.
-constexpr int workspaceTopGap = 0;
-constexpr int transportBrandWidth = 210;
-constexpr int transportClusterWidth = 264;
-constexpr int transportTempoWidth = 178; // BPM + KEY combined card
-constexpr int transportModeWidth = 152;
-constexpr int transportUtilityWidth = 302;
-constexpr int transportSectionGap = 12;
-constexpr int transportControlHeight = 46;
-constexpr int transportSectionHeight = 54;
-constexpr int transportContentVerticalNudge = 0;
-constexpr int samplerPanelHeight = 350;   // shared by the sampler and clip editor (compact lower panel)
-constexpr const char* sidebarFoldersSettingsKey = "sidebar.customFolders";
+using orion::backgroundColour, orion::panelColour, orion::accentColour, orion::panelStroke,
+    orion::mutedText, orion::transportShelfColour, orion::transportShelfStroke,
+    orion::transportButtonColour, orion::transportButtonText, orion::transportDarkPanel,
+    orion::transportSectionFill, orion::transportSectionStroke, orion::recordAccent,
+    orion::minBrowserPanelWidth, orion::maxBrowserPanelWidth, orion::browserResizeHandleWidth,
+    orion::transportShelfHeight, orion::workspaceTopGap, orion::transportBrandWidth,
+    orion::transportClusterWidth, orion::transportTempoWidth, orion::transportModeWidth,
+    orion::transportUtilityWidth, orion::transportSectionGap, orion::transportControlHeight,
+    orion::transportSectionHeight, orion::transportContentVerticalNudge, orion::samplerPanelHeight,
+    orion::sidebarFoldersSettingsKey;
 
 enum MenuItemId
 {
@@ -738,328 +718,7 @@ MainComponent::MainComponent()
     getLookAndFeel().setDefaultSansSerifTypefaceName("Avenir Next");
     transportButtonLookAndFeel.setDefaultSansSerifTypefaceName("Avenir Next");
 
-    headerLabel.setText("ORION", juce::dontSendNotification);
-    headerLabel.setFont(juce::FontOptions(27.0f, juce::Font::bold));
-    headerLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.96f));
-    addAndMakeVisible(headerLabel);
-    headerLabel.setVisible(false);
-
-    bpmCaptionLabel.setText("TEMPO", juce::dontSendNotification);
-    bpmCaptionLabel.setColour(juce::Label::textColourId, mutedText);
-    bpmCaptionLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-    addAndMakeVisible(bpmCaptionLabel);
-
-    bpmValueLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-    bpmValueLabel.setFont(juce::FontOptions(26.0f, juce::Font::bold));
-    bpmValueLabel.setJustificationType(juce::Justification::centred);
-    bpmValueLabel.setText(juce::String(projectState.getTempoBpm(), 2), juce::dontSendNotification);
-    bpmValueLabel.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(bpmValueLabel);
-    bpmValueLabel.setVisible(false);
-
-    bpmEditor.setColour(juce::TextEditor::backgroundColourId, transportDarkPanel);
-    bpmEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
-    bpmEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
-    bpmEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
-    bpmEditor.setColour(juce::TextEditor::highlightColourId, juce::Colours::white.withAlpha(0.18f));
-    bpmEditor.setColour(juce::TextEditor::highlightedTextColourId, juce::Colours::white);
-    bpmEditor.setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
-    bpmEditor.setJustification(juce::Justification::centred);
-    // Match the transport readout's value font so the number doesn't change size
-    // when you click to edit it.
-    const juce::Font bpmEditorFont(juce::FontOptions(18.0f, juce::Font::bold));
-    bpmEditor.setFont(bpmEditorFont);
-    bpmEditor.applyFontToAllText(bpmEditorFont);
-    bpmEditor.setBorder(juce::BorderSize<int>(0));
-    bpmEditor.setIndents(0, 0);
-    bpmEditor.setInputRestrictions(6, "0123456789.");
-    bpmEditor.setAlwaysOnTop(true);
-    bpmEditor.onReturnKey = [this]() { endTempoEditing(true); };
-    bpmEditor.onEscapeKey = [this]() { endTempoEditing(false); };
-    bpmEditor.onFocusLost = [this]() { endTempoEditing(true); };
-    // addChildComponent keeps the editor hidden by default so paint()'s g.drawText
-    // renders the BPM number at startup. addAndMakeVisible would auto-show it empty.
-    addChildComponent(bpmEditor);
-
-    meterCaptionLabel.setText("BPM", juce::dontSendNotification);
-    meterCaptionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.68f));
-    meterCaptionLabel.setFont(juce::FontOptions(10.0f, juce::Font::bold));
-    addAndMakeVisible(meterCaptionLabel);
-
-    meterValueLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.76f));
-    meterValueLabel.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-    meterValueLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(meterValueLabel);
-
-    statusLabel.setText("DAW", juce::dontSendNotification);
-    statusLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.74f));
-    statusLabel.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-    addAndMakeVisible(statusLabel);
-    statusLabel.setVisible(false);
-
-    pluginScanNameLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.72f));
-    pluginScanNameLabel.setFont(juce::FontOptions(10.0f, juce::Font::bold));
-    pluginScanNameLabel.setJustificationType(juce::Justification::centred);
-    pluginScanNameLabel.setInterceptsMouseClicks(false, false);
-    pluginScanNameLabel.setVisible(false);
-    addAndMakeVisible(pluginScanNameLabel);
-
-    tempoLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
-    addAndMakeVisible(tempoLabel);
-
-    meterLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
-    addAndMakeVisible(meterLabel);
-
-    playheadLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
-    addAndMakeVisible(playheadLabel);
-
-    playlistLabel.setText("Playlist: arrangement-first timeline for clips and loops", juce::dontSendNotification);
-    playlistLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
-    addAndMakeVisible(playlistLabel);
-
-    pianoRollLabel.setText("Piano Roll: double-click a MIDI clip to open full focus editor", juce::dontSendNotification);
-    pianoRollLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
-    addAndMakeVisible(pianoRollLabel);
-
-    clipInspectorEmptyLabel.setText("Select audio clip", juce::dontSendNotification);
-    clipInspectorEmptyLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.58f));
-    clipInspectorEmptyLabel.setJustificationType(juce::Justification::centred);
-    clipInspectorEmptyLabel.setFont(juce::FontOptions(13.0f, juce::Font::plain));
-    addAndMakeVisible(clipInspectorEmptyLabel);
-
-    clipInspectorTitleLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.96f));
-    clipInspectorTitleLabel.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-    addAndMakeVisible(clipInspectorTitleLabel);
-
-    clipInspectorTrackLabel.setColour(juce::Label::textColourId, mutedText);
-    clipInspectorTrackLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
-    addAndMakeVisible(clipInspectorTrackLabel);
-
-    clipInspectorFileLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.82f));
-    clipInspectorFileLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
-    addAndMakeVisible(clipInspectorFileLabel);
-
-    clipWarpLabel.setText("Warp", juce::dontSendNotification);
-    clipWarpLabel.setColour(juce::Label::textColourId, mutedText);
-    addAndMakeVisible(clipWarpLabel);
-
-    clipWarpInfoLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.88f));
-    clipWarpInfoLabel.setFont(juce::FontOptions(12.0f, juce::Font::plain));
-    addAndMakeVisible(clipWarpInfoLabel);
-
-    clipSourceBpmLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
-    clipSourceBpmLabel.setFont(juce::FontOptions(11.0f, juce::Font::plain));
-    addAndMakeVisible(clipSourceBpmLabel);
-
-    clipBarsLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
-    clipBarsLabel.setFont(juce::FontOptions(11.0f, juce::Font::plain));
-    addAndMakeVisible(clipBarsLabel);
-
-    clipWarpToggle.setButtonText("");
-    clipWarpToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.9f));
-    clipWarpToggle.onClick = [this]
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            if ((clip->sourceDurationSeconds <= 0.0 || (clip->sourceBpm <= 0.0 && clip->detectedBars == 0)) && clip->sourcePath.isNotEmpty())
-            {
-                const auto analysis = analyzeAudioWarpMetadata(juce::File(clip->sourcePath), projectState.getTempoBpm(), projectState.getNumerator());
-                if (clip->sourceDurationSeconds <= 0.0)
-                    clip->sourceDurationSeconds = analysis.durationSeconds;
-                if (clip->sourceBpm <= 0.0 && analysis.sourceBpm > 0.0)
-                {
-                    clip->sourceBpm = analysis.sourceBpm;
-                    clip->bpmGuessed = analysis.bpmGuessed;
-                }
-                if (clip->detectedBars == 0 && analysis.detectedBars > 0)
-                    clip->detectedBars = analysis.detectedBars;
-                if (clip->sourceKeyRoot < 0 && analysis.sourceKeyRoot >= 0)
-                {
-                    clip->sourceKeyRoot    = analysis.sourceKeyRoot;
-                    clip->sourceKeyIsMinor = analysis.sourceKeyIsMinor;
-                }
-            }
-
-            clip->warpEnabled = clipWarpToggle.getToggleState();
-            refreshAudioClipWarpLengths();
-            refreshClipInspector();
-            arrangementTimeline.repaint();
-        }
-    };
-    addAndMakeVisible(clipWarpToggle);
-
-    clipGainLabel.setText("Gain", juce::dontSendNotification);
-    clipGainLabel.setColour(juce::Label::textColourId, mutedText);
-    addAndMakeVisible(clipGainLabel);
-
-    clipGainValueLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
-    clipGainValueLabel.setJustificationType(juce::Justification::centredRight);
-    clipGainValueLabel.setEditable(false, true, false);
-    clipGainValueLabel.onTextChange = [this]() { applyGainFromInspectorText(); };
-    addAndMakeVisible(clipGainValueLabel);
-
-    clipGainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    clipGainSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-    clipGainSlider.setRange(-24.0, 12.0, 0.1);
-    clipGainSlider.setColour(juce::Slider::trackColourId, accentColour);
-    clipGainSlider.setColour(juce::Slider::thumbColourId, juce::Colours::white);
-    clipGainSlider.onValueChange = [this]
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            clip->gainDb = clipGainSlider.getValue();
-            refreshClipInspector();
-            arrangementTimeline.repaint();
-        }
-    };
-    addAndMakeVisible(clipGainSlider);
-
-    clipMuteToggle.setButtonText("M");
-    clipMuteToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.9f));
-    clipMuteToggle.onClick = [this]
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            clip->muted = clipMuteToggle.getToggleState();
-            refreshClipInspector();
-            arrangementTimeline.repaint();
-        }
-    };
-    addAndMakeVisible(clipMuteToggle);
-
-    clipSoloToggle.setButtonText("S");
-    clipSoloToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.9f));
-    clipSoloToggle.onClick = [this]
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            clip->solo = clipSoloToggle.getToggleState();
-            refreshClipInspector();
-            arrangementTimeline.repaint();
-        }
-    };
-    addAndMakeVisible(clipSoloToggle);
-
-    selectionInspector.onGainChanged = [this](double gainDb)
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            clip->gainDb = gainDb;
-            clipGainSlider.setValue(gainDb, juce::dontSendNotification);
-            clipGainValueLabel.setText(juce::String(gainDb, 1) + " dB", juce::dontSendNotification);
-            arrangementTimeline.repaint();
-            return;
-        }
-
-        if (const auto trackIndex = arrangementTimeline.getSelectedTrackIndex(); trackIndex.has_value())
-        {
-            auto& tracks = projectState.getTracks();
-            if (*trackIndex >= 0 && *trackIndex < static_cast<int>(tracks.size()))
-            {
-                tracks[static_cast<std::size_t>(*trackIndex)].volumeDb = gainDb;
-                arrangementTimeline.repaint();
-            }
-        }
-    };
-
-    selectionInspector.onMuteChanged = [this](bool shouldMute)
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            clip->muted = shouldMute;
-            clipMuteToggle.setToggleState(shouldMute, juce::dontSendNotification);
-            arrangementTimeline.repaint();
-            return;
-        }
-
-        if (const auto trackIndex = arrangementTimeline.getSelectedTrackIndex(); trackIndex.has_value())
-        {
-            auto& tracks = projectState.getTracks();
-            if (*trackIndex >= 0 && *trackIndex < static_cast<int>(tracks.size()))
-            {
-                tracks[static_cast<std::size_t>(*trackIndex)].muted = shouldMute;
-                arrangementTimeline.repaint();
-            }
-        }
-    };
-
-    selectionInspector.onSoloChanged = [this](bool shouldSolo)
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            clip->solo = shouldSolo;
-            clipSoloToggle.setToggleState(shouldSolo, juce::dontSendNotification);
-            arrangementTimeline.repaint();
-            return;
-        }
-
-        if (const auto trackIndex = arrangementTimeline.getSelectedTrackIndex(); trackIndex.has_value())
-        {
-            auto& tracks = projectState.getTracks();
-            if (*trackIndex >= 0 && *trackIndex < static_cast<int>(tracks.size()))
-            {
-                tracks[static_cast<std::size_t>(*trackIndex)].solo = shouldSolo;
-                arrangementTimeline.repaint();
-            }
-        }
-    };
-
-    selectionInspector.onWarpChanged = [this](bool shouldWarp)
-    {
-        if (auto* clip = getSelectedTimelineClip())
-        {
-            if ((clip->sourceDurationSeconds <= 0.0 || (clip->sourceBpm <= 0.0 && clip->detectedBars == 0)) && clip->sourcePath.isNotEmpty())
-            {
-                const auto analysis = analyzeAudioWarpMetadata(juce::File(clip->sourcePath), projectState.getTempoBpm(), projectState.getNumerator());
-                if (clip->sourceDurationSeconds <= 0.0)
-                    clip->sourceDurationSeconds = analysis.durationSeconds;
-                if (clip->sourceBpm <= 0.0 && analysis.sourceBpm > 0.0)
-                {
-                    clip->sourceBpm = analysis.sourceBpm;
-                    clip->bpmGuessed = analysis.bpmGuessed;
-                }
-                if (clip->detectedBars == 0 && analysis.detectedBars > 0)
-                    clip->detectedBars = analysis.detectedBars;
-                if (clip->sourceKeyRoot < 0 && analysis.sourceKeyRoot >= 0)
-                {
-                    clip->sourceKeyRoot    = analysis.sourceKeyRoot;
-                    clip->sourceKeyIsMinor = analysis.sourceKeyIsMinor;
-                }
-            }
-
-            clip->warpEnabled = shouldWarp;
-            clipWarpToggle.setToggleState(shouldWarp, juce::dontSendNotification);
-            refreshAudioClipWarpLengths();
-            refreshClipInspector();
-            arrangementTimeline.repaint();
-        }
-    };
-    selectionInspector.onRequestLiveLevel = [this]() -> float
-    {
-        int trackIndex = -1;
-        if (selectedArrangementClip.has_value())
-            trackIndex = selectedArrangementClip->first;
-        else if (const auto selectedTrack = arrangementTimeline.getSelectedTrackIndex(); selectedTrack.has_value())
-            trackIndex = *selectedTrack;
-
-        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackPeakHoldDb.size()))
-            ? juce::jlimit(0.0f, 1.0f, juce::Decibels::decibelsToGain(trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]))
-            : 0.0f;
-    };
-    selectionInspector.onRequestLiveLevelDb = [this]() -> float
-    {
-        int trackIndex = -1;
-        if (selectedArrangementClip.has_value())
-            trackIndex = selectedArrangementClip->first;
-        else if (const auto selectedTrack = arrangementTimeline.getSelectedTrackIndex(); selectedTrack.has_value())
-            trackIndex = *selectedTrack;
-
-        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackPeakHoldDb.size()))
-            ? trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
-            : -100.0f;
-    };
-    addAndMakeVisible(selectionInspector);
-    selectionInspector.setVisible(false);
+    buildLabelsAndInspector();
 
     playButton.setButtonText("PLAY");
     stopButton.setButtonText("STOP");
@@ -2049,9 +1708,9 @@ void MainComponent::resized()
                          .translated(0, transportContentVerticalNudge);
     auto bpmTop = bpmBounds.removeFromTop(30);
     bpmValueLabel.setBounds(bpmTop);
-    const auto editorBoxHeight = static_cast<int>(std::ceil(bpmEditor.getFont().getHeight())) + 4;
-    auto transportTempoEditorBounds = transportBar.getTempoEditorBounds().translated(transportBar.getX(), transportBar.getY());
-    bpmEditor.setBounds(transportTempoEditorBounds.withSizeKeepingCentre(transportTempoEditorBounds.getWidth(), editorBoxHeight));
+    // Sit the editor exactly on the value rectangle — same box the number is painted in, so
+    // there is no jump when it appears (see getTempoEditorBounds / drawReadout).
+    bpmEditor.setBounds(transportBar.getTempoEditorBounds().translated(transportBar.getX(), transportBar.getY()));
     if (bpmEditor.isVisible())
         bpmEditor.toFront(false);
     else
@@ -3530,6 +3189,13 @@ void MainComponent::updateTransportLabels()
             label.setText(text, juce::dontSendNotification);
     };
 
+    // Safety net for closing the BPM editor. onFocusLost handles clicks that land on a
+    // focusable component, but clicking empty timeline space doesn't always move keyboard focus,
+    // so the editor could stay open (and, now that the bar hides the value while editing, the
+    // tempo would read blank). If it's open but no longer has focus, commit and close it.
+    if (bpmEditor.isVisible() && ! bpmEditor.hasKeyboardFocus(true))
+        endTempoEditing(true);
+
     if (! bpmEditor.isVisible())
     {
         setLabelTextIfChanged(bpmValueLabel, juce::String(projectState.getTempoBpm(), 2));
@@ -3568,6 +3234,7 @@ void MainComponent::updateTransportLabels()
 
     TransportBarState transportState;
     transportState.tempoBpm = projectState.getTempoBpm();
+    transportState.tempoEditing = bpmEditor.isVisible();
     transportState.projectName = currentProjectFile != juce::File()
         ? currentProjectFile.getFileNameWithoutExtension()
         : juce::String("Untitled");
@@ -4851,10 +4518,15 @@ void MainComponent::endTempoEditing(bool applyChanges)
     if (! bpmEditor.isVisible())
         return;
 
+    // Hide FIRST, then apply. applyTempoFromTransportText() calls updateTransportLabels(), which
+    // itself closes the editor if it has lost focus — so if we applied while still visible, that
+    // path would re-enter endTempoEditing and recurse until the stack overflowed. Hiding up front
+    // makes the isVisible() guard above short-circuit any re-entry.
+    bpmEditor.setVisible(false);
+
     if (applyChanges)
         applyTempoFromTransportText();
 
-    bpmEditor.setVisible(false);
     bpmValueLabel.setText(juce::String(projectState.getTempoBpm(), 2), juce::dontSendNotification);
     bpmValueLabel.setVisible(false);
     repaint();
