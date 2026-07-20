@@ -146,7 +146,18 @@ void AudioInputRecorder::audioDeviceIOCallbackWithContext(const float* const* in
                                                           int numSamples,
                                                           const juce::AudioIODeviceCallbackContext& context)
 {
-    juce::ignoreUnused(outputChannelData, numOutputChannels, context);
+    juce::ignoreUnused(context);
+
+    // MUST come first, before any early return. This is an input-only consumer, but the JUCE
+    // contract is that every AudioIODeviceCallback fills the output block it is handed:
+    // AudioDeviceManager sums each callback's output, and the scratch buffer it passes to the
+    // secondary callbacks is NOT cleared between blocks. Leaving it untouched summed stale
+    // memory into the output — which came out of the speakers as loud garbage the moment a
+    // track was armed.
+    for (int ch = 0; ch < numOutputChannels; ++ch)
+        if (outputChannelData != nullptr && outputChannelData[ch] != nullptr)
+            juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);
+
     if (inputChannelData == nullptr || numInputChannels <= 0 || numSamples <= 0)
         return;
 

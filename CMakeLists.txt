@@ -91,6 +91,8 @@ target_sources(
         Source/UI/ChordSelectorComponent.cpp
         Source/UI/ClipEditorComponent.cpp
         Source/UI/MainComponent.cpp
+        Source/UI/MainComponentMpc.cpp
+        Source/UI/MainComponentRecording.cpp
         Source/UI/MacCharacterPalette.mm
         Source/UI/MidiEditorOverlayComponent.cpp
         Source/UI/AddTrackDialogComponent.cpp

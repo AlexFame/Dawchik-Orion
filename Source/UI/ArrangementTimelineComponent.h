@@ -154,6 +154,17 @@ public:
     // loaded so stale indices and snapshots from the previous project are dropped.
     void resetForNewProject();
     void setFitTrackLanesToVisibleArea(bool shouldFit);
+    // Repaint ONLY the level-meter strip of the track headers, so input meters keep animating
+    // while the transport is stopped. The meters are a 9 px column at the right edge of each
+    // header (card reduced by 8 px, then 9 px taken off the right — see trackHeaderLayout), and
+    // everything around them (name, buttons, fader) is static between frames. Invalidating the
+    // whole 214 px header column would redraw all of that ~60x/second for nothing, which matters
+    // here because rendering is software.
+    void repaintTrackMeters()
+    {
+        constexpr int meterWidth = 9, rightInset = 8;
+        repaint(trackHeaderWidth - rightInset - meterWidth - 1, 0, meterWidth + 2, getHeight());
+    }
     // Live waveform for the clip currently being recorded (drawn until the file exists).
     void setLiveRecordingWaveform(int trackIndex, int clipIndex,
                                   std::vector<float> mins, std::vector<float> maxs);

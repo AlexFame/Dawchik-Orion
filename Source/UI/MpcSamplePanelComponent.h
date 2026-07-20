@@ -134,4 +134,34 @@ private:
     juce::ComponentDragger dragger;
     juce::ComponentBoundsConstrainer dragConstrainer;
 };
+
+// Human-readable name for a panel command (status text, MIDI-learn messages). Lives here
+// beside the enum so every translation unit that handles commands can share one definition.
+inline juce::String mpcCommandName(MpcSamplePanelComponent::Command command)
+{
+    using Command = MpcSamplePanelComponent::Command;
+    switch (command)
+    {
+        case Command::sampleMode:   return "Sample";
+        case Command::seqMode:      return "Seq";
+        case Command::padFx:        return "Pad FX";
+        case Command::knobFx:       return "Knob FX";
+        case Command::shift:        return "Shift";
+        case Command::padBank:      return "Pad Bank";
+        case Command::chop:         return "Chop";
+        case Command::mute:         return "Mute";
+        case Command::loop:         return "Loop";
+        case Command::levels16:     return "16 Levels";
+        case Command::sampleSelect: return "Sample Select";
+        case Command::tapTempo:     return "Tap Tempo";
+        case Command::rewind:       return "Rewind";
+        case Command::stop:         return "Stop";
+        case Command::record:       return "Record";
+        case Command::play:         return "Play";
+        case Command::undo:         return "Undo";
+        case Command::redo:         return "Redo";
+        case Command::count:        break;
+    }
+    return "Command";
+}
 } // namespace orion
