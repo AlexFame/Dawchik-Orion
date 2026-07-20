@@ -179,6 +179,7 @@ private:
     void toggleMpcSampleFromUi();
     void toggleJamSessionFromUi();
     void saveProjectInteractively();
+    void newProjectInteractively();
     void openProjectInteractively();
     void loadProjectFromFile(const juce::File& file);
     void exportProjectInteractively();
