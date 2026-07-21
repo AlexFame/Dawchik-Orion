@@ -42,6 +42,7 @@ void MainComponent::loadInstrumentOnTrack(int trackIndex, const juce::PluginDesc
         return;
     }
 
+    arrangementTimeline.captureUndoSnapshot();   // so Cmd+Z removes the just-loaded instrument
     auto& track = tracks[static_cast<std::size_t>(trackIndex)];
     track.instrumentPluginId    = description.createIdentifierString();
     track.instrumentPluginName  = description.name;
@@ -60,6 +61,8 @@ void MainComponent::loadInstrumentOnTrack(int trackIndex, const juce::PluginDesc
 
 void MainComponent::removeInstrumentFromTrack(int trackIndex)
 {
+    if (trackIndex >= 0 && trackIndex < static_cast<int>(projectState.getTracks().size()))
+        arrangementTimeline.captureUndoSnapshot();   // so Cmd+Z brings the instrument back
     closeInstrumentEditor(trackIndex);
     if (arrangementPlaybackSource != nullptr)
         arrangementPlaybackSource->clearTrackInstrument(trackIndex);

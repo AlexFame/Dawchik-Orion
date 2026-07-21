@@ -6626,7 +6626,22 @@ void ArrangementTimelineComponent::restoreSnapshot(const TimelineSnapshot& snaps
 {
     {
         const juce::ScopedLock sl(project.getAudioEditLock());
-        project.getTracks() = snapshot.tracks;
+        auto& live = project.getTracks();
+
+        // Ableton treats mute / solo / record-arm as performance controls, NOT undoable edits
+        // (their forum confirms solo is deliberately excluded from undo). So undo/redo must LEAVE
+        // these live: keep each existing track's current states across the restore. Otherwise
+        // undoing a clip/gain edit silently flips a track's mute/solo or re-arms record — which is
+        // exactly what deleted the clip and "jumped to R" here.
+        auto restored = snapshot.tracks;
+        for (std::size_t i = 0; i < restored.size() && i < live.size(); ++i)
+        {
+            restored[i].muted       = live[i].muted;
+            restored[i].solo        = live[i].solo;
+            restored[i].recordArmed = live[i].recordArmed;
+        }
+
+        live = std::move(restored);
         project.getChordTrack() = snapshot.chordTrack;
     }
     selectedChords.clear();

@@ -163,6 +163,8 @@ void SelectionInspectorComponent::mouseDown(const juce::MouseEvent& event)
     if (getGainTrackBounds().expanded(5, 6).contains(event.getPosition()))
     {
         draggingGain = true;
+        if (onGainDragStart)
+            onGainDragStart();
         applyGainFromPoint(event.getPosition());
     }
 }

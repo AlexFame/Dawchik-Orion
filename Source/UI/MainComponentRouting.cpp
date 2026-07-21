@@ -44,6 +44,7 @@ juce::String MainComponent::insertOwnerName(int id) const
 
 void MainComponent::addBus()
 {
+    arrangementTimeline.captureUndoSnapshot();
     auto& buses = projectState.getBuses();
     orion::BusState bus;
     bus.name = "Bus " + juce::String(static_cast<int>(buses.size()) + 1);
@@ -222,6 +223,7 @@ void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
 
 void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescription& description)
 {
+    arrangementTimeline.captureUndoSnapshot();
     auto* chainPtr = insertChainForId(trackIndex);
     if (chainPtr == nullptr || arrangementPlaybackSource == nullptr)
         return;
@@ -252,6 +254,7 @@ void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescripti
 
 void MainComponent::replaceInsertOnTrack(int trackIndex, int insertIndex, const juce::PluginDescription& description)
 {
+    arrangementTimeline.captureUndoSnapshot();
     auto* chainPtr = insertChainForId(trackIndex);
     if (chainPtr == nullptr || arrangementPlaybackSource == nullptr)
         return;
@@ -291,6 +294,7 @@ void MainComponent::replaceInsertOnTrack(int trackIndex, int insertIndex, const 
 
 void MainComponent::removeInsertFromTrack(int trackIndex, int insertIndex)
 {
+    arrangementTimeline.captureUndoSnapshot();
     insertEditorWindows.erase({ trackIndex, insertIndex });
     if (arrangementPlaybackSource != nullptr)
         arrangementPlaybackSource->removeInsert(trackIndex, insertIndex);
@@ -303,6 +307,7 @@ void MainComponent::removeInsertFromTrack(int trackIndex, int insertIndex)
 
 void MainComponent::toggleInsertBypass(int trackIndex, int insertIndex)
 {
+    arrangementTimeline.captureUndoSnapshot();
     auto* chainPtr = insertChainForId(trackIndex);
     if (chainPtr == nullptr)
         return;
@@ -344,6 +349,7 @@ void MainComponent::openInsertEditor(int trackIndex, int insertIndex)
 
 void MainComponent::moveInsert(int fromTrack, int fromIndex, int toTrack, int toIndex)
 {
+    arrangementTimeline.captureUndoSnapshot();
     auto& tracks = projectState.getTracks();
     if (fromTrack < 0 || fromTrack >= static_cast<int>(tracks.size())
         || toTrack < 0 || toTrack >= static_cast<int>(tracks.size()))
@@ -373,6 +379,7 @@ void MainComponent::moveInsert(int fromTrack, int fromIndex, int toTrack, int to
 
 void MainComponent::copyInsertToTrack(int fromTrack, int fromIndex, int toTrack)
 {
+    arrangementTimeline.captureUndoSnapshot();
     auto& tracks = projectState.getTracks();
     if (fromTrack < 0 || fromTrack >= static_cast<int>(tracks.size())
         || toTrack < 0 || toTrack >= static_cast<int>(tracks.size())

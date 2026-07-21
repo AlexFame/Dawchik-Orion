@@ -80,6 +80,9 @@ MainComponent::ClipLevels MainComponent::measureClipLevels(const TimelineClip& c
 
 void MainComponent::matchClipLoudness(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection)
 {
+    if (selection.empty())
+        return;
+    arrangementTimeline.captureUndoSnapshot();   // so Cmd+Z undoes THIS gain change, not the previous edit
     auto& tracks = projectState.getTracks();
 
     struct Entry { TimelineClip* clip; ClipLevels levels; };
@@ -149,6 +152,9 @@ void MainComponent::matchClipLoudness(const std::vector<ArrangementTimelineCompo
 void MainComponent::normalizeClips(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection,
                                    bool relativeToLoudest)
 {
+    if (selection.empty())
+        return;
+    arrangementTimeline.captureUndoSnapshot();   // so Cmd+Z undoes THIS gain change, not the previous edit
     auto& tracks = projectState.getTracks();
 
     std::vector<TimelineClip*> clips;
@@ -217,6 +223,9 @@ void MainComponent::normalizeClips(const std::vector<ArrangementTimelineComponen
 
 void MainComponent::setClipsGainDb(const std::vector<ArrangementTimelineComponent::SelectedClip>& selection, double gainDb)
 {
+    if (selection.empty())
+        return;
+    arrangementTimeline.captureUndoSnapshot();   // so Cmd+Z undoes THIS gain change, not the previous edit
     auto& tracks = projectState.getTracks();
     const auto clamped = juce::jlimit(clipGainMinDb, clipGainMaxDb, gainDb);
     int changed = 0;

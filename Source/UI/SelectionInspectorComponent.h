@@ -27,6 +27,7 @@ class SelectionInspectorComponent final : public juce::Component
 public:
     SelectionInspectorComponent();
 
+    std::function<void()> onGainDragStart;   // fired once when a gain drag begins (for one undo step)
     std::function<void(double)> onGainChanged;
     std::function<void(bool)> onMuteChanged;
     std::function<void(bool)> onSoloChanged;

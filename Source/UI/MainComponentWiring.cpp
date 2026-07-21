@@ -189,6 +189,7 @@ void MainComponent::buildLabelsAndInspector()
     clipGainSlider.setRange(-24.0, 12.0, 0.1);
     clipGainSlider.setColour(juce::Slider::trackColourId, accentColour);
     clipGainSlider.setColour(juce::Slider::thumbColourId, juce::Colours::white);
+    clipGainSlider.onDragStart = [this] { arrangementTimeline.captureUndoSnapshot(); };  // one undo step per drag
     clipGainSlider.onValueChange = [this]
     {
         if (auto* clip = getSelectedTimelineClip())
@@ -206,6 +207,7 @@ void MainComponent::buildLabelsAndInspector()
     {
         if (auto* clip = getSelectedTimelineClip())
         {
+            arrangementTimeline.captureUndoSnapshot();
             clip->muted = clipMuteToggle.getToggleState();
             refreshClipInspector();
             arrangementTimeline.repaint();
@@ -219,6 +221,7 @@ void MainComponent::buildLabelsAndInspector()
     {
         if (auto* clip = getSelectedTimelineClip())
         {
+            arrangementTimeline.captureUndoSnapshot();
             clip->solo = clipSoloToggle.getToggleState();
             refreshClipInspector();
             arrangementTimeline.repaint();
@@ -226,6 +229,7 @@ void MainComponent::buildLabelsAndInspector()
     };
     addAndMakeVisible(clipSoloToggle);
 
+    selectionInspector.onGainDragStart = [this] { arrangementTimeline.captureUndoSnapshot(); };
     selectionInspector.onGainChanged = [this](double gainDb)
     {
         if (auto* clip = getSelectedTimelineClip())
@@ -250,6 +254,7 @@ void MainComponent::buildLabelsAndInspector()
 
     selectionInspector.onMuteChanged = [this](bool shouldMute)
     {
+        arrangementTimeline.captureUndoSnapshot();
         if (auto* clip = getSelectedTimelineClip())
         {
             clip->muted = shouldMute;
@@ -271,6 +276,7 @@ void MainComponent::buildLabelsAndInspector()
 
     selectionInspector.onSoloChanged = [this](bool shouldSolo)
     {
+        arrangementTimeline.captureUndoSnapshot();
         if (auto* clip = getSelectedTimelineClip())
         {
             clip->solo = shouldSolo;
@@ -292,6 +298,7 @@ void MainComponent::buildLabelsAndInspector()
 
     selectionInspector.onWarpChanged = [this](bool shouldWarp)
     {
+        arrangementTimeline.captureUndoSnapshot();
         if (auto* clip = getSelectedTimelineClip())
         {
             if ((clip->sourceDurationSeconds <= 0.0 || (clip->sourceBpm <= 0.0 && clip->detectedBars == 0)) && clip->sourcePath.isNotEmpty())
