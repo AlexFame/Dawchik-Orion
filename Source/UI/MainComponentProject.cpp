@@ -26,6 +26,7 @@ void MainComponent::saveProjectInteractively()
         if (ProjectSerializer::saveToFile(projectState, targetFile, &errorMessage))
         {
             currentProjectFile = targetFile;
+            addRecentProject(targetFile);
             statusLabel.setText("Saved: " + targetFile.getFileName(), juce::dontSendNotification);
         }
         else
@@ -151,6 +152,7 @@ void MainComponent::loadProjectFromFile(const juce::File& file)
     }
 
     currentProjectFile = file;
+    addRecentProject(file);
 
     // Older builds created sampler/MIDI tracks with this fixed grey, which made every MIDI
     // clip on those tracks grey too. Restore palette colours on load without touching any

@@ -53,7 +53,8 @@ class MainComponent final : public juce::Component,
                             private juce::MenuBarModel,
                             private juce::Timer,
                             private juce::Button::Listener,
-                            private juce::MidiInputCallback
+                            private juce::MidiInputCallback,
+                            private juce::ChangeListener
 {
 public:
     MainComponent();
@@ -181,6 +182,16 @@ private:
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();
+
+    // Persisted user settings (audio device, recent projects) via makeUserSettingsFile().
+    void restoreUserSettings();                        // called once at startup
+    void saveUserSettings();                           // browser width, export rate, warp engine
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;   // audio device changed → save
+    void saveAudioDeviceState();
+    void addRecentProject(const juce::File& file);     // record + persist an opened/saved project
+    void openRecentProject(int recentIndex);
+    juce::RecentlyOpenedFilesList recentProjects;
+    static constexpr int recentProjectBaseMenuId = 3000;
     void loadProjectFromFile(const juce::File& file);
     void exportProjectInteractively();
     void openSettingsDialog();

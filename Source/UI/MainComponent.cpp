@@ -542,6 +542,7 @@ public:
         addAndMakeVisible(audioLabel);
 
         addAndMakeVisible(audioSelector);
+        limitAudioBufferChoices();
 
         saveButton.setButtonText("Save");
         saveButton.setColour(juce::TextButton::buttonColourId, accentColour);
@@ -591,6 +592,55 @@ public:
         g.fillAll(th::core::studio);
         g.setColour(th::line::normal);
         g.drawRect(getLocalBounds(), 1);
+    }
+
+    void limitAudioBufferChoices()
+    {
+        auto* device = deviceManager.getCurrentAudioDevice();
+        if (device == nullptr)
+            return;
+
+        juce::ComboBox* bufferBox = nullptr;
+        std::function<void(juce::Component*)> findBufferBox = [&bufferBox, &findBufferBox](juce::Component* component)
+        {
+            if (auto* combo = dynamic_cast<juce::ComboBox*>(component))
+            {
+                if (combo->getText().containsIgnoreCase("samples"))
+                {
+                    bufferBox = combo;
+                    return;
+                }
+            }
+
+            for (int i = 0; i < component->getNumChildComponents() && bufferBox == nullptr; ++i)
+                findBufferBox(component->getChildComponent(i));
+        };
+        findBufferBox(&audioSelector);
+
+        if (bufferBox == nullptr)
+            return;
+
+        const int abletonSizes[] { 32, 64, 128, 256, 512, 1024, 2048 };
+        const auto currentSize = device->getCurrentBufferSizeSamples();
+        const auto deviceSizes = device->getAvailableBufferSizes();
+        juce::Array<int> availableSizes;
+
+        for (const auto size : abletonSizes)
+        {
+            if (deviceSizes.contains(size))
+                availableSizes.add(size);
+        }
+
+        if (currentSize > 0 && ! availableSizes.contains(currentSize))
+            availableSizes.add(currentSize);
+
+        if (availableSizes.isEmpty())
+            return;
+
+        bufferBox->clear(juce::dontSendNotification);
+        for (const auto size : availableSizes)
+            bufferBox->addItem(juce::String(size) + " samples", size);
+        bufferBox->setSelectedId(currentSize, juce::dontSendNotification);
     }
 
     void resized() override
@@ -647,6 +697,7 @@ public:
         audioLabel.setBounds(area.removeFromTop(22));
         area.removeFromTop(6);
         audioSelector.setBounds(area);
+        limitAudioBufferChoices();
     }
 
 private:
@@ -684,6 +735,9 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
     {
         menu.addItem(menuProjectNew, "New");
         menu.addItem(menuProjectOpen, "Open...");
+        juce::PopupMenu recentMenu;
+        recentProjects.createPopupMenuItems(recentMenu, recentProjectBaseMenuId, false, true);
+        menu.addSubMenu("Open Recent", recentMenu, recentMenu.getNumItems() > 0);
         menu.addItem(menuProjectSave, "Save");
         menu.addItem(menuProjectExport, "Export...");
         menu.addSeparator();
@@ -708,6 +762,12 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
 
 void MainComponent::menuItemSelected(int menuItemID, int)
 {
+    if (menuItemID >= recentProjectBaseMenuId && menuItemID < recentProjectBaseMenuId + 100)
+    {
+        openRecentProject(menuItemID - recentProjectBaseMenuId);
+        return;
+    }
+
     switch (menuItemID)
     {
         case menuProjectNew:      newProjectInteractively(); break;
@@ -1058,9 +1118,28 @@ MainComponent::MainComponent()
     clickTrackSource = std::make_unique<ClickTrackSource>(projectState, transportEngine,
                                                           [this]() { return metronomeButton.getToggleState(); });
     audioInputRecorder = std::make_unique<AudioInputRecorder>();
-    // Open output only at launch. Audio input and mic permission are enabled lazily
-    // when the user actually records or monitors input.
-    audioDeviceManager.initialise(0, 2, nullptr, true);
+    // Open output only at launch, restoring the saved device/buffer settings. Audio input and
+    // mic permission are enabled lazily when the user actually records or monitors input.
+    std::unique_ptr<juce::XmlElement> savedAudio;
+    if (auto settings = makeUserSettingsFile())
+        savedAudio = settings->getXmlValue("audioDeviceState");
+    audioDeviceManager.initialise(0, 2, savedAudio.get(), true);
+
+    // Never launch with a separate input device selected: JUCE builds an AudioIODeviceCombiner
+    // for input != output, and some USB devices deadlock CoreAudio's device start there (the
+    // hang we chased earlier). Input is opened lazily and guarded elsewhere; drop it here so a
+    // restored setup can't hang the app at startup.
+    if (auto setup = audioDeviceManager.getAudioDeviceSetup();
+        setup.inputDeviceName.isNotEmpty() && setup.inputDeviceName != setup.outputDeviceName)
+    {
+        setup.inputDeviceName = {};
+        setup.useDefaultInputChannels = false;
+        setup.inputChannels.clear();
+        audioDeviceManager.setAudioDeviceSetup(setup, true);
+    }
+
+    audioDeviceManager.addChangeListener(this);   // persist device/buffer changes as they happen
+    restoreUserSettings();                        // recent projects list
     refreshMidiInputDevices();
     audioDeviceManager.addAudioCallback(&previewSourcePlayer);
     masterMixerSource.addInputSource(&previewTransportSource, false);
@@ -1393,10 +1472,78 @@ MainComponent::MainComponent()
     startTimerHz(60);
 }
 
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == &audioDeviceManager)
+        saveAudioDeviceState();
+}
+
+void MainComponent::saveAudioDeviceState()
+{
+    auto settings = makeUserSettingsFile();
+    if (settings == nullptr)
+        return;
+    if (auto xml = audioDeviceManager.createStateXml())
+        settings->setValue("audioDeviceState", xml.get());
+    else
+        settings->removeValue("audioDeviceState");
+    settings->saveIfNeeded();
+}
+
+void MainComponent::restoreUserSettings()
+{
+    auto settings = makeUserSettingsFile();
+    if (settings == nullptr)
+        return;
+    recentProjects.restoreFromString(settings->getValue("recentProjects"));
+    browserPanelWidth = juce::jlimit(minBrowserPanelWidth, maxBrowserPanelWidth,
+                                     settings->getIntValue("browserPanelWidth", browserPanelWidth));
+    exportSampleRate = settings->getIntValue("exportSampleRate", exportSampleRate);
+    setOrionWarpEnabled(settings->getBoolValue("orionWarpEnabled", isOrionWarpEnabled()));
+}
+
+void MainComponent::saveUserSettings()
+{
+    if (auto settings = makeUserSettingsFile())
+    {
+        settings->setValue("browserPanelWidth", browserPanelWidth);
+        settings->setValue("exportSampleRate", exportSampleRate);
+        settings->setValue("orionWarpEnabled", isOrionWarpEnabled());
+        settings->saveIfNeeded();
+    }
+}
+
+void MainComponent::addRecentProject(const juce::File& file)
+{
+    if (! file.existsAsFile())
+        return;
+    recentProjects.addFile(file);
+    recentProjects.removeNonExistentFiles();
+    if (auto settings = makeUserSettingsFile())
+    {
+        settings->setValue("recentProjects", recentProjects.toString());
+        settings->saveIfNeeded();
+    }
+}
+
+void MainComponent::openRecentProject(int recentIndex)
+{
+    const auto file = recentProjects.getFile(recentIndex);
+    if (file.existsAsFile())
+        loadProjectFromFile(file);
+    else
+    {
+        recentProjects.removeNonExistentFiles();   // stale entry — drop it
+        statusLabel.setText("Project no longer exists: " + file.getFileName(), juce::dontSendNotification);
+    }
+}
+
 MainComponent::~MainComponent()
 {
     if (juce::MenuBarModel::getMacMainMenu() == this)
         juce::MenuBarModel::setMacMainMenu(nullptr);
+
+    audioDeviceManager.removeChangeListener(this);
 
     for (auto* button : { &playButton, &stopButton, &recordButton, &rewindButton, &undoButton, &redoButton,
                           &metronomeButton, &loopButton, &countInButton, &browserButton, &scanPluginsButton,
@@ -3855,16 +4002,19 @@ void MainComponent::openSettingsDialog()
             browserPanelWidth = juce::jlimit(minBrowserPanelWidth, maxBrowserPanelWidth, newWidth);
             resized();
             repaint();
+            saveUserSettings();
         },
         [this](int newRate)
         {
             exportSampleRate = newRate;
+            saveUserSettings();
             statusLabel.setText("Export sample rate: " + juce::String(exportSampleRate / 1000.0, 1) + " kHz",
                                 juce::dontSendNotification);
         },
         [this](bool orionOn)
         {
             setOrionWarpEnabled(orionOn);
+            saveUserSettings();
             // Re-render warped clips with the chosen backend on next playback.
             if (arrangementPlaybackSource != nullptr)
                 arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
@@ -3890,7 +4040,8 @@ void MainComponent::openSettingsDialog()
     options.resizable = true;
     options.componentToCentreAround = this;
     options.content->setSize(640, 720);
-    options.launchAsync();
+    if (auto* dialog = options.launchAsync())
+        dialog->setAlwaysOnTop(false);
 }
 
 void MainComponent::refreshAudioClipWarpLengths()
