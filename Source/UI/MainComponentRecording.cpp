@@ -296,17 +296,65 @@ void MainComponent::updateInputMonitoring()
     const bool wantInput = anyAudioArmed || audioInputRecorder->isRecording();
     if (wantInput && ! audioRecorderCallbackAttached)
     {
-        if (! ensureAudioInputReady(true))
-            return;
+        if (! ensureRecordPermission())
+            return;   // async permission request in flight; re-runs on grant
 
-        audioDeviceManager.addAudioCallback(audioInputRecorder.get());
-        audioRecorderCallbackAttached = true;
+        // Open the input on its OWN CoreAudio device, beside the main output — no combiner, so a
+        // mic that differs from the monitors can't hang the app. Match the output's rate/buffer so
+        // the take lines up. Empty preferred name = the system default input (the built-in mic).
+        double rate = 0.0;
+        int buffer = 0;
+        if (auto* out = audioDeviceManager.getCurrentAudioDevice())
+        {
+            rate = out->getCurrentSampleRate();
+            buffer = out->getCurrentBufferSizeSamples();
+        }
+        const auto preferredInput = audioDeviceManager.getAudioDeviceSetup().inputDeviceName;
+
+        juce::String error;
+        if (independentAudioInput.start(preferredInput, rate, buffer, audioInputRecorder.get(), error))
+        {
+            audioRecorderCallbackAttached = true;
+            audioInputUnavailable = false;
+        }
+        else
+        {
+            audioInputUnavailable = true;
+            statusLabel.setText("Audio input failed: " + error, juce::dontSendNotification);
+        }
     }
     else if (! wantInput && audioRecorderCallbackAttached)
     {
-        audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
+        independentAudioInput.stop();
         audioRecorderCallbackAttached = false;
     }
+}
+
+bool MainComponent::ensureRecordPermission()
+{
+    if (! (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
+           && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio)))
+        return true;   // already granted (or not required)
+
+    if (! audioInputPermissionRequestInFlight)
+    {
+        audioInputPermissionRequestInFlight = true;
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
+                                          [safeThis](bool granted)
+                                          {
+                                              if (safeThis == nullptr)
+                                                  return;
+                                              safeThis->audioInputPermissionRequestInFlight = false;
+                                              if (granted)
+                                                  safeThis->updateInputMonitoring();
+                                              else
+                                                  safeThis->statusLabel.setText(
+                                                      "Microphone permission denied. Enable it in macOS Privacy settings.",
+                                                      juce::dontSendNotification);
+                                          });
+    }
+    return false;
 }
 
 bool MainComponent::ensureAudioInputReady(bool requestPermission)
@@ -445,24 +493,26 @@ void MainComponent::startAudioRecordingClip(int trackIndex)
     if (track.isMidiTrack)
         return;
 
-    if (! ensureAudioInputReady(true))
+    if (! ensureRecordPermission())
         return;
 
-    auto* currentDevice = audioDeviceManager.getCurrentAudioDevice();
-    const auto inputChannels = currentDevice != nullptr
-        ? juce::jmin(2, currentDevice->getActiveInputChannels().countNumberOfSetBits())
-        : 0;
-    if (inputChannels <= 0)
+    // The independent input stream is started when the track is armed (updateInputMonitoring).
+    // Make sure it's up before we begin writing, and take its rate/channels from the recorder —
+    // the input runs on its own device now, not on audioDeviceManager's output device.
+    if (! audioRecorderCallbackAttached)
+        updateInputMonitoring();
+    if (! independentAudioInput.isRunning())
     {
-        statusLabel.setText("No audio input selected. Open Settings and enable a microphone/input.",
+        statusLabel.setText("No audio input available. Check the mic or macOS Privacy settings.",
                             juce::dontSendNotification);
         return;
     }
 
+    const auto inputChannels = juce::jlimit(1, 2, audioInputRecorder->getCurrentInputChannels());
     const auto playheadBeat = transportEngine.getPlayheadBeat();
     const auto clipStart = std::floor(playheadBeat);
-    const auto sampleRate = currentDevice != nullptr && currentDevice->getCurrentSampleRate() > 0.0
-        ? currentDevice->getCurrentSampleRate()
+    const auto sampleRate = audioInputRecorder->getCurrentSampleRate() > 0.0
+        ? audioInputRecorder->getCurrentSampleRate()
         : 44100.0;
     const auto directory = getAudioRecordingDirectory();
     const auto stamp = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
@@ -475,11 +525,8 @@ void MainComponent::startAudioRecordingClip(int trackIndex)
         return;
     }
 
-    if (! audioRecorderCallbackAttached)
-    {
-        audioDeviceManager.addAudioCallback(audioInputRecorder.get());
-        audioRecorderCallbackAttached = true;
-    }
+    // The recorder is already fed by the independent input stream (attached in updateInputMonitoring);
+    // no audioDeviceManager callback to add here.
 
     TimelineClip clip;
     clip.name = "Audio Recording";

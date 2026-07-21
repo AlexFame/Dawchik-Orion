@@ -1504,11 +1504,10 @@ MainComponent::~MainComponent()
     currentPreviewFile = juce::File();
     currentPreviewTempoBpm = 0.0;
     masterStripSource.reset();
-    if (audioInputRecorder != nullptr && audioRecorderCallbackAttached)
-    {
-        audioDeviceManager.removeAudioCallback(audioInputRecorder.get());
-        audioRecorderCallbackAttached = false;
-    }
+    // Stop the independent input device BEFORE the recorder it feeds is destroyed, or its callback
+    // could fire on freed memory. (The recorder is no longer on audioDeviceManager.)
+    independentAudioInput.stop();
+    audioRecorderCallbackAttached = false;
     for (const auto& midiInputId : activeMidiInputDeviceIds)
         audioDeviceManager.removeMidiInputDeviceCallback(midiInputId, this);
     activeMidiInputDeviceIds.clear();

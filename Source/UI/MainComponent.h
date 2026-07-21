@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../Audio/ExportService.h"
+#include "../Audio/IndependentAudioInput.h"
 #include "../Audio/WarpEngine.h"
 #include "../Audio/TransportController.h"
 #include "../Audio/TransportEngine.h"
@@ -416,6 +417,10 @@ private:
     std::unique_ptr<ClickTrackSource> clickTrackSource;
     std::unique_ptr<MasterStripSource> masterStripSource;
     std::unique_ptr<AudioInputRecorder> audioInputRecorder;
+    // Input runs on its OWN CoreAudio device (see IndependentAudioInput), beside the main output
+    // device, so a mic/interface that differs from the monitors never builds JUCE's combiner.
+    IndependentAudioInput independentAudioInput;
+    bool ensureRecordPermission();   // async mic-permission gate; true once granted
     bool audioRecorderCallbackAttached { false };
     std::atomic<bool> audioInputConfiguring { false };   // background device start in flight
     bool audioInputUnavailable { false };                // last input start failed; keep output alive
