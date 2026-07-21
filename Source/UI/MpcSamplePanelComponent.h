@@ -64,7 +64,6 @@ public:
     void setPerformanceState(bool fullLevelEnabled, bool sixteenLevelsEnabled, bool chopEnabled, int bankIndex, int selectedPadIndex);
     void handlePadEvent(int padIndex, int velocity);
     void setPadActivity(int padIndex, int velocity);
-    void handleMidiMessage(const juce::MidiMessage& message);
 
     void paint(juce::Graphics&) override;
     void resized() override;

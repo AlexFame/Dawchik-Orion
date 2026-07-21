@@ -91,11 +91,6 @@ void MpcSamplePanelComponent::setPadActivity(int padIndex, int velocity)
         repaint(padBounds[static_cast<std::size_t>(padIndex)].getSmallestIntegerContainer().expanded(6));
 }
 
-void MpcSamplePanelComponent::handleMidiMessage(const juce::MidiMessage& message)
-{
-    juce::ignoreUnused(message);
-}
-
 // Map a rect given in the render's 0..1 space to on-screen coordinates within imageArea.
 juce::Rectangle<float> MpcSamplePanelComponent::mapNorm(float x, float y, float w, float h) const
 {
