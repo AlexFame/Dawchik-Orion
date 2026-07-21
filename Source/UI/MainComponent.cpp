@@ -470,7 +470,7 @@ public:
         addAndMakeVisible(titleLabel);
 
         browserWidthLabel.setText("Browser Width", juce::dontSendNotification);
-        browserWidthLabel.setColour(juce::Label::textColourId, mutedText);
+        browserWidthLabel.setColour(juce::Label::textColourId, th::text::secondary);
         addAndMakeVisible(browserWidthLabel);
 
         browserWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -479,6 +479,10 @@ public:
         browserWidthSlider.setValue(initialBrowserWidth, juce::dontSendNotification);
         browserWidthSlider.setColour(juce::Slider::trackColourId, accentColour);
         browserWidthSlider.setColour(juce::Slider::thumbColourId, juce::Colours::white);
+        browserWidthSlider.setColour(juce::Slider::backgroundColourId, th::line::subtle);
+        browserWidthSlider.setColour(juce::Slider::textBoxTextColourId, th::text::primary);
+        browserWidthSlider.setColour(juce::Slider::textBoxBackgroundColourId, th::core::canvas);
+        browserWidthSlider.setColour(juce::Slider::textBoxOutlineColourId, th::line::normal);
         browserWidthSlider.onValueChange = [this]
         {
             browserWidthChanged(static_cast<int>(std::round(browserWidthSlider.getValue())));
@@ -486,13 +490,17 @@ public:
         addAndMakeVisible(browserWidthSlider);
 
         exportSampleRateLabel.setText("Export Sample Rate", juce::dontSendNotification);
-        exportSampleRateLabel.setColour(juce::Label::textColourId, mutedText);
+        exportSampleRateLabel.setColour(juce::Label::textColourId, th::text::secondary);
         addAndMakeVisible(exportSampleRateLabel);
 
         exportSampleRateBox.addItem("44.1 kHz", 44100);
         exportSampleRateBox.addItem("48 kHz", 48000);
         exportSampleRateBox.addItem("96 kHz", 96000);
         exportSampleRateBox.setSelectedId(initialExportSampleRate, juce::dontSendNotification);
+        exportSampleRateBox.setColour(juce::ComboBox::backgroundColourId, th::core::canvas);
+        exportSampleRateBox.setColour(juce::ComboBox::textColourId, th::text::primary);
+        exportSampleRateBox.setColour(juce::ComboBox::outlineColourId, th::line::normal);
+        exportSampleRateBox.setColour(juce::ComboBox::arrowColourId, th::text::primary);
         exportSampleRateBox.onChange = [this]
         {
             const auto selected = exportSampleRateBox.getSelectedId();
@@ -502,7 +510,8 @@ public:
         addAndMakeVisible(exportSampleRateBox);
 
         orionWarpToggle.setButtonText("Orion warp engine (experimental)");
-        orionWarpToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.9f));
+        orionWarpToggle.setColour(juce::ToggleButton::textColourId, th::text::primary);
+        orionWarpToggle.setColour(juce::ToggleButton::tickColourId, accentColour);
         orionWarpToggle.setToggleState(initialOrionWarp, juce::dontSendNotification);
         orionWarpToggle.onClick = [this]
         {
@@ -512,7 +521,7 @@ public:
         addAndMakeVisible(orionWarpToggle);
 
         midiLabel.setText("MIDI Input", juce::dontSendNotification);
-        midiLabel.setColour(juce::Label::textColourId, mutedText);
+        midiLabel.setColour(juce::Label::textColourId, th::text::secondary);
         addAndMakeVisible(midiLabel);
 
         midiRescanButton.setButtonText("Rescan");
@@ -529,7 +538,7 @@ public:
         rebuildMidiDeviceList();
 
         audioLabel.setText("Audio Device", juce::dontSendNotification);
-        audioLabel.setColour(juce::Label::textColourId, mutedText);
+        audioLabel.setColour(juce::Label::textColourId, th::text::secondary);
         addAndMakeVisible(audioLabel);
 
         addAndMakeVisible(audioSelector);
@@ -579,50 +588,65 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(panelColour);
+        g.fillAll(th::core::studio);
+        g.setColour(th::line::normal);
+        g.drawRect(getLocalBounds(), 1);
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(18);
-        titleLabel.setBounds(area.removeFromTop(28));
-        area.removeFromTop(12);
+        auto area = getLocalBounds().reduced(24, 22);
+        titleLabel.setBounds(area.removeFromTop(30));
+        area.removeFromTop(18);
 
-        browserWidthLabel.setBounds(area.removeFromTop(20));
-        browserWidthSlider.setBounds(area.removeFromTop(32));
-        area.removeFromTop(10);
-
-        exportSampleRateLabel.setBounds(area.removeFromTop(20));
-        exportSampleRateBox.setBounds(area.removeFromTop(28).removeFromLeft(140));
-        area.removeFromTop(14);
-
-        orionWarpToggle.setBounds(area.removeFromTop(26));
-        area.removeFromTop(14);
-
-        // MIDI Input section: header row (label + Rescan), then one toggle per device.
+        constexpr int labelWidth = 154;
+        constexpr int rowHeight = 30;
+        constexpr int rowGap = 10;
+        const auto layoutRow = [](juce::Rectangle<int> row, juce::Label& label, juce::Component& control)
         {
-            auto headerRow = area.removeFromTop(24);
-            midiRescanButton.setBounds(headerRow.removeFromRight(80));
-            midiLabel.setBounds(headerRow.withTrimmedTop(2));
-            area.removeFromTop(6);
+            label.setBounds(row.removeFromLeft(labelWidth).withTrimmedTop(5));
+            row.removeFromLeft(12);
+            control.setBounds(row);
+        };
 
-            if (midiDeviceToggles.isEmpty())
-            {
-                midiEmptyLabel.setBounds(area.removeFromTop(22));
-            }
-            else
-            {
-                for (auto* toggle : midiDeviceToggles)
-                    toggle->setBounds(area.removeFromTop(24));
-            }
-            area.removeFromTop(14);
-        }
+        layoutRow(area.removeFromTop(rowHeight), browserWidthLabel, browserWidthSlider);
+        area.removeFromTop(rowGap);
 
-        audioLabel.setBounds(area.removeFromTop(20));
+        auto exportRow = area.removeFromTop(rowHeight);
+        exportSampleRateLabel.setBounds(exportRow.removeFromLeft(labelWidth).withTrimmedTop(5));
+        exportRow.removeFromLeft(12);
+        exportSampleRateBox.setBounds(exportRow.removeFromLeft(170));
+        area.removeFromTop(rowGap);
+
+        auto warpRow = area.removeFromTop(rowHeight);
+        warpRow.removeFromLeft(labelWidth + 12);
+        orionWarpToggle.setBounds(warpRow);
+        area.removeFromTop(18);
+
+        auto headerRow = area.removeFromTop(28);
+        midiLabel.setBounds(headerRow.removeFromLeft(labelWidth).withTrimmedTop(4));
+        midiRescanButton.setBounds(headerRow.removeFromRight(92).reduced(0, 1));
         area.removeFromTop(6);
-        auto footerArea = area.removeFromBottom(48);
+
+        const int midiRows = midiDeviceToggles.isEmpty() ? 1 : midiDeviceToggles.size();
+        const int midiHeight = juce::jmin(midiRows * 26, juce::jmax(26, area.getHeight() - 320));
+        auto midiArea = area.removeFromTop(midiHeight);
+        if (midiDeviceToggles.isEmpty())
+        {
+            midiEmptyLabel.setBounds(midiArea.removeFromTop(26));
+        }
+        else
+        {
+            for (auto* toggle : midiDeviceToggles)
+                toggle->setBounds(midiArea.removeFromTop(26));
+        }
+        area.removeFromTop(18);
+
+        auto footerArea = area.removeFromBottom(52);
+        saveButton.setBounds(footerArea.removeFromRight(124).withSizeKeepingCentre(124, 36));
+        audioLabel.setBounds(area.removeFromTop(22));
+        area.removeFromTop(6);
         audioSelector.setBounds(area);
-        saveButton.setBounds(footerArea.removeFromRight(120).reduced(0, 6));
     }
 
 private:
@@ -3860,12 +3884,12 @@ void MainComponent::openSettingsDialog()
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned(settingsComponent.release());
     options.dialogTitle = "Orion Settings";
-    options.dialogBackgroundColour = panelColour;
+    options.dialogBackgroundColour = th::core::studio;
     options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = false;
+    options.useNativeTitleBar = true;
     options.resizable = true;
     options.componentToCentreAround = this;
-    options.content->setSize(560, 640);
+    options.content->setSize(640, 720);
     options.launchAsync();
 }
 

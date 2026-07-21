@@ -652,6 +652,8 @@ void BrowserPanelComponent::showRootLocations()
 
 void BrowserPanelComponent::paint(juce::Graphics& g)
 {
+    // Keep the browser list readable against the darker transport and rail surfaces.
+    g.fillAll(th::core::studio);
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
 
     auto header = bounds.removeFromTop(headerHeight);
