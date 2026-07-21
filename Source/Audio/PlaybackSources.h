@@ -594,6 +594,11 @@ struct ChordPreviewVoice final : juce::SynthesiserVoice
 class ArrangementPlaybackSource final : public juce::AudioSource
 {
 public:
+    // Hand the audio device's OS workgroup to the parallel render pool so its worker threads
+    // schedule alongside the CoreAudio I/O thread (see AudioRenderPool::setWorkgroup). Set it
+    // when the device is (re)initialised, before playback prepares.
+    void setRenderWorkgroup(juce::AudioWorkgroup workgroup) { renderPool.setWorkgroup(std::move(workgroup)); }
+
     ArrangementPlaybackSource(ProjectState& state, TransportEngine& engine, juce::AudioFormatManager& formatManager)
         : project(state),
           transport(engine),
@@ -2916,7 +2921,9 @@ private:
         // Pass 3 (serial): sum into the shared mix buffer and publish the meters.
         for (const auto& job : instrumentJobs)
         {
-            if (job.panicActive || ! job.audible)
+            // Panic blocks contain the instrument's note-off release tail. They must still
+            // reach the mix; dropping them here turns Stop into a hard waveform cut.
+            if (! job.audible)
                 continue;
 
             auto& scratch = job.slot->scratch;
@@ -3235,8 +3242,21 @@ public:
     // how Logic/Ableton treat the click.
     void setMonitorSource(juce::AudioSource* source) noexcept { monitorSource = source; }
 
+    void requestStopFade() noexcept
+    {
+        stopFadeRequested.store(true, std::memory_order_release);
+    }
+
+    void resetStopFade() noexcept
+    {
+        stopFadeRequested.store(false, std::memory_order_release);
+        stopFadeRemaining = 0;
+        stopFadeTotal = 1;
+    }
+
     void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override
     {
+        sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
         downstream.prepareToPlay(samplesPerBlockExpected, newSampleRate);
         if (monitorSource != nullptr)
             monitorSource->prepareToPlay(samplesPerBlockExpected, newSampleRate);
@@ -3289,6 +3309,46 @@ public:
             for (int ch = 0; ch < chn; ++ch)
                 info.buffer->addFrom(ch, info.startSample, monitorScratch, ch, 0, info.numSamples);
         }
+
+        if (stopFadeRequested.exchange(false, std::memory_order_acquire))
+        {
+            stopFadeTotal = juce::jmax(1, static_cast<int>(sampleRate * 0.010));
+            stopFadeRemaining = stopFadeTotal;
+        }
+
+        if (stopFadeRemaining > 0)
+        {
+            const auto fadeSamples = juce::jmin(info.numSamples, stopFadeRemaining);
+            const auto gainStart = static_cast<float>(stopFadeRemaining)
+                                 / static_cast<float>(stopFadeTotal);
+            const auto gainEnd = static_cast<float>(stopFadeRemaining - fadeSamples)
+                               / static_cast<float>(stopFadeTotal);
+            const auto blockHasAudio = info.buffer->getMagnitude(info.startSample, fadeSamples) > 1.0e-5f;
+            if (blockHasAudio)
+            {
+                for (int ch = 0; ch < numCh; ++ch)
+                    info.buffer->applyGainRamp(ch, info.startSample, fadeSamples, gainStart, gainEnd);
+            }
+            else
+            {
+                // Some sources stop by returning a silent block immediately. In that case a
+                // normal gain ramp has nothing to fade, so bridge the previous output sample
+                // to silence explicitly instead of making a one-sample discontinuity.
+                for (int ch = 0; ch < numCh; ++ch)
+                {
+                    auto* samples = info.buffer->getWritePointer(ch, info.startSample);
+                    const auto start = lastOutputSample[static_cast<std::size_t>(juce::jmin(ch, 1))];
+                    for (int sample = 0; sample < fadeSamples; ++sample)
+                        samples[sample] = start * (1.0f - static_cast<float>(sample + 1)
+                                                            / static_cast<float>(stopFadeTotal));
+                }
+            }
+            stopFadeRemaining -= fadeSamples;
+        }
+
+        for (int ch = 0; ch < juce::jmin(numCh, 2); ++ch)
+            lastOutputSample[static_cast<std::size_t>(ch)] =
+                info.buffer->getSample(ch, info.startSample + info.numSamples - 1);
     }
 
     void setGainDb(double db) noexcept
@@ -3314,6 +3374,11 @@ private:
     juce::AudioSource& downstream;
     juce::AudioSource* monitorSource { nullptr };   // metronome click (post-meter monitor)
     juce::AudioBuffer<float> monitorScratch;
+    double sampleRate { 44100.0 };
+    std::atomic<bool> stopFadeRequested { false };
+    int stopFadeRemaining { 0 };
+    int stopFadeTotal { 1 };
+    std::array<float, 2> lastOutputSample {};
     std::atomic<float> gainLinear { 1.0f };
     std::atomic<float> meterPeakL { 0.0f };
     std::atomic<float> meterPeakR { 0.0f };

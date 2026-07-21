@@ -417,6 +417,7 @@ private:
     std::unique_ptr<AudioInputRecorder> audioInputRecorder;
     bool audioRecorderCallbackAttached { false };
     std::atomic<bool> audioInputConfiguring { false };   // background device start in flight
+    bool audioInputUnavailable { false };                // last input start failed; keep output alive
     double masterGainDb { 0.0 };
     // Decayed per-track output levels (0..1) for the timeline + mixer meters.
     // MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks

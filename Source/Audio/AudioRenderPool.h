@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
+#include <juce_audio_basics/juce_audio_basics.h>
 
 #include <atomic>
 #include <functional>
@@ -42,6 +43,14 @@ public:
     /** Block timing, used to request an appropriate realtime workgroup priority. */
     void setBlockTiming (double sampleRate, int blockSize);
 
+    /** The audio device's OS workgroup. On Apple silicon the render workers MUST join the same
+        workgroup as the CoreAudio I/O thread, or the scheduler treats them as unrelated realtime
+        threads and can preempt one for a whole block — the exact "spike on some blocks at low
+        average CPU" that causes crackle. Workers join at creation (setNumThreads), so set this
+        before the next prepare; a device change re-prepares and picks up the new value.
+        Message thread only. */
+    void setWorkgroup (juce::AudioWorkgroup workgroup);
+
     int getNumThreads() const noexcept { return 1 + static_cast<int> (workers.size()); }
 
     /** Total threads to use: one per performance core, clamped to a sane range. */
@@ -70,6 +79,10 @@ private:
 
     double preparedSampleRate { 44100.0 };
     int preparedBlockSize { 512 };
+    // Joined by each worker at creation. Only touched on the message thread (setWorkgroup /
+    // setNumThreads); each worker copies its own membership token in run() so there is no
+    // shared access once the threads are up.
+    juce::AudioWorkgroup renderWorkgroup;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioRenderPool)
 };

@@ -67,6 +67,8 @@ void MainComponent::startMidiRecordingFromRecordButtonIfNeeded()
 void MainComponent::stopTransportFromUi()
 {
     finishRecordingAndDisarm();
+    if (masterStripSource != nullptr)
+        masterStripSource->requestStopFade();
     stopClipEditorPreview(true);
     samplerPanel.stopPreviewPlayback(); // halt the simpler audition + waveform playhead
     if (arrangementPlaybackSource != nullptr)
@@ -309,6 +311,9 @@ void MainComponent::updateInputMonitoring()
 
 bool MainComponent::ensureAudioInputReady(bool requestPermission)
 {
+    if (audioInputUnavailable)
+        return false;
+
     if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
         && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio))
     {
@@ -358,7 +363,8 @@ void MainComponent::beginAudioInputConfiguration()
     if (audioInputConfiguring.exchange(true))
         return;   // a configuration attempt is already in flight
 
-    auto setup = audioDeviceManager.getAudioDeviceSetup();
+    const auto previousSetup = audioDeviceManager.getAudioDeviceSetup();
+    auto setup = previousSetup;
     if (setup.inputDeviceName.isEmpty())
     {
         if (auto* type = audioDeviceManager.getCurrentDeviceTypeObject())
@@ -384,23 +390,42 @@ void MainComponent::beginAudioInputConfiguration()
 
     auto* adm = &audioDeviceManager;
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::Thread::launch([adm, setup, safeThis]
+    juce::Thread::launch([adm, setup, previousSetup, safeThis]
     {
-        const auto error = adm->setAudioDeviceSetup(setup, true);
-        juce::MessageManager::callAsync([safeThis, error]
+        auto error = adm->setAudioDeviceSetup(setup, true);
+        auto* currentDevice = adm->getCurrentAudioDevice();
+        const auto inputReady = currentDevice != nullptr
+            && currentDevice->getActiveInputChannels().countNumberOfSetBits() > 0;
+        const auto outputReady = currentDevice != nullptr
+            && currentDevice->getActiveOutputChannels().countNumberOfSetBits() > 0;
+
+        // Input setup is optional. If CoreAudio cannot open it, restore the last known-good
+        // setup so asking for a microphone can never take the main output down with it.
+        bool restoredOutput = false;
+        if (error.isNotEmpty() || ! inputReady || ! outputReady)
+        {
+            const auto restoreError = adm->setAudioDeviceSetup(previousSetup, true);
+            restoredOutput = restoreError.isEmpty();
+            if (error.isEmpty() && restoreError.isNotEmpty())
+                error = restoreError;
+        }
+
+        juce::MessageManager::callAsync([safeThis, error, inputReady, outputReady, restoredOutput]
         {
             if (safeThis == nullptr)
                 return;
 
             safeThis->audioInputConfiguring = false;
 
-            auto* dev = safeThis->audioDeviceManager.getCurrentAudioDevice();
-            const bool ready = dev != nullptr && dev->getActiveInputChannels().countNumberOfSetBits() > 0;
-            if (error.isNotEmpty())
-                safeThis->statusLabel.setText("Audio input failed: " + error, juce::dontSendNotification);
-            else if (! ready)
-                safeThis->statusLabel.setText("Audio input not available. Check the device / macOS Privacy.",
-                                              juce::dontSendNotification);
+            if (error.isNotEmpty() || ! inputReady || ! outputReady)
+            {
+                safeThis->audioInputUnavailable = true;
+                safeThis->statusLabel.setText(
+                    restoredOutput ? "Microphone unavailable; audio output preserved."
+                                   : "Audio input failed; check Audio Settings.",
+                    juce::dontSendNotification);
+                return;
+            }
 
             safeThis->updateInputMonitoring();   // attach the recorder now the device is up
         });

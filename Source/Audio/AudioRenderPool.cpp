@@ -37,6 +37,13 @@ public:
 
     void run() override
     {
+        // Join the audio device's workgroup for this thread's whole life, so the OS schedules it
+        // in lockstep with the CoreAudio I/O thread instead of as an unrelated realtime thread.
+        // The token leaves the workgroup when it (and the thread) is destroyed.
+        juce::WorkgroupToken workgroupToken;
+        if (pool.renderWorkgroup)
+            pool.renderWorkgroup.join (workgroupToken);
+
         while (! threadShouldExit())
         {
             wakeUp.wait (-1);
@@ -105,6 +112,13 @@ void AudioRenderPool::setBlockTiming (double sampleRate, int blockSize)
 {
     if (sampleRate > 0.0)  preparedSampleRate = sampleRate;
     if (blockSize > 0)     preparedBlockSize = blockSize;
+}
+
+void AudioRenderPool::setWorkgroup (juce::AudioWorkgroup workgroup)
+{
+    // Stored only; existing workers keep the token they joined with at creation. The next
+    // setNumThreads (a device (re)prepare) rebuilds the workers, and they join this value.
+    renderWorkgroup = std::move (workgroup);
 }
 
 void AudioRenderPool::drainJobs()

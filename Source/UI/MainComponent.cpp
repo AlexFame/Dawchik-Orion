@@ -1138,6 +1138,11 @@ MainComponent::MainComponent()
         audioDeviceManager.setAudioDeviceSetup(setup, true);
     }
 
+    // Give the parallel render pool the device's OS workgroup before playback prepares its
+    // workers, so they schedule in lockstep with the CoreAudio I/O thread (fewer per-block spikes).
+    if (arrangementPlaybackSource != nullptr)
+        arrangementPlaybackSource->setRenderWorkgroup(audioDeviceManager.getDeviceAudioWorkgroup());
+
     audioDeviceManager.addChangeListener(this);   // persist device/buffer changes as they happen
     restoreUserSettings();                        // recent projects list
     refreshMidiInputDevices();
@@ -1475,7 +1480,13 @@ MainComponent::MainComponent()
 void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     if (source == &audioDeviceManager)
+    {
         saveAudioDeviceState();
+        // The device (and therefore its workgroup) may have changed — refresh the render pool's
+        // copy so the next prepare rebuilds workers joined to the new one.
+        if (arrangementPlaybackSource != nullptr)
+            arrangementPlaybackSource->setRenderWorkgroup(audioDeviceManager.getDeviceAudioWorkgroup());
+    }
 }
 
 void MainComponent::saveAudioDeviceState()
@@ -3754,6 +3765,9 @@ void MainComponent::toggleTransportFromUi()
     // Count-in belongs to recording only. Keep normal playback instant even if the
     // user previously selected "4-count before recording" in the REC options.
     const auto useCountIn = transportEngine.isRecordArmed() && projectState.isRecordWithCountIn();
+
+    if (masterStripSource != nullptr)
+        masterStripSource->resetStopFade();
 
     transportController.togglePlayback(
         useCountIn,

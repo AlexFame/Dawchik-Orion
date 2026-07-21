@@ -829,7 +829,17 @@ void SamplerEngine::noteOff(int midiNote, SamplerPlaybackMode playbackMode, bool
 void SamplerEngine::allNotesOff()
 {
     std::scoped_lock lock(liveNotesMutex);
-    liveNotes.clear();
+    // Stop must release live sampler voices through the same short declick as a regular
+    // note-off. Clearing the voices here cuts their waveform at an arbitrary sample and
+    // produces a project-dependent click when a sampler track is sounding.
+    for (auto& note : liveNotes)
+    {
+        if (note.releaseSamplesRemaining <= 0)
+        {
+            note.releaseSamplesRemaining = kSamplerRetriggerFadeSamples;
+            note.releaseSamplesTotal = kSamplerRetriggerFadeSamples;
+        }
+    }
     lastLivePitch = -1;
 }
 
