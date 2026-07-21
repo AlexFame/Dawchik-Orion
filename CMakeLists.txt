@@ -98,6 +98,7 @@ target_sources(
         Source/UI/MainComponentPreview.cpp
         Source/UI/MainComponentClipGain.cpp
         Source/UI/MainComponentRouting.cpp
+        Source/UI/MainComponentMidi.cpp
         Source/UI/MainComponentWiring.cpp
         Source/UI/MacCharacterPalette.mm
         Source/UI/MidiEditorOverlayComponent.cpp

@@ -15,6 +15,27 @@
 
 namespace orion
 {
+void MainComponent::confirmAndLoadProject(const juce::File& file)
+{
+    if (! file.existsAsFile())
+        return;
+
+    // Opening a project replaces the current arrangement and its live instruments.
+    // Keep this confirmation in one place so Open... and Open Recent behave identically.
+    juce::AlertWindow::showOkCancelBox(
+        juce::MessageBoxIconType::WarningIcon,
+        "Close Current Project?",
+        "Close the current project and open \"" + file.getFileName() + "\"?",
+        "Close and Open",
+        "Cancel",
+        this,
+        juce::ModalCallbackFunction::create([this, file](int result)
+        {
+            if (result != 0)
+                loadProjectFromFile(file);
+        }));
+}
+
 void MainComponent::saveProjectInteractively()
 {
     // Pull the latest plugin state into the project before it is serialized.
@@ -134,7 +155,7 @@ void MainComponent::openProjectInteractively()
                                          return;
                                      }
 
-                                     loadProjectFromFile(selectedFile);
+                                     confirmAndLoadProject(selectedFile);
                                  });
 }
 

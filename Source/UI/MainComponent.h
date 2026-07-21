@@ -190,6 +190,7 @@ private:
     void saveAudioDeviceState();
     void addRecentProject(const juce::File& file);     // record + persist an opened/saved project
     void openRecentProject(int recentIndex);
+    void confirmAndLoadProject(const juce::File& file);
     juce::RecentlyOpenedFilesList recentProjects;
     static constexpr int recentProjectBaseMenuId = 3000;
     void loadProjectFromFile(const juce::File& file);
