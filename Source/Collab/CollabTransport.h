@@ -17,9 +17,10 @@ namespace orion::collab
 // chat live in higher layers).
 struct PeerInfo
 {
-    ActorId     id;
+    ActorId      id;
     juce::String displayName;
-    juce::Colour colour { juce::Colours::grey };
+    juce::uint32 colourArgb { 0xff9e9e9e };   // ARGB; kept as a raw int so the transport layer
+                                              // needs only juce_core (no juce_graphics dependency).
 };
 
 class CollabTransport

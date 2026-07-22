@@ -83,6 +83,8 @@ target_sources(
         Source/Audio/WarpEngine.cpp
         Source/Core/ProjectSerializer.cpp
         Source/Core/ProjectState.cpp
+        Source/Collab/OpLog.cpp
+        Source/Collab/CollabSession.cpp
         Source/Plugins/PluginManager.cpp
         Source/Sampler/SamplerEngine.cpp
         Source/Sampler/SamplerPanelComponent.cpp
@@ -360,4 +362,17 @@ target_compile_definitions(OrionSmokeTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CU
 target_link_libraries(OrionSmokeTest
     PRIVATE juce::juce_audio_basics juce::juce_audio_devices juce::juce_audio_formats
             juce::juce_core juce::juce_data_structures juce::juce_graphics
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+# Collab op-log tests: two ProjectStates over a loopback hub must converge (Phase 1).
+#   cmake --build <dir> --target OrionCollabTest && ./OrionCollabTest
+juce_add_console_app(OrionCollabTest PRODUCT_NAME "Orion Collab Test")
+target_sources(OrionCollabTest PRIVATE
+    Source/Tools/CollabTest.cpp
+    Source/Collab/OpLog.cpp
+    Source/Collab/CollabSession.cpp
+    Source/Core/ProjectState.cpp)
+target_compile_definitions(OrionCollabTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(OrionCollabTest
+    PRIVATE juce::juce_audio_basics juce::juce_core juce::juce_data_structures juce::juce_graphics
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
