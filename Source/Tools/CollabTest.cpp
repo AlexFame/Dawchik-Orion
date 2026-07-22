@@ -3,6 +3,7 @@
 // round-trip and id assignment. No network, no UI.
 //   cmake --build <dir> --target OrionCollabTest && ./OrionCollabTest
 
+#include "../Collab/CollabController.h"
 #include "../Collab/CollabSession.h"
 #include "../Collab/LoopbackTransport.h"
 #include "../Collab/OpLog.h"
@@ -157,6 +158,47 @@ int main()
         check(tk.id != 0 && tk.clips[0].id != 0 && tk.clips[0].midiNotes[0].id != 0
                   && tk.id != tk.clips[0].id && tk.clips[0].id != tk.clips[0].midiNotes[0].id,
               "ensureIds assigns unique non-zero ids to offline entities");
+    }
+
+    // ---- CollabController: the DAW-edits-then-broadcasts integration model. ----
+    {
+        ProjectState pa, pb;
+        LoopbackHub chub;
+        CollabController ctrlA(pa), ctrlB(pb);
+        int bChangedCount = 0;
+        ctrlB.onProjectChanged = [&bChangedCount] { ++bChangedCount; };
+        ctrlA.connect(std::make_unique<LoopbackTransport>(chub, "A"), 0x0A1);
+        ctrlB.connect(std::make_unique<LoopbackTransport>(chub, "B"), 0x0B2);
+
+        check(ctrlA.isActive() && ctrlB.isActive(), "controllers are active after connect");
+
+        // Simulate a local DAW edit on A: mint an id, mutate the project (oplog::apply stands in for
+        // the DAW's own edit code), then broadcast the matching op send-only.
+        const auto tId = ctrlA.newId();
+        auto trackOp = ops::addTrack(tId, "Keys", true);
+        oplog::apply(pa, trackOp);   // the "DAW edit"
+        ctrlA.broadcast(trackOp);    // send-only
+
+        check(pa.getTracks().size() == 1, "broadcast did NOT re-apply locally (no double-add)");
+        check(pb.getTracks().size() == 1 && pb.getTracks()[0].id == tId,
+              "peer B applied the broadcast track");
+        check(bChangedCount == 1, "onProjectChanged fired once on B");
+
+        // A second edit, and a clip under the new track.
+        const auto cId = ctrlA.newId();
+        auto clipOp = ops::addClip(tId, cId, "Riff", 0.0, 4.0);
+        oplog::apply(pa, clipOp);
+        ctrlA.broadcast(clipOp);
+        check(pb.getTracks()[0].clips.size() == 1 && pb.getTracks()[0].clips[0].id == cId,
+              "peer B applied the broadcast clip");
+        check(bChangedCount == 2, "onProjectChanged fired again on B");
+
+        // After disconnect the controller is inert — broadcast is a no-op and no id is minted.
+        ctrlA.disconnect();
+        check(! ctrlA.isActive() && ctrlA.newId() == noEntity, "disconnected controller is inert");
+        auto lateOp = ops::setTempo(200.0);
+        ctrlA.broadcast(lateOp);   // must do nothing
+        check(std::abs(pb.getTempoBpm() - 200.0) > 1.0e-9, "broadcast after disconnect is a no-op");
     }
 
     std::cout << std::endl;

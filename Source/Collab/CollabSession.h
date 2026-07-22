@@ -30,8 +30,14 @@ public:
     EntityId newId() noexcept { return ids.next(); }
 
     // Stamp an op as ours, apply it locally, and send it. The caller builds the op via ops:: and
-    // sets any new-entity ids from newId().
+    // sets any new-entity ids from newId(). Use when the op is the source of truth (tests / flows
+    // that don't already mutate the project themselves).
     void submitLocal(Op op);
+
+    // Stamp an op as ours and send it WITHOUT applying locally — for the DAW integration, where the
+    // app's own edit code already mutated the project and we only need to broadcast a description of
+    // it. The peer applies it via OpLog; our own echo is ignored on return.
+    void sendLocal(Op op);
 
     // Bring every id-less entity in the project up to a stable id (call once at session start).
     void assignInitialIds();

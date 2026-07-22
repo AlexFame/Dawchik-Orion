@@ -33,6 +33,12 @@ void CollabSession::submitLocal(Op op)
     transport.sendOp(op);      // server sequences it and echoes to peers (and back to us, ignored)
 }
 
+void CollabSession::sendLocal(Op op)
+{
+    op.actor = transport.localActor();
+    transport.sendOp(op);      // the DAW already mutated the project; only broadcast, never re-apply
+}
+
 void CollabSession::handleIncoming(const Op& op)
 {
     // Our own op coming back from the server — already applied optimistically, skip.
