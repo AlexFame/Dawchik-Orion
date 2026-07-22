@@ -31,6 +31,10 @@ struct MidiNote
     double startBeat { 0.0 };
     double lengthInBeats { 1.0 };
     int velocity { 100 };
+    // Stable identity for the collab op-log (0 = unassigned). Ops target notes by this id, never by
+    // vector index, so concurrent inserts/deletes by another participant can't mis-address an edit.
+    // Kept LAST so the many positional MidiNote{pitch,start,len,vel} initialisers stay valid.
+    juce::uint64 id { 0 };
 };
 
 struct PitchSlidePoint
@@ -222,6 +226,8 @@ struct TimelineClip
     // Live re-harmonisation: when true, the clip's audio is re-pitched per bar to follow the
     // arrangement chord lane (root transpose per chord segment). At the end for positional init.
     bool followsChordLane { false };
+    // Stable identity for the collab op-log (0 = unassigned). At the end for positional init.
+    juce::uint64 id { 0 };
 };
 
 // Maps a linear fade progress t in [0,1] (0 = silent end, 1 = full level) to a
@@ -358,6 +364,8 @@ struct TrackState
     juce::String instrumentPluginId;
     juce::String instrumentPluginName;
     juce::String instrumentStateBase64;
+    // Stable identity for the collab op-log (0 = unassigned). Kept last for positional init.
+    juce::uint64 id { 0 };
 };
 
 // An aux/FX bus: receives sends from tracks, runs its own insert chain, and feeds the
@@ -371,6 +379,8 @@ struct BusState
     double pan { 0.0 };
     bool muted { false };
     std::vector<TrackState::InsertFx> inserts;
+    // Stable identity for the collab op-log (0 = unassigned). Kept last for positional init.
+    juce::uint64 id { 0 };
 };
 
 class ProjectState

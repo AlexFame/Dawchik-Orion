@@ -1,0 +1,160 @@
+#pragma once
+
+#include <juce_core/juce_core.h>
+
+// Collab module — foundation types for real-time multiplayer editing.
+//
+// The whole feature is built on a server-sequenced op-log (the Figma/Google-Docs model):
+// every edit is expressed as a small Operation instead of shipping the whole project. Ops are
+// applied to ProjectState on every client; a server assigns each op a global sequence number so
+// all clients converge on the same order. This header defines the data an op carries — nothing
+// here touches the DAW, the UI, or the network, so the module stays fully decoupled.
+//
+// CRITICAL PREREQUISITE (Phase 0): ops address entities by stable EntityId, never by vector index.
+// Indices drift the instant another participant inserts/deletes above you; ids do not. TrackState /
+// TimelineClip / MidiNote must each carry an EntityId before ops can target them reliably.
+
+namespace orion::collab
+{
+// Globally-unique-across-clients id for a track / clip / note / bus. 0 means "none".
+// Uniqueness is guaranteed by minting ids with a per-actor salt in the high bits (see
+// EntityIdGenerator) so two clients editing offline never collide.
+using EntityId = juce::uint64;
+
+// Stable per-connection participant id (who authored an op). Assigned by the session on join.
+using ActorId = juce::String;
+
+// Server-assigned global order. 0 = locally created but not yet sequenced by the server
+// (an "optimistic" op the client already applied and is waiting to have confirmed/reordered).
+using Seq = juce::int64;
+
+constexpr EntityId noEntity = 0;
+
+// Mints process-unique EntityIds that also never collide with other clients: the high 16 bits are
+// a random per-actor salt, the low 48 bits a monotonic counter. 48 bits of counter is ~281e12
+// ids per session — never exhausted in practice.
+class EntityIdGenerator
+{
+public:
+    EntityIdGenerator() : salt(static_cast<EntityId>(juce::Random::getSystemRandom().nextInt64()) & 0xffffULL) {}
+    explicit EntityIdGenerator(EntityId actorSalt) : salt(actorSalt & 0xffffULL) {}
+
+    EntityId next() noexcept
+    {
+        const auto n = ++counter & 0x0000ffffffffffffULL;   // low 48 bits
+        return (salt << 48) | n;
+    }
+
+private:
+    EntityId salt { 0 };
+    EntityId counter { 0 };
+};
+
+enum class OpType
+{
+    // Track lifecycle / properties.
+    addTrack,
+    removeTrack,
+    moveTrack,          // reorder within the track list
+    setTrackField,      // name / mute / solo / recordArmed / volumeDb / pan / trackGainDb / colour…
+
+    // Clip lifecycle / geometry / properties.
+    addClip,
+    removeClip,
+    moveClip,           // startBeat and/or owning track
+    resizeClip,         // lengthInBeats
+    setClipField,       // gainDb / muted / solo / colour / name / warpEnabled…
+
+    // Notes within a clip.
+    addNote,
+    removeNote,
+    editNote,           // pitch / startBeat / lengthInBeats / velocity
+
+    // Pitch slides within a clip.
+    addSlide,
+    removeSlide,
+    editSlide,
+
+    // Project-wide / transport (shared clock).
+    setTempo,
+    setTransport,       // play / stop / position — keeps everyone phase-locked
+
+    // Bring-up escape hatch: replace one clip's whole note vector in a single op. Coarser than
+    // per-note ops (loses fine-grained merging) but trivially correct — used before per-note
+    // editNote is wired, then retired.
+    replaceClipNotes,
+
+    unknown
+};
+
+// One atomic edit. Data-driven on purpose: target ids pick the entity, `payload` carries the
+// changed fields as a key/value bag. That keeps the wire format and OpLog::apply() open to new
+// fields without a class per operation.
+struct Op
+{
+    OpType   type { OpType::unknown };
+    Seq      seq { 0 };
+    ActorId  actor;
+
+    EntityId track { noEntity };
+    EntityId clip { noEntity };
+    EntityId note { noEntity };
+
+    juce::var payload;   // e.g. { "startBeat": 4.0, "track": <newTrackId as string> }
+
+    // ---- JSON (juce::var) round-trip. EntityIds are serialised as decimal strings because
+    // juce::var's integer is 32-bit-ish for JSON and would truncate a 64-bit id. ----
+    juce::var toVar() const
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("type", static_cast<int>(type));
+        obj->setProperty("seq", juce::String(seq));
+        obj->setProperty("actor", actor);
+        obj->setProperty("track", juce::String(track));
+        obj->setProperty("clip", juce::String(clip));
+        obj->setProperty("note", juce::String(note));
+        obj->setProperty("payload", payload);
+        return juce::var(obj);
+    }
+
+    static Op fromVar(const juce::var& v)
+    {
+        Op op;
+        op.type    = static_cast<OpType>(static_cast<int>(v.getProperty("type", static_cast<int>(OpType::unknown))));
+        op.seq     = v.getProperty("seq", "0").toString().getLargeIntValue();
+        op.actor   = v.getProperty("actor", juce::String()).toString();
+        op.track   = static_cast<EntityId>(v.getProperty("track", "0").toString().getLargeIntValue());
+        op.clip    = static_cast<EntityId>(v.getProperty("clip", "0").toString().getLargeIntValue());
+        op.note    = static_cast<EntityId>(v.getProperty("note", "0").toString().getLargeIntValue());
+        op.payload = v.getProperty("payload", juce::var());
+        return op;
+    }
+};
+
+inline juce::String toString(OpType t)
+{
+    switch (t)
+    {
+        case OpType::addTrack:         return "addTrack";
+        case OpType::removeTrack:      return "removeTrack";
+        case OpType::moveTrack:        return "moveTrack";
+        case OpType::setTrackField:    return "setTrackField";
+        case OpType::addClip:          return "addClip";
+        case OpType::removeClip:       return "removeClip";
+        case OpType::moveClip:         return "moveClip";
+        case OpType::resizeClip:       return "resizeClip";
+        case OpType::setClipField:     return "setClipField";
+        case OpType::addNote:          return "addNote";
+        case OpType::removeNote:       return "removeNote";
+        case OpType::editNote:         return "editNote";
+        case OpType::addSlide:         return "addSlide";
+        case OpType::removeSlide:      return "removeSlide";
+        case OpType::editSlide:        return "editSlide";
+        case OpType::setTempo:         return "setTempo";
+        case OpType::setTransport:     return "setTransport";
+        case OpType::replaceClipNotes: return "replaceClipNotes";
+        case OpType::unknown:          break;
+    }
+    return "unknown";
+}
+} // namespace orion::collab
