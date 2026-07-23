@@ -372,7 +372,10 @@ target_sources(OrionCollabTest PRIVATE
     Source/Collab/OpLog.cpp
     Source/Collab/CollabSession.cpp
     Source/Core/ProjectState.cpp)
-target_compile_definitions(OrionCollabTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+# JUCE_MODAL_LOOPS_PERMITTED lets the test pump the message loop (runDispatchLoopUntil) so async
+# socket callbacks marshalled via callAsync actually get delivered.
+target_compile_definitions(OrionCollabTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
 target_link_libraries(OrionCollabTest
-    PRIVATE juce::juce_audio_basics juce::juce_core juce::juce_data_structures juce::juce_graphics
+    PRIVATE juce::juce_audio_basics juce::juce_core juce::juce_data_structures
+            juce::juce_events juce::juce_graphics
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)

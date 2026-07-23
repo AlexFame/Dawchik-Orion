@@ -4,9 +4,11 @@
 //   cmake --build <dir> --target OrionCollabTest && ./OrionCollabTest
 
 #include "../Collab/CollabController.h"
+#include "../Collab/CollabServer.h"
 #include "../Collab/CollabSession.h"
 #include "../Collab/LoopbackTransport.h"
 #include "../Collab/OpLog.h"
+#include "../Collab/SocketTransport.h"
 #include "../Core/ProjectState.h"
 
 #include <iostream>
@@ -71,6 +73,7 @@ bool projectsEqual(const ProjectState& a, const ProjectState& b)
 
 int main()
 {
+    juce::ScopedJuceInitialiser_GUI juceInit;   // socket tests need a message manager to pump
     std::cout << "Orion collab tests" << std::endl;
 
     // ---- Op JSON round-trip survives a real serialise → parse → deserialise. ----
@@ -199,6 +202,52 @@ int main()
         auto lateOp = ops::setTempo(200.0);
         ctrlA.broadcast(lateOp);   // must do nothing
         check(std::abs(pb.getTempoBpm() - 200.0) > 1.0e-9, "broadcast after disconnect is a no-op");
+    }
+
+    // ---- Real sockets: two controllers over a CollabServer on localhost converge. ----
+    {
+        auto pump = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+
+        const int port = 54000 + juce::Random::getSystemRandom().nextInt(800);
+        CollabServer server;
+        check(server.start(port), "collab server started on localhost");
+
+        ProjectState pa, pb;
+        CollabController ca(pa), cb(pb);
+        auto ta = std::make_unique<SocketTransport>("SocketA");
+        auto tb = std::make_unique<SocketTransport>("SocketB");
+        const bool aConnected = ta->connectToServer("127.0.0.1", port);
+        const bool bConnected = tb->connectToServer("127.0.0.1", port);
+        check(aConnected && bConnected, "both clients connected to the server over TCP");
+        ca.connect(std::move(ta), 0x5A);
+        cb.connect(std::move(tb), 0x5B);
+        pump(120);
+
+        // Local DAW edit on A, broadcast across the wire.
+        const auto tid = ca.newId();
+        auto op = ops::addTrack(tid, "Net Drums", true);
+        oplog::apply(pa, op);
+        ca.broadcast(op);
+        for (int i = 0; i < 40 && pb.getTracks().empty(); ++i) pump(25);
+
+        check(pb.getTracks().size() == 1 && pb.getTracks()[0].id == tid,
+              "op crossed a real socket: B received A's track");
+        check(pa.getTracks().size() == 1, "sender did not double-apply its own socket echo");
+
+        // The other direction.
+        const auto tid2 = cb.newId();
+        auto op2 = ops::addTrack(tid2, "Net Bass", true);
+        oplog::apply(pb, op2);
+        cb.broadcast(op2);
+        for (int i = 0; i < 40 && pa.getTracks().size() < 2; ++i) pump(25);
+
+        check(pa.getTracks().size() == 2 && pa.getTracks()[1].id == tid2,
+              "bidirectional over socket: A received B's track");
+
+        ca.disconnect();
+        cb.disconnect();
+        server.stop();
+        pump(40);
     }
 
     std::cout << std::endl;
