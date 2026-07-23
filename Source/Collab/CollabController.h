@@ -1,8 +1,10 @@
 #pragma once
 
+#include "CollabServer.h"
 #include "CollabSession.h"
 #include "CollabTransport.h"
 #include "CollabTypes.h"
+#include "SocketTransport.h"
 
 #include <functional>
 #include <memory>
@@ -44,7 +46,40 @@ public:
     {
         session.reset();     // detaches the transport callback first (session dtor)
         transport.reset();
+        embeddedServer.reset();
     }
+
+    // ---- One-call session bootstrap, so the DAW's wiring stays a single line. ----
+
+    // Host a jam: start an embedded sequencing server on `port` and connect to it locally.
+    // Returns false if the port is already taken.
+    bool hostSession(int port, const ActorId& me, EntityId actorSalt)
+    {
+        auto server = std::make_unique<CollabServer>();
+        if (! server->start(port))
+            return false;
+
+        auto socket = std::make_unique<SocketTransport>(me);
+        if (! socket->connectToServer("127.0.0.1", port))
+            return false;
+
+        embeddedServer = std::move(server);
+        connect(std::move(socket), actorSalt);
+        return true;
+    }
+
+    // Join someone else's jam (their host address / a standalone server later).
+    bool joinSession(const juce::String& address, int port, const ActorId& me, EntityId actorSalt)
+    {
+        auto socket = std::make_unique<SocketTransport>(me);
+        if (! socket->connectToServer(address, port))
+            return false;
+
+        connect(std::move(socket), actorSalt);
+        return true;
+    }
+
+    bool isHosting() const noexcept { return embeddedServer != nullptr; }
 
     bool isActive() const noexcept { return session != nullptr; }
 
@@ -64,6 +99,7 @@ public:
 
 private:
     ProjectState& state;
+    std::unique_ptr<CollabServer> embeddedServer;   // only when hosting
     std::unique_ptr<CollabTransport> transport;
     std::unique_ptr<CollabSession> session;
 };

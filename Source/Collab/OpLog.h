@@ -3,6 +3,7 @@
 #include "CollabTypes.h"
 
 #include <optional>
+#include <vector>
 
 namespace orion
 {
@@ -45,6 +46,7 @@ namespace ops
 
     Op addTrack(EntityId newTrackId, const juce::String& name, bool isMidiTrack);
     Op removeTrack(EntityId trackId);
+    Op moveTrack(EntityId trackId, int newIndex);
     Op setTrackField(EntityId trackId, const juce::String& field, const juce::var& value);
 
     Op addClip(EntityId trackId, EntityId newClipId, const juce::String& name,
@@ -59,6 +61,12 @@ namespace ops
     Op removeNote(EntityId clipId, EntityId noteId);
     Op editNote(EntityId clipId, EntityId noteId, int pitch, double startBeat,
                 double lengthInBeats, int velocity);
+
+    // Sync a clip's ENTIRE note vector in one op. Coarser than per-note ops (two people editing the
+    // same clip at once resolve last-writer-wins rather than merging), but it lets a complex editor
+    // like the piano roll broadcast from a single place after any edit instead of instrumenting
+    // every add/remove/drag/quantise path.
+    Op replaceClipNotes(EntityId clipId, const std::vector<MidiNote>& notes);
 } // namespace ops
 } // namespace collab
 } // namespace orion

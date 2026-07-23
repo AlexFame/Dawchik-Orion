@@ -136,6 +136,54 @@ namespace oplog
                 return false;
             }
 
+            case OpType::moveTrack:
+            {
+                auto& tracks = state.getTracks();
+                const auto target = static_cast<int>(asNum(op.payload, "newIndex", -1.0));
+                if (target < 0 || target >= static_cast<int>(tracks.size()))
+                    return false;
+
+                const juce::ScopedLock sl(state.getAudioEditLock());
+                for (std::size_t i = 0; i < tracks.size(); ++i)
+                    if (tracks[i].id == op.track)
+                    {
+                        if (static_cast<int>(i) == target)
+                            return true;
+                        auto moved = std::move(tracks[i]);
+                        tracks.erase(tracks.begin() + static_cast<long>(i));
+                        tracks.insert(tracks.begin() + target, std::move(moved));
+                        return true;
+                    }
+                return false;
+            }
+
+            case OpType::replaceClipNotes:
+            {
+                auto* c = findClip(state, op.clip);
+                if (c == nullptr)
+                    return false;
+
+                std::vector<MidiNote> rebuilt;
+                if (const auto* arr = op.payload.getProperty("notes", juce::var()).getArray())
+                {
+                    rebuilt.reserve(static_cast<std::size_t>(arr->size()));
+                    for (const auto& v : *arr)
+                    {
+                        MidiNote n;
+                        n.id = varToId(v.getProperty("id", "0"));
+                        n.pitch = static_cast<int>(v.getProperty("pitch", 60));
+                        n.startBeat = static_cast<double>(v.getProperty("startBeat", 0.0));
+                        n.lengthInBeats = static_cast<double>(v.getProperty("lengthInBeats", 1.0));
+                        n.velocity = static_cast<int>(v.getProperty("velocity", 100));
+                        rebuilt.push_back(n);
+                    }
+                }
+
+                const juce::ScopedLock sl(state.getAudioEditLock());
+                c->midiNotes = std::move(rebuilt);
+                return true;
+            }
+
             case OpType::setTrackField:
             {
                 auto* t = findTrack(state, op.track);
@@ -267,16 +315,13 @@ namespace oplog
                 return true;
             }
 
-            case OpType::moveTrack:
             case OpType::addSlide:
             case OpType::removeSlide:
             case OpType::editSlide:
             case OpType::setTransport:
-            case OpType::replaceClipNotes:
             case OpType::unknown:
             default:
-                // Not yet wired (track reorder / slides / shared transport / snapshot escape hatch
-                // land in later phases).
+                // Not yet wired (pitch slides / shared transport land in later phases).
                 return false;
         }
     }
@@ -301,6 +346,13 @@ namespace ops
     Op removeTrack(EntityId trackId)
     {
         Op op; op.type = OpType::removeTrack; op.track = trackId;
+        return op;
+    }
+
+    Op moveTrack(EntityId trackId, int newIndex)
+    {
+        Op op; op.type = OpType::moveTrack; op.track = trackId;
+        op.payload = makePayload({ { "newIndex", newIndex } });
         return op;
     }
 
@@ -367,6 +419,27 @@ namespace ops
         Op op; op.type = OpType::editNote; op.clip = clipId; op.note = noteId;
         op.payload = makePayload({ { "pitch", pitch }, { "startBeat", startBeat },
                                    { "lengthInBeats", lengthInBeats }, { "velocity", velocity } });
+        return op;
+    }
+
+    Op replaceClipNotes(EntityId clipId, const std::vector<MidiNote>& notes)
+    {
+        Op op; op.type = OpType::replaceClipNotes; op.clip = clipId;
+
+        juce::Array<juce::var> encoded;
+        encoded.ensureStorageAllocated(static_cast<int>(notes.size()));
+        for (const auto& n : notes)
+        {
+            auto* o = new juce::DynamicObject();
+            o->setProperty("id", idToVar(n.id));
+            o->setProperty("pitch", n.pitch);
+            o->setProperty("startBeat", n.startBeat);
+            o->setProperty("lengthInBeats", n.lengthInBeats);
+            o->setProperty("velocity", n.velocity);
+            encoded.add(juce::var(o));
+        }
+
+        op.payload = makePayload({ { "notes", juce::var(encoded) } });
         return op;
     }
 } // namespace ops

@@ -250,6 +250,80 @@ int main()
         pump(40);
     }
 
+    // ---- replaceClipNotes + moveTrack over the loopback. ----
+    {
+        ProjectState pa, pb;
+        LoopbackHub h2;
+        CollabController ca(pa), cb(pb);
+        ca.connect(std::make_unique<LoopbackTransport>(h2, "RA"), 0x0C1);
+        cb.connect(std::make_unique<LoopbackTransport>(h2, "RB"), 0x0C2);
+
+        // Two tracks + a clip, created on A.
+        const auto t1 = ca.newId(), t2 = ca.newId(), cl = ca.newId();
+        for (auto& op : { ops::addTrack(t1, "One", true), ops::addTrack(t2, "Two", true),
+                          ops::addClip(t1, cl, "C", 0.0, 4.0) })
+        {
+            oplog::apply(pa, op);
+            ca.broadcast(op);
+        }
+        check(pb.getTracks().size() == 2 && pb.getTracks()[0].clips.size() == 1,
+              "two tracks + clip mirrored before note sync");
+
+        // The piano roll edited the clip: broadcast the whole note vector in one op.
+        auto* clipA = oplog::findClip(pa, cl);
+        clipA->midiNotes.push_back(MidiNote { 60, 0.0, 1.0, 100, ca.newId() });
+        clipA->midiNotes.push_back(MidiNote { 67, 1.0, 0.5, 88, ca.newId() });
+        auto notesOp = ops::replaceClipNotes(cl, clipA->midiNotes);
+        ca.broadcast(notesOp);
+
+        const auto* clipB = oplog::findClip(pb, cl);
+        check(clipB != nullptr && clipB->midiNotes.size() == 2
+                  && clipB->midiNotes[0].pitch == 60 && clipB->midiNotes[1].pitch == 67
+                  && clipB->midiNotes[1].id == clipA->midiNotes[1].id,
+              "replaceClipNotes synced the whole clip in one op (ids preserved)");
+
+        // Deleting a note is the same single op.
+        clipA->midiNotes.pop_back();
+        auto notesOp2 = ops::replaceClipNotes(cl, clipA->midiNotes);
+        ca.broadcast(notesOp2);
+        check(oplog::findClip(pb, cl)->midiNotes.size() == 1,
+              "replaceClipNotes also propagates deletions");
+
+        // Reorder tracks.
+        auto mv = ops::moveTrack(t2, 0);
+        oplog::apply(pa, mv);
+        ca.broadcast(mv);
+        check(pa.getTracks()[0].id == t2 && pb.getTracks()[0].id == t2,
+              "moveTrack reordered on both sides");
+    }
+
+    // ---- hostSession / joinSession: the one-call bootstrap the DAW will use. ----
+    {
+        auto pump = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+        const int port = 55000 + juce::Random::getSystemRandom().nextInt(800);
+
+        ProjectState ph, pg;
+        CollabController host(ph), guest(pg);
+        check(host.hostSession(port, "Host", 0x7A), "hostSession started and connected");
+        check(host.isHosting(), "controller reports it is hosting");
+        check(guest.joinSession("127.0.0.1", port, "Guest", 0x7B), "joinSession connected to the host");
+        pump(120);
+
+        const auto tid = host.newId();
+        auto op = ops::addTrack(tid, "Hosted", true);
+        oplog::apply(ph, op);
+        host.broadcast(op);
+        for (int i = 0; i < 40 && pg.getTracks().empty(); ++i) pump(25);
+
+        check(pg.getTracks().size() == 1 && pg.getTracks()[0].id == tid,
+              "guest received the host's track through the hosted session");
+
+        guest.disconnect();
+        host.disconnect();
+        pump(40);
+        check(! host.isHosting(), "embedded server torn down on disconnect");
+    }
+
     std::cout << std::endl;
     if (failures == 0)
         std::cout << "all checks passed" << std::endl;
