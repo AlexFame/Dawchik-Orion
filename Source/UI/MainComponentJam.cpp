@@ -53,7 +53,7 @@ void MainComponent::startJamHosting()
 {
     if (collabController.isActive())
     {
-        statusLabel.setText("Jam: already in a session", juce::dontSendNotification);
+        jamSession.setSessionStatus(true, "Already in a session.");
         return;
     }
 
@@ -62,9 +62,8 @@ void MainComponent::startJamHosting()
     if (! collabController.hostSession(jamDefaultPort, localDisplayName(), randomActorSalt()))
     {
         collabController.onProjectChanged = nullptr;
-        statusLabel.setText("Jam: could not host on port " + juce::String(jamDefaultPort)
-                                + " (already in use?)",
-                            juce::dontSendNotification);
+        jamSession.setSessionStatus(false, "Could not host on port " + juce::String(jamDefaultPort)
+                                               + " - already in use?");
         return;
     }
 
@@ -73,15 +72,15 @@ void MainComponent::startJamHosting()
     collabReconciler.captureBaseline();
 
     const auto address = juce::IPAddress::getLocalAddress().toString();
-    statusLabel.setText("Jam: hosting at " + address + ":" + juce::String(jamDefaultPort),
-                        juce::dontSendNotification);
+    jamSession.setSessionStatus(true, "HOSTING  -  " + address + ":" + juce::String(jamDefaultPort)
+                                          + "  (same Mac: 127.0.0.1)");
 }
 
 void MainComponent::joinJamSession()
 {
     if (collabController.isActive())
     {
-        statusLabel.setText("Jam: already in a session", juce::dontSendNotification);
+        jamSession.setSessionStatus(true, "Already in a session.");
         return;
     }
 
@@ -91,6 +90,12 @@ void MainComponent::joinJamSession()
     window->addTextEditor("address", "127.0.0.1", "Host address:");
     window->addButton("Join", 1, juce::KeyPress(juce::KeyPress::returnKey));
     window->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+    // TopLevelWindow adds itself to the desktop but leaves the component invisible, and
+    // enterModalState doesn't show it either — without this the dialog exists but is never drawn,
+    // so clicking Join appears to do nothing at all.
+    window->setVisible(true);
+    window->toFront(true);
 
     window->enterModalState(true, juce::ModalCallbackFunction::create([this, window](int result)
     {
@@ -105,14 +110,15 @@ void MainComponent::joinJamSession()
         if (! collabController.joinSession(address, jamDefaultPort, localDisplayName(), randomActorSalt()))
         {
             collabController.onProjectChanged = nullptr;
-            statusLabel.setText("Jam: could not reach " + address + ":" + juce::String(jamDefaultPort),
-                                juce::dontSendNotification);
+            jamSession.setSessionStatus(false, "Could not reach " + address + ":"
+                                                   + juce::String(jamDefaultPort)
+                                                   + " - is the host up?");
             return;
         }
 
         // The host's project arrives as a snapshot moments later and re-baselines us again.
         collabReconciler.captureBaseline();
-        statusLabel.setText("Jam: joined " + address, juce::dontSendNotification);
+        jamSession.setSessionStatus(true, "JOINED  -  " + address + ":" + juce::String(jamDefaultPort));
     }), false);
 }
 
@@ -123,6 +129,6 @@ void MainComponent::leaveJamSession()
 
     collabController.disconnect();
     collabController.onProjectChanged = nullptr;
-    statusLabel.setText("Jam: left the session", juce::dontSendNotification);
+    jamSession.setSessionStatus(false, "Left the session.");
 }
 }  // namespace orion

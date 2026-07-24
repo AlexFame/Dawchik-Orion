@@ -898,6 +898,7 @@ MainComponent::MainComponent()
     jamSession.onClose = [this]() { toggleJamSessionFromUi(); };
     jamSession.onCreateSessionRequested = [this]() { startJamHosting(); };
     jamSession.onJoinSessionRequested   = [this]() { joinJamSession(); };
+    jamSession.onLeaveSessionRequested  = [this]() { leaveJamSession(); };
     jamSession.onMicEnabledChanged = [this](bool enabled)
     {
         return ! enabled || ensureAudioInputReady(true);

@@ -23,6 +23,11 @@ public:
     // networking (Source/Collab); this panel only owns the presentation.
     std::function<void()> onCreateSessionRequested;
     std::function<void()> onJoinSessionRequested;
+    std::function<void()> onLeaveSessionRequested;
+
+    // Real networking state, pushed in by the host. The panel no longer flips itself to "live" on
+    // a click — it only goes live when a session actually connected, so what you see is the truth.
+    void setSessionStatus(bool live, const juce::String& detail);
     std::function<bool(bool)> onMicEnabledChanged;
     std::function<bool(bool)> onCameraEnabledChanged;
     std::function<void(bool)> onShareEnabledChanged;
@@ -126,6 +131,7 @@ private:
     PanelMode panelMode { PanelMode::chat };
     ConnectionState connectionState { ConnectionState::ready };
     juce::String inviteCode { "7K4M" };
+    juce::String networkStatus;   // real connection detail shown in the header (host address, error…)
     bool micEnabled { false };
     bool cameraEnabled { false };
     bool cameraOpening { false };

@@ -601,8 +601,12 @@ void JamSessionComponent::paint(juce::Graphics& g)
     g.fillEllipse(header.getX(), header.getCentreY() - 4.0f, 8.0f, 8.0f);
     g.setColour(theme::text::secondary);
     g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText(connectionState == ConnectionState::live ? "LIVE  ·  SESSION " + inviteCode : "READY TO JAM",
-               header.withTrimmedLeft(16.0f), juce::Justification::centredLeft);
+    const auto headerStatus = networkStatus.isNotEmpty()
+                                  ? networkStatus
+                                  : (connectionState == ConnectionState::live
+                                         ? "LIVE  ·  SESSION " + inviteCode
+                                         : juce::String("READY TO JAM"));
+    g.drawText(headerStatus, header.withTrimmedLeft(16.0f), juce::Justification::centredLeft);
 
     auto main = area.reduced(0.0f, 10.0f);
     auto chat = main.removeFromRight(318.0f);
@@ -804,15 +808,11 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
 {
     if (button == &createButton)
     {
-        const auto wasLive = connectionState == ConnectionState::live;
-        connectionState = ConnectionState::live;
-        if (wasLive)
+        // Only the real session result flips us to "live" (see setSessionStatus) — clicking must
+        // never claim a connection that isn't there.
+        if (connectionState == ConnectionState::live)
             addChatMessage("Orion", "Invite " + inviteCode + " copied.");
-        else
-            addChatMessage("Orion", "Session " + inviteCode + " is live.");
-
-        // Actually open the multiplayer session (the host's project becomes the session baseline).
-        if (! wasLive && onCreateSessionRequested)
+        else if (onCreateSessionRequested)
             onCreateSessionRequested();
 
         refreshControls();
@@ -820,11 +820,15 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
     }
     else if (button == &joinButton)
     {
-        connectionState = ConnectionState::live;
-        addChatMessage("Orion", "Joined session " + inviteCode + ".");
-
-        if (onJoinSessionRequested)
+        if (connectionState == ConnectionState::live)
+        {
+            if (onLeaveSessionRequested)
+                onLeaveSessionRequested();
+        }
+        else if (onJoinSessionRequested)
+        {
             onJoinSessionRequested();
+        }
 
         refreshControls();
         repaint();
@@ -935,12 +939,27 @@ void JamSessionComponent::addChatMessage(const juce::String& name, const juce::S
     repaint();
 }
 
+void JamSessionComponent::setSessionStatus(bool live, const juce::String& detail)
+{
+    connectionState = live ? ConnectionState::live : ConnectionState::ready;
+    networkStatus = detail;
+
+    // Echo it into the chat too: it's the one place in this panel that's always on screen, so
+    // connection results and errors can't go unnoticed.
+    if (detail.isNotEmpty())
+        addChatMessage("Orion", detail);
+
+    refreshControls();
+    repaint();
+}
+
 void JamSessionComponent::refreshControls()
 {
     const auto live = connectionState == ConnectionState::live;
     createButton.setButtonText(live ? "Invite" : "Start");
-    joinButton.setButtonText(live ? "Live" : "Join");
-    joinButton.setEnabled(! live);
+    // Second slot doubles as the way OUT of a session — there was no way to leave one before.
+    joinButton.setButtonText(live ? "Leave" : "Join");
+    joinButton.setEnabled(true);
     exitButton.setButtonText("Leave");
 
     chatTab.setToggleState(panelMode == PanelMode::chat, juce::dontSendNotification);
