@@ -2397,6 +2397,13 @@ void MainComponent::timerCallback()
     {
         collabSyncCounter = 0;
         collabReconciler.sync();
+
+        // Refresh the Jam panel's health line about once a second (every 10th sync).
+        if (++collabDiagnosticsCounter >= 10)
+        {
+            collabDiagnosticsCounter = 0;
+            jamSession.setDiagnostics(collabController.diagnosticsLine());
+        }
     }
 
     static constexpr double mpcPadRearmDelayMs = 140.0;

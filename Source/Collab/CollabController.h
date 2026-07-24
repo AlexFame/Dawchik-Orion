@@ -102,6 +102,27 @@ public:
     // Fired after a peer's op mutated the ProjectState — MainComponent repaints / refreshes here.
     std::function<void()> onProjectChanged;
 
+    // One-line health summary for the Jam panel. A stalled session is otherwise invisible: this
+    // says whether the socket is up, how many clients the server sees, and whether ops are
+    // actually flowing in each direction.
+    juce::String diagnosticsLine() const
+    {
+        if (session == nullptr)
+            return "not connected";
+
+        juce::String s;
+        s << (transport != nullptr && transport->isConnected() ? "link up" : "LINK DOWN")
+          << "  out " << session->opsSent
+          << "  in " << session->opsReceived
+          << "  applied " << session->opsApplied
+          << "  snap " << session->snapshotsReceived;
+
+        if (embeddedServer != nullptr)
+            s << "  clients " << embeddedServer->numConnections();
+
+        return s;
+    }
+
 private:
     ProjectState& state;
     std::unique_ptr<CollabServer> embeddedServer;   // only when hosting

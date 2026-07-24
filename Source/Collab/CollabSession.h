@@ -55,6 +55,13 @@ public:
     // Fired after a PEER op has been applied to the ProjectState, so the UI can refresh.
     std::function<void()> onRemoteApplied;
 
+    // Live counters — surfaced in the Jam panel so a stalled session can be diagnosed from the UI
+    // instead of guessing which link in the chain is broken.
+    int opsSent { 0 };
+    int opsReceived { 0 };      // peer ops that arrived (whether or not they applied)
+    int opsApplied { 0 };
+    int snapshotsReceived { 0 };
+
 private:
     void handleIncoming(const Op& op);
     void handleSnapshot(const juce::var& project);

@@ -413,6 +413,7 @@ private:
     int visibleMidiInputCount { 0 };
     int midiDeviceRescanCounter { 0 };            // throttles hot-plug rescans in timerCallback
     int collabSyncCounter { 0 };                  // throttles the Jam reconciler to ~10 Hz
+    int collabDiagnosticsCounter { 0 };           // refreshes the Jam health line ~1 Hz
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;

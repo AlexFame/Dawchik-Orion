@@ -17,7 +17,10 @@ class CollabServer final : private juce::InterprocessConnectionServer
 public:
     ~CollabServer() override { stop(); }
 
-    bool start(int port, const juce::String& bindAddress = "127.0.0.1")
+    // An empty bind address listens on every interface, so a peer on the LAN can reach the host —
+    // binding to 127.0.0.1 would have accepted only same-machine connections while the UI happily
+    // advertised the LAN address.
+    bool start(int port, const juce::String& bindAddress = {})
     {
         return beginWaitingForSocket(port, bindAddress);
     }

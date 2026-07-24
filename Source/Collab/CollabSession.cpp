@@ -39,6 +39,7 @@ void CollabSession::submitLocal(Op op)
 void CollabSession::sendLocal(Op op)
 {
     op.actor = transport.localActor();
+    ++opsSent;
     transport.sendOp(op);      // the DAW already mutated the project; only broadcast, never re-apply
 }
 
@@ -56,6 +57,7 @@ void CollabSession::handleSnapshot(const juce::var& project)
 {
     // Replacing the whole project reallocates every clips/notes vector the audio thread may be
     // reading, so this must happen under the audio-edit lock like any structural op.
+    ++snapshotsReceived;
     {
         const juce::ScopedLock sl(state.getAudioEditLock());
         ProjectSerializer::fromVar(state, project);
@@ -71,7 +73,12 @@ void CollabSession::handleIncoming(const Op& op)
     if (op.actor == transport.localActor())
         return;
 
-    if (oplog::apply(state, op) && onRemoteApplied)
-        onRemoteApplied();
+    ++opsReceived;
+    if (oplog::apply(state, op))
+    {
+        ++opsApplied;
+        if (onRemoteApplied)
+            onRemoteApplied();
+    }
 }
 } // namespace orion::collab

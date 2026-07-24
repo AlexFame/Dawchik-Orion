@@ -608,6 +608,13 @@ void JamSessionComponent::paint(juce::Graphics& g)
                                          : juce::String("READY TO JAM"));
     g.drawText(headerStatus, header.withTrimmedLeft(16.0f), juce::Justification::centredLeft);
 
+    if (diagnosticsText.isNotEmpty())
+    {
+        g.setColour(theme::text::muted);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::plain));
+        g.drawText(diagnosticsText, header.withTrimmedLeft(16.0f), juce::Justification::centredRight);
+    }
+
     auto main = area.reduced(0.0f, 10.0f);
     auto chat = main.removeFromRight(318.0f);
     main.removeFromRight(18.0f);
@@ -936,6 +943,15 @@ void JamSessionComponent::addChatMessage(const juce::String& name, const juce::S
     chatMessages.push_back({ name, message });
     if (chatMessages.size() > 40)
         chatMessages.erase(chatMessages.begin());
+    repaint();
+}
+
+void JamSessionComponent::setDiagnostics(const juce::String& text)
+{
+    if (diagnosticsText == text)
+        return;
+
+    diagnosticsText = text;
     repaint();
 }
 

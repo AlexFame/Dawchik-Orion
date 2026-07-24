@@ -28,6 +28,9 @@ public:
     // Real networking state, pushed in by the host. The panel no longer flips itself to "live" on
     // a click — it only goes live when a session actually connected, so what you see is the truth.
     void setSessionStatus(bool live, const juce::String& detail);
+
+    // Live health line (link state, ops in/out, connected clients) shown in the header.
+    void setDiagnostics(const juce::String& text);
     std::function<bool(bool)> onMicEnabledChanged;
     std::function<bool(bool)> onCameraEnabledChanged;
     std::function<void(bool)> onShareEnabledChanged;
@@ -132,6 +135,7 @@ private:
     ConnectionState connectionState { ConnectionState::ready };
     juce::String inviteCode { "7K4M" };
     juce::String networkStatus;   // real connection detail shown in the header (host address, error…)
+    juce::String diagnosticsText; // live op counters / link state, refreshed once a second
     bool micEnabled { false };
     bool cameraEnabled { false };
     bool cameraOpening { false };
