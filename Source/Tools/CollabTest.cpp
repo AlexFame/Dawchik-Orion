@@ -4,6 +4,7 @@
 //   cmake --build <dir> --target OrionCollabTest && ./OrionCollabTest
 
 #include "../Collab/CollabController.h"
+#include "../Collab/CollabReconciler.h"
 #include "../Collab/CollabServer.h"
 #include "../Collab/CollabSession.h"
 #include "../Collab/LoopbackTransport.h"
@@ -378,6 +379,72 @@ int main()
         guest.disconnect();
         host.disconnect();
         pump(40);
+    }
+
+    // ---- Reconciler: the DAW edits normally (no collab awareness) and the diff produces ops. ----
+    {
+        ProjectState pa, pb;
+        LoopbackHub h3;
+        CollabController ca(pa), cb(pb);
+        ca.connect(std::make_unique<LoopbackTransport>(h3, "RecA"), 0x0D1);
+        cb.connect(std::make_unique<LoopbackTransport>(h3, "RecB"), 0x0D2);
+
+        CollabReconciler rec(pa, ca);
+        rec.captureBaseline();
+        check(rec.sync() == 0, "reconciler stays silent when nothing changed");
+
+        // The app creates a track exactly as it always has — no ids, no knowledge of collab.
+        {
+            TrackState t;
+            t.name = "Reco";
+            t.isMidiTrack = true;
+            pa.getTracks().push_back(std::move(t));
+        }
+        pa.setTempoBpm(101.0);
+
+        check(rec.sync() > 0, "reconciler emitted ops for the new track + tempo");
+        check(pa.getTracks()[0].id != 0, "reconciler stamped an id on the DAW-created track");
+        check(pb.getTracks().size() == 1 && pb.getTracks()[0].name == "Reco",
+              "peer received a track the DAW created without touching collab code");
+        check(std::abs(pb.getTempoBpm() - 101.0) < 1.0e-9, "peer received the tempo change");
+
+        // A clip with notes, again created the plain way.
+        {
+            TimelineClip c;
+            c.name = "Cl";
+            c.startBeat = 2.0;
+            c.lengthInBeats = 4.0;
+            c.midiNotes.push_back(MidiNote { 64, 0.0, 1.0, 99 });
+            pa.getTracks()[0].clips.push_back(std::move(c));
+        }
+        rec.sync();
+        check(pb.getTracks()[0].clips.size() == 1
+                  && pb.getTracks()[0].clips[0].midiNotes.size() == 1
+                  && pb.getTracks()[0].clips[0].midiNotes[0].pitch == 64,
+              "peer received the clip and its notes");
+
+        // Mixed edits in one pass: mute a track, move a clip, retune a note.
+        pa.getTracks()[0].muted = true;
+        pa.getTracks()[0].clips[0].startBeat = 8.0;
+        pa.getTracks()[0].clips[0].midiNotes[0].pitch = 70;
+        rec.sync();
+        check(pb.getTracks()[0].muted, "track mute synced");
+        check(std::abs(pb.getTracks()[0].clips[0].startBeat - 8.0) < 1.0e-9, "clip move synced");
+        check(pb.getTracks()[0].clips[0].midiNotes[0].pitch == 70, "note edit synced");
+
+        pa.getTracks()[0].clips.clear();
+        rec.sync();
+        check(pb.getTracks()[0].clips.empty(), "clip deletion synced");
+        check(rec.sync() == 0, "reconciler silent again once caught up");
+
+        // Echo-storm guard: a change that arrived FROM the peer must not be broadcast back.
+        const auto remoteId = cb.newId();
+        auto remoteOp = ops::addTrack(remoteId, "FromPeer", true);
+        oplog::apply(pb, remoteOp);
+        cb.broadcast(remoteOp);
+        check(pa.getTracks().size() == 2, "A applied the peer's track");
+        rec.captureBaseline();   // exactly what MainComponent does in onProjectChanged
+        check(rec.sync() == 0, "a remotely-applied change is never echoed back");
     }
 
     std::cout << std::endl;

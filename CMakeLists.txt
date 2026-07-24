@@ -85,6 +85,7 @@ target_sources(
         Source/Core/ProjectState.cpp
         Source/Collab/OpLog.cpp
         Source/Collab/CollabSession.cpp
+        Source/Collab/CollabReconciler.cpp
         Source/Plugins/PluginManager.cpp
         Source/Sampler/SamplerEngine.cpp
         Source/Sampler/SamplerPanelComponent.cpp
@@ -371,6 +372,7 @@ target_sources(OrionCollabTest PRIVATE
     Source/Tools/CollabTest.cpp
     Source/Collab/OpLog.cpp
     Source/Collab/CollabSession.cpp
+    Source/Collab/CollabReconciler.cpp
     Source/Core/ProjectSerializer.cpp
     Source/Core/ProjectState.cpp)
 # JUCE_MODAL_LOOPS_PERMITTED lets the test pump the message loop (runDispatchLoopUntil) so async
