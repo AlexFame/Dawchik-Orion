@@ -1,5 +1,7 @@
 #include "MainComponent.h"
 
+#include <unistd.h>
+
 // Multiplayer Jam wiring — the whole seam between Orion and the Collab module lives here.
 //
 // The app's edit code is deliberately untouched: MainComponent never calls broadcast() from an edit
@@ -23,12 +25,47 @@ juce::String localDisplayName()
     return name.isEmpty() ? juce::String("Producer") : name;
 }
 
+// The actor id identifies a CONNECTION, not a person, and must be unique per instance: incoming
+// ops whose actor matches ours are discarded as our own server echo. Using the display name here
+// meant two Orions run by the same macOS user shared an id, so each threw away the other's edits
+// as if they were its own — the session looked connected but nothing ever synced.
+juce::String localActorId()
+{
+    static const juce::String id = localDisplayName() + "#" + juce::Uuid().toDashedString();
+    return id;
+}
+
 // Per-instance salt so two clients never mint colliding entity ids.
 collab::EntityId randomActorSalt()
 {
     return static_cast<collab::EntityId>(juce::Random::getSystemRandom().nextInt(0xffff));
 }
+
+// Jam sessions involve two processes, so a stalled one can't be diagnosed from a single window.
+// Each instance appends its state to its own log file, which makes the whole picture readable
+// after the fact: ~/Library/Logs/Orion/collab-<pid>.log
+void jamLog(const juce::String& line)
+{
+    static const juce::File logFile = []
+    {
+        auto f = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                     .getChildFile("Library/Logs/Orion")
+                     .getChildFile("collab-" + juce::String(static_cast<int>(::getpid())) + ".log");
+        f.getParentDirectory().createDirectory();
+        f.replaceWithText({});
+        return f;
+    }();
+
+    logFile.appendText(juce::Time::getCurrentTime().toString(false, true, true, true) + "  " + line + "\n");
+}
 }  // namespace
+
+void MainComponent::updateJamDiagnostics()
+{
+    const auto line = collabController.diagnosticsLine();
+    jamSession.setDiagnostics(line);
+    jamLog(line);
+}
 
 void MainComponent::refreshAfterRemoteJamEdit()
 {
@@ -59,10 +96,10 @@ void MainComponent::startJamHosting()
 
     collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
 
-    if (! collabController.hostSession(jamDefaultPort, localDisplayName(), randomActorSalt()))
+    if (! collabController.hostSession(jamDefaultPort, localActorId(), randomActorSalt()))
     {
         collabController.onProjectChanged = nullptr;
-        jamSession.setSessionStatus(false, "Could not host on port " + juce::String(jamDefaultPort)
+        jamLog("EVENT host FAILED"); jamSession.setSessionStatus(false, "Could not host on port " + juce::String(jamDefaultPort)
                                                + " - already in use?");
         return;
     }
@@ -72,7 +109,7 @@ void MainComponent::startJamHosting()
     collabReconciler.captureBaseline();
 
     const auto address = juce::IPAddress::getLocalAddress().toString();
-    jamSession.setSessionStatus(true, "HOSTING  -  " + address + ":" + juce::String(jamDefaultPort)
+    jamLog("EVENT host ok"); jamSession.setSessionStatus(true, "HOSTING  -  " + address + ":" + juce::String(jamDefaultPort)
                                           + "  (same Mac: 127.0.0.1)");
 }
 
@@ -107,10 +144,10 @@ void MainComponent::joinJamSession()
 
         collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
 
-        if (! collabController.joinSession(address, jamDefaultPort, localDisplayName(), randomActorSalt()))
+        if (! collabController.joinSession(address, jamDefaultPort, localActorId(), randomActorSalt()))
         {
             collabController.onProjectChanged = nullptr;
-            jamSession.setSessionStatus(false, "Could not reach " + address + ":"
+            jamLog("EVENT join FAILED"); jamSession.setSessionStatus(false, "Could not reach " + address + ":"
                                                    + juce::String(jamDefaultPort)
                                                    + " - is the host up?");
             return;
@@ -118,7 +155,7 @@ void MainComponent::joinJamSession()
 
         // The host's project arrives as a snapshot moments later and re-baselines us again.
         collabReconciler.captureBaseline();
-        jamSession.setSessionStatus(true, "JOINED  -  " + address + ":" + juce::String(jamDefaultPort));
+        jamLog("EVENT join ok"); jamSession.setSessionStatus(true, "JOINED  -  " + address + ":" + juce::String(jamDefaultPort));
     }), false);
 }
 

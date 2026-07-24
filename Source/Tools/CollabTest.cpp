@@ -432,6 +432,31 @@ int main()
         check(std::abs(pb.getTracks()[0].clips[0].startBeat - 8.0) < 1.0e-9, "clip move synced");
         check(pb.getTracks()[0].clips[0].midiNotes[0].pitch == 70, "note edit synced");
 
+        // Audio-clip payload: the source it plays and its warp state must ride along, or the peer
+        // gets a silent empty block (no waveform) and a differently-warped one at that.
+        {
+            auto& hostClip = pa.getTracks()[0].clips[0];
+            hostClip.type = ClipType::audio;
+            hostClip.sourcePath = "/tmp/loop.wav";
+            hostClip.sourceBpm = 161.0;
+            hostClip.sourceDurationSeconds = 7.5;
+            hostClip.warpEnabled = true;
+            hostClip.warpTargetLengthInBeats = 8.0;
+            hostClip.warpMarkers.push_back({ 0.25, 2.0 });
+            hostClip.sampleEndRatio = 0.75;
+            rec.sync();
+
+            const auto& peerClip = pb.getTracks()[0].clips[0];
+            check(peerClip.sourcePath == "/tmp/loop.wav" && std::abs(peerClip.sourceBpm - 161.0) < 1.0e-9,
+                  "clip audio source synced (waveform + playback)");
+            check(peerClip.warpEnabled
+                      && std::abs(peerClip.warpTargetLengthInBeats - 8.0) < 1.0e-9
+                      && peerClip.warpMarkers.size() == 1
+                      && std::abs(peerClip.warpMarkers[0].beat - 2.0) < 1.0e-9,
+                  "clip warp state incl. markers synced");
+            check(std::abs(peerClip.sampleEndRatio - 0.75) < 1.0e-9, "clip sample bounds synced");
+        }
+
         pa.getTracks()[0].clips.clear();
         rec.sync();
         check(pb.getTracks()[0].clips.empty(), "clip deletion synced");

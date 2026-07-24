@@ -49,9 +49,28 @@ namespace ops
     Op moveTrack(EntityId trackId, int newIndex);
     Op setTrackField(EntityId trackId, const juce::String& field, const juce::var& value);
 
+    // An audio clip is useless to a peer without the source it plays: without sourcePath the clip
+    // arrives as an empty block — no waveform, no sound. The audio fields ride along with the
+    // creation op so the clip is complete the moment it lands.
+    struct ClipSource
+    {
+        int    type { 0 };                    // ClipType: 0 = audio, 1 = midi
+        juce::String sourcePath;
+        double sourceDurationSeconds { 0.0 };
+        double sourceBpm { 0.0 };
+        double sampleStartRatio { 0.0 };
+        double sampleEndRatio { 1.0 };
+        int    transposeSemitones { 0 };
+        bool   warpEnabled { false };
+        double warpTargetLengthInBeats { 0.0 };
+    };
+
     Op addClip(EntityId trackId, EntityId newClipId, const juce::String& name,
-               double startBeat, double lengthInBeats);
+               double startBeat, double lengthInBeats, const ClipSource& source = {});
     Op removeClip(EntityId clipId);
+
+    // Create-or-replace the clip wholesale on trackId, from ProjectSerializer::clipToVar data.
+    Op replaceClip(EntityId trackId, EntityId clipId, const juce::var& clipData);
     Op moveClip(EntityId clipId, double startBeat, EntityId toTrack = noEntity);
     Op resizeClip(EntityId clipId, double lengthInBeats);
     Op setClipField(EntityId clipId, const juce::String& field, const juce::var& value);

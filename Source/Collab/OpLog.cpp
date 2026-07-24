@@ -1,5 +1,6 @@
 #include "OpLog.h"
 
+#include "../Core/ProjectSerializer.h"
 #include "../Core/ProjectState.h"
 
 namespace orion::collab
@@ -44,6 +45,13 @@ namespace
         else if (field == "solo")        c.solo = static_cast<bool>(v);
         else if (field == "warpEnabled") c.warpEnabled = static_cast<bool>(v);
         else if (field == "colour")      c.colour = juce::Colour(static_cast<juce::uint32>(static_cast<juce::int64>(v)));
+        else if (field == "sourcePath")  c.sourcePath = v.toString();
+        else if (field == "sourceBpm")   c.sourceBpm = static_cast<double>(v);
+        else if (field == "sourceDurationSeconds") c.sourceDurationSeconds = static_cast<double>(v);
+        else if (field == "sampleStartRatio")      c.sampleStartRatio = static_cast<double>(v);
+        else if (field == "sampleEndRatio")        c.sampleEndRatio = static_cast<double>(v);
+        else if (field == "transposeSemitones")    c.transposeSemitones = static_cast<int>(v);
+        else if (field == "warpTargetLengthInBeats") c.warpTargetLengthInBeats = static_cast<double>(v);
     }
 } // namespace
 
@@ -204,7 +212,44 @@ namespace oplog
                 c.name = op.payload.getProperty("name", "Clip").toString();
                 c.startBeat = asNum(op.payload, "startBeat", 0.0);
                 c.lengthInBeats = asNum(op.payload, "lengthInBeats", 4.0);
+                c.type = static_cast<int>(op.payload.getProperty("clipType", 0)) == 1 ? ClipType::midi
+                                                                                      : ClipType::audio;
+                c.sourcePath = op.payload.getProperty("sourcePath", juce::String()).toString();
+                c.sourceDurationSeconds = asNum(op.payload, "sourceDurationSeconds", 0.0);
+                c.sourceBpm = asNum(op.payload, "sourceBpm", 0.0);
+                c.sampleStartRatio = asNum(op.payload, "sampleStartRatio", 0.0);
+                c.sampleEndRatio = asNum(op.payload, "sampleEndRatio", 1.0);
+                c.transposeSemitones = static_cast<int>(op.payload.getProperty("transposeSemitones", 0));
+                c.warpEnabled = static_cast<bool>(op.payload.getProperty("warpEnabled", false));
+                c.warpTargetLengthInBeats = asNum(op.payload, "warpTargetLengthInBeats", 0.0);
                 t->clips.push_back(std::move(c));
+                return true;
+            }
+
+            case OpType::replaceClip:
+            {
+                auto* dest = findTrack(state, op.track);
+                if (dest == nullptr)
+                    return false;
+
+                auto incoming = ProjectSerializer::clipFromVar(op.payload.getProperty("clip", juce::var()));
+                incoming.id = op.clip;
+
+                const juce::ScopedLock sl(state.getAudioEditLock());
+
+                // Drop any existing copy first — the clip may also be arriving from another track.
+                for (auto& t : state.getTracks())
+                {
+                    auto& clips = t.clips;
+                    for (auto it = clips.begin(); it != clips.end(); ++it)
+                        if (it->id == op.clip)
+                        {
+                            clips.erase(it);
+                            break;
+                        }
+                }
+
+                dest->clips.push_back(std::move(incoming));
                 return true;
             }
 
@@ -364,10 +409,28 @@ namespace ops
     }
 
     Op addClip(EntityId trackId, EntityId newClipId, const juce::String& name,
-               double startBeat, double lengthInBeats)
+               double startBeat, double lengthInBeats, const ClipSource& source)
     {
         Op op; op.type = OpType::addClip; op.track = trackId; op.clip = newClipId;
-        op.payload = makePayload({ { "name", name }, { "startBeat", startBeat }, { "lengthInBeats", lengthInBeats } });
+        op.payload = makePayload({ { "name", name },
+                                   { "startBeat", startBeat },
+                                   { "lengthInBeats", lengthInBeats },
+                                   { "clipType", source.type },
+                                   { "sourcePath", source.sourcePath },
+                                   { "sourceDurationSeconds", source.sourceDurationSeconds },
+                                   { "sourceBpm", source.sourceBpm },
+                                   { "sampleStartRatio", source.sampleStartRatio },
+                                   { "sampleEndRatio", source.sampleEndRatio },
+                                   { "transposeSemitones", source.transposeSemitones },
+                                   { "warpEnabled", source.warpEnabled },
+                                   { "warpTargetLengthInBeats", source.warpTargetLengthInBeats } });
+        return op;
+    }
+
+    Op replaceClip(EntityId trackId, EntityId clipId, const juce::var& clipData)
+    {
+        Op op; op.type = OpType::replaceClip; op.track = trackId; op.clip = clipId;
+        op.payload = makePayload({ { "clip", clipData } });
         return op;
     }
 

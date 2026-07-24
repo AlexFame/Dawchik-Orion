@@ -578,6 +578,13 @@ void JamSessionComponent::paint(juce::Graphics& g)
         g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         g.drawText(connectionState == ConnectionState::live ? "LIVE" : "READY", chatHeader, juce::Justification::centredRight);
 
+        if (diagnosticsText.isNotEmpty())
+        {
+            g.setColour(theme::text::muted);
+            g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
+            g.drawText(diagnosticsText, chatArea.removeFromTop(13.0f), juce::Justification::centredLeft);
+        }
+
         auto content = chatArea.reduced(0.0f, 12.0f);
         content.removeFromTop(87.0f);
         if (panelMode == PanelMode::chat)
@@ -666,6 +673,13 @@ void JamSessionComponent::paint(juce::Graphics& g)
     g.setColour(connectionState == ConnectionState::live ? theme::status::success : theme::text::muted);
     g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
     g.drawText(connectionState == ConnectionState::live ? "LIVE" : "READY", chatHeader, juce::Justification::centredRight);
+
+    if (diagnosticsText.isNotEmpty())
+    {
+        g.setColour(theme::text::muted);
+        g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
+        g.drawText(diagnosticsText, chatArea.removeFromTop(13.0f), juce::Justification::centredLeft);
+    }
 
     auto content = chatArea.reduced(0.0f, 12.0f);
     content.removeFromTop(58.0f);

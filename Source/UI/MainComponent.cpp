@@ -2402,7 +2402,7 @@ void MainComponent::timerCallback()
         if (++collabDiagnosticsCounter >= 10)
         {
             collabDiagnosticsCounter = 0;
-            jamSession.setDiagnostics(collabController.diagnosticsLine());
+            updateJamDiagnostics();
         }
     }
 

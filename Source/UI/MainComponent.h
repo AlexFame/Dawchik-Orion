@@ -188,6 +188,7 @@ private:
     void joinJamSession();
     void leaveJamSession();
     void refreshAfterRemoteJamEdit();
+    void updateJamDiagnostics();
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();

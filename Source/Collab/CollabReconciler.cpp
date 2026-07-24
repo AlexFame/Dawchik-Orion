@@ -2,6 +2,7 @@
 
 #include "CollabController.h"
 #include "OpLog.h"
+#include "../Core/ProjectSerializer.h"
 #include "../Core/ProjectState.h"
 
 #include <map>
@@ -68,19 +69,7 @@ CollabReconciler::Shadow CollabReconciler::snapshotOfLive() const
             ClipShadow cs;
             cs.id = c.id;
             cs.owner = t.id;
-            cs.name = c.name;
-            cs.startBeat = c.startBeat;
-            cs.lengthInBeats = c.lengthInBeats;
-            cs.gainDb = c.gainDb;
-            cs.muted = c.muted;
-            cs.solo = c.solo;
-            cs.warpEnabled = c.warpEnabled;
-            cs.colour = c.colour.getARGB();
-
-            cs.notes.reserve(c.midiNotes.size());
-            for (const auto& n : c.midiNotes)
-                cs.notes.push_back({ n.id, n.pitch, n.startBeat, n.lengthInBeats, n.velocity });
-
+            cs.dataHash = juce::JSON::toString(ProjectSerializer::clipToVar(c), true).hashCode64();
             s.clips.push_back(std::move(cs));
         }
     }
@@ -182,65 +171,13 @@ int CollabReconciler::diffClips(const Shadow& current)
     for (const auto& c : current.clips)
     {
         const auto it = before.find(c.id);
+        const bool isNew = it == before.end();
 
-        if (it == before.end())
-        {
-            // Added: create it on its owning track, then carry its properties and notes.
-            controller.broadcast(ops::addClip(c.owner, c.id, c.name, c.startBeat, c.lengthInBeats));
-            ++sent;
-
-            const ClipShadow fresh {};
-            if (differs(c.gainDb, fresh.gainDb)) { controller.broadcast(ops::setClipField(c.id, "gainDb", c.gainDb)); ++sent; }
-            if (c.muted != fresh.muted)         { controller.broadcast(ops::setClipField(c.id, "muted", c.muted)); ++sent; }
-            if (c.solo != fresh.solo)           { controller.broadcast(ops::setClipField(c.id, "solo", c.solo)); ++sent; }
-            if (c.warpEnabled != fresh.warpEnabled) { controller.broadcast(ops::setClipField(c.id, "warpEnabled", c.warpEnabled)); ++sent; }
-            controller.broadcast(ops::setClipField(c.id, "colour", colourVar(c.colour)));
-            ++sent;
-
-            if (! c.notes.empty())
-                if (const auto* liveClip = oplog::findClip(live, c.id))
-                {
-                    controller.broadcast(ops::replaceClipNotes(c.id, liveClip->midiNotes));
-                    ++sent;
-                }
-            continue;
-        }
-
-        const auto& was = *it->second;
-
-        // Moved (to a new position and/or a different track) / resized.
-        if (c.owner != was.owner || differs(c.startBeat, was.startBeat))
-        {
-            controller.broadcast(ops::moveClip(c.id, c.startBeat, c.owner != was.owner ? c.owner : noEntity));
-            ++sent;
-        }
-        if (differs(c.lengthInBeats, was.lengthInBeats))
-        {
-            controller.broadcast(ops::resizeClip(c.id, c.lengthInBeats));
-            ++sent;
-        }
-
-        if (c.name != was.name)                 { controller.broadcast(ops::setClipField(c.id, "name", c.name)); ++sent; }
-        if (differs(c.gainDb, was.gainDb))      { controller.broadcast(ops::setClipField(c.id, "gainDb", c.gainDb)); ++sent; }
-        if (c.muted != was.muted)               { controller.broadcast(ops::setClipField(c.id, "muted", c.muted)); ++sent; }
-        if (c.solo != was.solo)                 { controller.broadcast(ops::setClipField(c.id, "solo", c.solo)); ++sent; }
-        if (c.warpEnabled != was.warpEnabled)   { controller.broadcast(ops::setClipField(c.id, "warpEnabled", c.warpEnabled)); ++sent; }
-        if (c.colour != was.colour)             { controller.broadcast(ops::setClipField(c.id, "colour", colourVar(c.colour))); ++sent; }
-
-        // Notes: any difference at all resyncs the whole vector in one op.
-        bool notesChanged = c.notes.size() != was.notes.size();
-        for (std::size_t i = 0; ! notesChanged && i < c.notes.size(); ++i)
-        {
-            const auto& a = c.notes[i];
-            const auto& b = was.notes[i];
-            notesChanged = a.id != b.id || a.pitch != b.pitch || a.velocity != b.velocity
-                        || differs(a.startBeat, b.startBeat) || differs(a.lengthInBeats, b.lengthInBeats);
-        }
-
-        if (notesChanged)
+        // New, moved to another track, or changed in any way at all — ship the whole clip.
+        if (isNew || it->second->owner != c.owner || it->second->dataHash != c.dataHash)
             if (const auto* liveClip = oplog::findClip(live, c.id))
             {
-                controller.broadcast(ops::replaceClipNotes(c.id, liveClip->midiNotes));
+                controller.broadcast(ops::replaceClip(c.owner, c.id, ProjectSerializer::clipToVar(*liveClip)));
                 ++sent;
             }
     }

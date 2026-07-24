@@ -460,6 +460,16 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
     return true;
 }
 
+juce::var ProjectSerializer::clipToVar(const TimelineClip& clip)
+{
+    return timelineClipToVar(clip);
+}
+
+TimelineClip ProjectSerializer::clipFromVar(const juce::var& source)
+{
+    return timelineClipFromVar(source);
+}
+
 juce::var ProjectSerializer::toVar(const ProjectState& projectState)
 {
     auto* rootObject = new juce::DynamicObject();

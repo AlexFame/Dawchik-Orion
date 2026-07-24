@@ -27,5 +27,11 @@ public:
     static bool fromVar(ProjectState& projectState,
                         const juce::var& source,
                         juce::String* errorMessage = nullptr);
+
+    // A single clip in the same representation. The collab layer syncs whole clips with these
+    // rather than enumerating fields: a TimelineClip carries ~30 of them (warp markers, detected
+    // bars, key data, fades, sample bounds…), and any one left out silently desyncs.
+    static juce::var clipToVar(const TimelineClip& clip);
+    static TimelineClip clipFromVar(const juce::var& source);
 };
 }  // namespace orion

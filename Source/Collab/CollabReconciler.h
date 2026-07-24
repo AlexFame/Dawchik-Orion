@@ -36,28 +36,16 @@ public:
     int sync();
 
 private:
-    struct NoteShadow
-    {
-        EntityId id { noEntity };
-        int pitch { 0 };
-        double startBeat { 0.0 };
-        double lengthInBeats { 0.0 };
-        int velocity { 0 };
-    };
-
+    // A clip is tracked by a hash of its ENTIRE serialised form rather than a list of fields.
+    // TimelineClip has ~30 of them (warp markers, detected bars, key data, fades, sample bounds,
+    // notes…) and any one left out of a hand-written diff desyncs silently — which is exactly how
+    // warp state ended up differing between peers. Hashing the whole clip means a change to any
+    // field, present or future, is caught automatically.
     struct ClipShadow
     {
         EntityId id { noEntity };
         EntityId owner { noEntity };      // owning track — flat list, so cross-track moves are visible
-        juce::String name;
-        double startBeat { 0.0 };
-        double lengthInBeats { 0.0 };
-        double gainDb { 0.0 };
-        bool muted { false };
-        bool solo { false };
-        bool warpEnabled { false };
-        juce::uint32 colour { 0 };
-        std::vector<NoteShadow> notes;
+        juce::int64 dataHash { 0 };
     };
 
     struct TrackShadow

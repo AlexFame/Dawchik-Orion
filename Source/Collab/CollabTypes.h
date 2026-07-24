@@ -65,6 +65,11 @@ enum class OpType
     resizeClip,         // lengthInBeats
     setClipField,       // gainDb / muted / solo / colour / name / warpEnabled…
 
+    // Whole-clip sync: create or fully replace a clip from its serialised form (every field,
+    // including warp markers and key data). Coarser than the per-field ops but immune to a field
+    // being forgotten, which silently desyncs.
+    replaceClip,
+
     // Notes within a clip.
     addNote,
     removeNote,
@@ -190,6 +195,7 @@ inline juce::String toString(OpType t)
         case OpType::moveTrack:        return "moveTrack";
         case OpType::setTrackField:    return "setTrackField";
         case OpType::addClip:          return "addClip";
+        case OpType::replaceClip:      return "replaceClip";
         case OpType::removeClip:       return "removeClip";
         case OpType::moveClip:         return "moveClip";
         case OpType::resizeClip:       return "resizeClip";
