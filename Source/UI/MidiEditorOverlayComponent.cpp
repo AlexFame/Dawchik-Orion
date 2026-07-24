@@ -1067,22 +1067,6 @@ void MidiEditorOverlayComponent::paint(juce::Graphics& g)
                    octaveBoundary ? 1.2f : 1.0f);
     }
 
-    // Dim the area BEYOND the clip end so the user can see where the pattern stops.
-    const auto activeClipLengthBeats = activeClip != nullptr ? activeClip->lengthInBeats : 0.0;
-    if (activeClipLengthBeats > 0.0)
-    {
-        const auto clipEndX = static_cast<float>(gridArea.getX() + (activeClipLengthBeats * pixelsPerBeat) - scrollX);
-        if (clipEndX < static_cast<float>(visibleGrid.getRight()))
-        {
-            const auto dimX = juce::jmax(static_cast<float>(visibleGrid.getX()), clipEndX);
-            g.setColour(theme::core::canvas.withAlpha(0.20f));   // subtle hint of pattern end (FL keeps it gentle)
-            g.fillRect(juce::Rectangle<float>(dimX,
-                                              static_cast<float>(visibleGrid.getY()),
-                                              static_cast<float>(visibleGrid.getRight()) - dimX,
-                                              static_cast<float>(visibleGrid.getHeight())));
-        }
-    }
-
     const auto stepsPerBeat = juce::jmax(1, static_cast<int>(std::round(1.0 / juce::jmax(0.001, snapSizeInBeats))));
     const auto beatsPerBar  = 4; // visual bar — independent of project's time-sig numerator for now
     const auto stepsPerBar  = stepsPerBeat * beatsPerBar;

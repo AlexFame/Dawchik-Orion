@@ -300,7 +300,7 @@ void StepSequencerComponent::paint(juce::Graphics& g)
 {
     rebuildChannels();
 
-    g.fillAll(theme::core::deepSpace);
+    g.fillAll(theme::surface::primary);
 
     // Header.
     auto header = getLocalBounds().removeFromTop(kHeaderHeight).reduced(kLeftPad, 0);
@@ -445,7 +445,6 @@ void StepSequencerComponent::paint(juce::Graphics& g)
             const auto cell = stepCellBounds(row, step).toFloat();
             const bool active = stepActive(ti, step);
             const bool beatGroup = (step / 4) % 2 == 0;   // alternate shading every 4 steps
-            const bool onBeat = (step % 4) == 0;
 
             if (active)
             {
@@ -456,13 +455,14 @@ void StepSequencerComponent::paint(juce::Graphics& g)
             }
             else
             {
-                g.setColour((beatGroup ? theme::surface::panel : theme::surface::primary)
-                                .withAlpha(hoveredRow == row && hoveredStep == step ? 0.95f : 0.7f));
-                g.fillRoundedRectangle(cell, 4.0f);
-                if (onBeat)
+                const auto idleCell = beatGroup ? theme::surface::elevated
+                                                : theme::surface::panel;
+                g.setColour(idleCell.withAlpha(hoveredRow == row && hoveredStep == step ? 1.0f : 0.90f));
+                g.fillRoundedRectangle(cell, 3.0f);
+                if (hoveredRow == row && hoveredStep == step)
                 {
-                    g.setColour(theme::line::normal.withAlpha(0.6f));
-                    g.drawRoundedRectangle(cell.reduced(0.5f), 4.0f, 1.0f);
+                    g.setColour(theme::line::normal.withAlpha(0.50f));
+                    g.drawRoundedRectangle(cell.reduced(0.5f), 3.0f, 0.8f);
                 }
             }
 

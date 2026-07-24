@@ -1891,7 +1891,6 @@ void MainComponent::resized()
     const auto bottomPanelOpen = samplerOpen || clipEditorOpen || stepSequencerOpen;
     const auto closedArrangementArea = timelineLayoutArea;
     auto openArrangementArea = timelineLayoutArea;
-    // Sampler and clip editor share one compact lower-panel height.
     auto lowerPanelArea = openArrangementArea.removeFromBottom(juce::jmin(samplerPanelHeight, openArrangementArea.getHeight()));
     const auto arrangementArea = bottomPanelOpen ? openArrangementArea : closedArrangementArea;
 
