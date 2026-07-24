@@ -1,6 +1,7 @@
 #include "CollabSession.h"
 
 #include "OpLog.h"
+#include "../Core/ProjectSerializer.h"
 #include "../Core/ProjectState.h"
 
 namespace orion::collab
@@ -9,11 +10,13 @@ CollabSession::CollabSession(ProjectState& stateToBind, CollabTransport& transpo
     : state(stateToBind), transport(transportToUse), ids(actorSalt)
 {
     transport.onOpReceived = [this](const Op& op) { handleIncoming(op); };
+    transport.onSnapshotReceived = [this](const juce::var& project) { handleSnapshot(project); };
 }
 
 CollabSession::~CollabSession()
 {
     transport.onOpReceived = nullptr;
+    transport.onSnapshotReceived = nullptr;
 }
 
 ActorId CollabSession::localActor() const
@@ -37,6 +40,29 @@ void CollabSession::sendLocal(Op op)
 {
     op.actor = transport.localActor();
     transport.sendOp(op);      // the DAW already mutated the project; only broadcast, never re-apply
+}
+
+void CollabSession::publishSnapshot()
+{
+    transport.sendSnapshot(ProjectSerializer::toVar(state));
+}
+
+void CollabSession::requestBacklog()
+{
+    transport.requestBacklog();
+}
+
+void CollabSession::handleSnapshot(const juce::var& project)
+{
+    // Replacing the whole project reallocates every clips/notes vector the audio thread may be
+    // reading, so this must happen under the audio-edit lock like any structural op.
+    {
+        const juce::ScopedLock sl(state.getAudioEditLock());
+        ProjectSerializer::fromVar(state, project);
+    }
+
+    if (onRemoteApplied)
+        onRemoteApplied();
 }
 
 void CollabSession::handleIncoming(const Op& op)

@@ -131,6 +131,56 @@ struct Op
     }
 };
 
+// The wire envelope. Every message on the socket is a JSON object with a "kind" so ops, the project
+// baseline and control messages can share one channel. Defined here so the transport and the server
+// can never drift apart on the format.
+namespace wire
+{
+    inline constexpr const char* kindOp       = "op";
+    inline constexpr const char* kindSnapshot = "snapshot";
+    inline constexpr const char* kindBacklog  = "requestBacklog";
+
+    inline juce::String kindOf(const juce::var& message)
+    {
+        return message.getProperty("kind", juce::String()).toString();
+    }
+
+    inline juce::var opMessage(const Op& op)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindOp);
+        obj->setProperty("op", op.toVar());
+        return juce::var(obj);
+    }
+
+    inline juce::var snapshotMessage(const juce::var& project)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindSnapshot);
+        obj->setProperty("project", project);
+        return juce::var(obj);
+    }
+
+    inline juce::var backlogRequest()
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindBacklog);
+        return juce::var(obj);
+    }
+
+    inline juce::MemoryBlock encode(const juce::var& message)
+    {
+        const auto json = juce::JSON::toString(message, true);
+        return juce::MemoryBlock(json.toRawUTF8(), json.getNumBytesAsUTF8());
+    }
+
+    inline juce::var decode(const juce::MemoryBlock& block)
+    {
+        return juce::JSON::parse(juce::String::fromUTF8(static_cast<const char*>(block.getData()),
+                                                        static_cast<int>(block.getSize())));
+    }
+} // namespace wire
+
 inline juce::String toString(OpType t)
 {
     switch (t)

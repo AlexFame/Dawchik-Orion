@@ -65,6 +65,9 @@ public:
 
         embeddedServer = std::move(server);
         connect(std::move(socket), actorSalt);
+        // The host's project IS the session's starting point — publish it so anyone joining later
+        // receives the real arrangement instead of an empty timeline.
+        session->publishSnapshot();
         return true;
     }
 
@@ -76,6 +79,8 @@ public:
             return false;
 
         connect(std::move(socket), actorSalt);
+        // Callbacks are wired now, so it is safe to ask for the baseline + everything since.
+        session->requestBacklog();
         return true;
     }
 

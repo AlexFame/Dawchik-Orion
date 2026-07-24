@@ -19,5 +19,13 @@ public:
     static bool loadFromFile(ProjectState& projectState,
                              const juce::File& sourceFile,
                              juce::String* errorMessage = nullptr);
+
+    // The same project representation as the file format, but in memory. saveToFile/loadFromFile are
+    // thin wrappers over these, so anything using them (e.g. the collab snapshot sent to a peer
+    // joining a live session) stays automatically in sync with the on-disk format.
+    static juce::var toVar(const ProjectState& projectState);
+    static bool fromVar(ProjectState& projectState,
+                        const juce::var& source,
+                        juce::String* errorMessage = nullptr);
 };
 }  // namespace orion

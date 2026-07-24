@@ -371,6 +371,7 @@ target_sources(OrionCollabTest PRIVATE
     Source/Tools/CollabTest.cpp
     Source/Collab/OpLog.cpp
     Source/Collab/CollabSession.cpp
+    Source/Core/ProjectSerializer.cpp
     Source/Core/ProjectState.cpp)
 # JUCE_MODAL_LOOPS_PERMITTED lets the test pump the message loop (runDispatchLoopUntil) so async
 # socket callbacks marshalled via callAsync actually get delivered.

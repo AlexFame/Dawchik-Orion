@@ -324,6 +324,62 @@ int main()
         check(! host.isHosting(), "embedded server torn down on disconnect");
     }
 
+    // ---- Joining a session already in progress: the newcomer must get the WHOLE project. ----
+    {
+        auto pump = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+        const int port = 56000 + juce::Random::getSystemRandom().nextInt(800);
+
+        // The host already has an arrangement before anyone joins.
+        ProjectState ph, pg;
+        {
+            TrackState t;
+            t.name = "Pre-existing";
+            TimelineClip c;
+            c.name = "Old Loop";
+            c.midiNotes.push_back(MidiNote { 72, 0.0, 2.0, 90 });
+            t.clips.push_back(std::move(c));
+            ph.getTracks().push_back(std::move(t));
+        }
+        ph.setTempoBpm(93.0);
+
+        CollabController host(ph), guest(pg);
+        check(host.hostSession(port, "H", 0x9A), "host started a session on an existing project");
+
+        // An edit made after hosting but BEFORE the guest arrives — must be replayed to them.
+        const auto midId = host.newId();
+        auto midOp = ops::addTrack(midId, "Added Before Join", true);
+        oplog::apply(ph, midOp);
+        host.broadcast(midOp);
+        pump(80);
+
+        check(guest.joinSession("127.0.0.1", port, "G", 0x9B), "guest joined the running session");
+        for (int i = 0; i < 60 && pg.getTracks().size() < 2; ++i) pump(25);
+
+        check(pg.getTracks().size() == 2, "joiner got the baseline project AND the op made since");
+        check(pg.getTracks()[0].name == "Pre-existing", "snapshot carried the pre-existing track");
+        check(pg.getTracks()[0].clips.size() == 1
+                  && pg.getTracks()[0].clips[0].midiNotes.size() == 1
+                  && pg.getTracks()[0].clips[0].midiNotes[0].pitch == 72,
+              "snapshot carried clips and notes");
+        check(std::abs(pg.getTempoBpm() - 93.0) < 1.0e-9, "snapshot carried the tempo");
+        check(pg.getTracks()[0].id == ph.getTracks()[0].id && pg.getTracks()[0].id != 0,
+              "snapshot preserved entity ids (later ops can target them)");
+        check(pg.getTracks()[1].id == midId, "the pre-join op was replayed in order");
+
+        // And editing still works across the pair after the catch-up.
+        const auto afterId = host.newId();
+        auto afterOp = ops::addTrack(afterId, "After Join", true);
+        oplog::apply(ph, afterOp);
+        host.broadcast(afterOp);
+        for (int i = 0; i < 40 && pg.getTracks().size() < 3; ++i) pump(25);
+        check(pg.getTracks().size() == 3 && pg.getTracks()[2].id == afterId,
+              "ops keep flowing after the initial catch-up");
+
+        guest.disconnect();
+        host.disconnect();
+        pump(40);
+    }
+
     std::cout << std::endl;
     if (failures == 0)
         std::cout << "all checks passed" << std::endl;

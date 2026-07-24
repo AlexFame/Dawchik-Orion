@@ -32,6 +32,14 @@ public:
     // assigns the authoritative sequence and echoes it back via onOpReceived.
     virtual void sendOp(const Op& op) = 0;
 
+    // Publish the full project as the session's baseline (the host does this once at session start).
+    // The server stores it and hands it to anyone joining later, ahead of the ops since.
+    virtual void sendSnapshot(const juce::var& project) = 0;
+
+    // Ask the server for the current baseline + every op since it. Called once by a joining client
+    // AFTER its callbacks are installed, so the reply can't arrive before anyone is listening.
+    virtual void requestBacklog() = 0;
+
     // Our own actor id on this connection (assigned on join). Empty until connected.
     virtual ActorId localActor() const = 0;
 
@@ -41,6 +49,10 @@ public:
 
     // A sequenced op arrived (either a peer's edit, or the server-confirmed echo of one of ours).
     std::function<void(const Op&)> onOpReceived;
+
+    // A full-project baseline arrived (we just joined a session already in progress). The receiver
+    // replaces its ProjectState with this before applying any subsequent ops.
+    std::function<void(const juce::var&)> onSnapshotReceived;
 
     // The roster changed (someone joined/left, name/colour updated).
     std::function<void(const std::vector<PeerInfo>&)> onPeersChanged;

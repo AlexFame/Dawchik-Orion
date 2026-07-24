@@ -41,12 +41,9 @@ public:
     void closeConnection() { disconnect(); }
 
     // ---- CollabTransport ----
-    void sendOp(const Op& op) override
-    {
-        const auto json = juce::JSON::toString(op.toVar(), true);
-        juce::MemoryBlock block(json.toRawUTF8(), json.getNumBytesAsUTF8());
-        sendMessage(block);
-    }
+    void sendOp(const Op& op) override { sendMessage(wire::encode(wire::opMessage(op))); }
+    void sendSnapshot(const juce::var& project) override { sendMessage(wire::encode(wire::snapshotMessage(project))); }
+    void requestBacklog() override { sendMessage(wire::encode(wire::backlogRequest())); }
 
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return connectedFlag.load(); }
@@ -66,16 +63,30 @@ private:
 
     void messageReceived(const juce::MemoryBlock& message) override
     {
-        const auto json = juce::String::fromUTF8(static_cast<const char*>(message.getData()),
-                                                 static_cast<int>(message.getSize()));
-        auto op = Op::fromVar(juce::JSON::parse(json));
+        const auto decoded = wire::decode(message);
+        const auto kind = wire::kindOf(decoded);
         juce::WeakReference<SocketTransport> weak(this);
-        juce::MessageManager::callAsync([weak, op]
+
+        if (kind == wire::kindOp)
         {
-            if (auto* self = weak.get())
-                if (self->onOpReceived)
-                    self->onOpReceived(op);
-        });
+            auto op = Op::fromVar(decoded.getProperty("op", juce::var()));
+            juce::MessageManager::callAsync([weak, op]
+            {
+                if (auto* self = weak.get())
+                    if (self->onOpReceived)
+                        self->onOpReceived(op);
+            });
+        }
+        else if (kind == wire::kindSnapshot)
+        {
+            auto project = decoded.getProperty("project", juce::var());
+            juce::MessageManager::callAsync([weak, project]
+            {
+                if (auto* self = weak.get())
+                    if (self->onSnapshotReceived)
+                        self->onSnapshotReceived(project);
+            });
+        }
     }
 
     void marshalConnection(bool nowConnected)

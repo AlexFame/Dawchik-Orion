@@ -42,6 +42,14 @@ public:
     // Bring every id-less entity in the project up to a stable id (call once at session start).
     void assignInitialIds();
 
+    // Publish the current project as the session baseline (the host does this once, after ids are
+    // assigned) so anyone joining later starts from the real project instead of an empty one.
+    void publishSnapshot();
+
+    // Ask the server for the baseline + every op since. Called by a joining client once its
+    // callbacks are wired.
+    void requestBacklog();
+
     ActorId localActor() const;
 
     // Fired after a PEER op has been applied to the ProjectState, so the UI can refresh.
@@ -49,6 +57,7 @@ public:
 
 private:
     void handleIncoming(const Op& op);
+    void handleSnapshot(const juce::var& project);
 
     ProjectState& state;
     CollabTransport& transport;

@@ -28,6 +28,9 @@ juce::var midiNoteToVar(const orion::MidiNote& note)
     object->setProperty("startBeat", note.startBeat);
     object->setProperty("lengthInBeats", note.lengthInBeats);
     object->setProperty("velocity", note.velocity);
+    // Collab entity id. Written as a decimal string because a 64-bit value would lose precision
+    // going through JSON's number type. Absent in projects saved before collab — reads back as 0.
+    object->setProperty("id", juce::String(note.id));
     return juce::var(object);
 }
 
@@ -104,6 +107,7 @@ juce::var timelineClipToVar(const orion::TimelineClip& clip)
         warpMarkers.add(juce::var(wm));
     }
     object->setProperty("warpMarkers", juce::var(warpMarkers));
+    object->setProperty("id", juce::String(clip.id));   // collab entity id (see midiNoteToVar)
     return juce::var(object);
 }
 
@@ -194,6 +198,7 @@ juce::var trackStateToVar(const orion::TrackState& track)
         clips.add(timelineClipToVar(clip));
 
     object->setProperty("clips", juce::var(clips));
+    object->setProperty("id", juce::String(track.id));   // collab entity id (see midiNoteToVar)
     return juce::var(object);
 }
 
@@ -250,6 +255,7 @@ orion::MidiNote midiNoteFromVar(const juce::var& value)
         note.startBeat     = getDouble(*obj, "startBeat", note.startBeat);
         note.lengthInBeats = getDouble(*obj, "lengthInBeats", note.lengthInBeats);
         note.velocity      = getInt(*obj, "velocity", note.velocity);
+        note.id            = static_cast<juce::uint64>(getString(*obj, "id").getLargeIntValue());
     }
     return note;
 }
@@ -334,6 +340,7 @@ orion::TimelineClip timelineClipFromVar(const juce::var& value)
                 clip.warpMarkers.push_back({ getDouble(*mObj, "sourceRatio", 0.0),
                                              getDouble(*mObj, "beat", 0.0) });
 
+    clip.id = static_cast<juce::uint64>(getString(*obj, "id").getLargeIntValue());
     return clip;
 }
 
@@ -431,6 +438,7 @@ orion::TrackState trackStateFromVar(const juce::var& value)
         for (const auto& clipVar : *clips)
             track.clips.push_back(timelineClipFromVar(clipVar));
 
+    track.id = static_cast<juce::uint64>(getString(*obj, "id").getLargeIntValue());
     return track;
 }
 }  // namespace
@@ -440,6 +448,19 @@ namespace orion
 bool ProjectSerializer::saveToFile(const ProjectState& projectState,
                                    const juce::File& destinationFile,
                                    juce::String* errorMessage)
+{
+    const auto json = juce::JSON::toString(toVar(projectState), true);
+    if (! destinationFile.replaceWithText(json))
+    {
+        if (errorMessage != nullptr)
+            *errorMessage = "Could not write project file";
+        return false;
+    }
+
+    return true;
+}
+
+juce::var ProjectSerializer::toVar(const ProjectState& projectState)
 {
     auto* rootObject = new juce::DynamicObject();
     rootObject->setProperty("app", "Orion");
@@ -475,6 +496,7 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
         b->setProperty("volumeDb", bus.volumeDb);
         b->setProperty("pan", bus.pan);
         b->setProperty("muted", bus.muted);
+        b->setProperty("id", juce::String(bus.id));   // collab entity id (see midiNoteToVar)
         juce::Array<juce::var> busInserts;
         for (const auto& fx : bus.inserts)
         {
@@ -501,16 +523,7 @@ bool ProjectSerializer::saveToFile(const ProjectState& projectState,
         masterInserts.add(juce::var(fxObj));
     }
     rootObject->setProperty("masterInserts", juce::var(masterInserts));
-
-    const auto json = juce::JSON::toString(juce::var(rootObject), true);
-    if (! destinationFile.replaceWithText(json))
-    {
-        if (errorMessage != nullptr)
-            *errorMessage = "Could not write project file";
-        return false;
-    }
-
-    return true;
+    return juce::var(rootObject);
 }
 
 bool ProjectSerializer::loadFromFile(ProjectState& projectState,
@@ -524,12 +537,18 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
         return false;
     }
 
-    auto parsed = juce::JSON::parse(sourceFile.loadFileAsString());
-    auto* root = parsed.getDynamicObject();
+    return fromVar(projectState, juce::JSON::parse(sourceFile.loadFileAsString()), errorMessage);
+}
+
+bool ProjectSerializer::fromVar(ProjectState& projectState,
+                                const juce::var& source,
+                                juce::String* errorMessage)
+{
+    auto* root = source.getDynamicObject();
     if (root == nullptr)
     {
         if (errorMessage != nullptr)
-            *errorMessage = "Project file is not valid JSON";
+            *errorMessage = "Project data is not valid JSON";
         return false;
     }
 
@@ -582,6 +601,7 @@ bool ProjectSerializer::loadFromFile(ProjectState& projectState,
                 bus.volumeDb = getDouble(*b, "volumeDb", 0.0);
                 bus.pan = juce::jlimit(-1.0, 1.0, getDouble(*b, "pan", 0.0));
                 bus.muted = getBool(*b, "muted", false);
+                bus.id = static_cast<juce::uint64>(getString(*b, "id").getLargeIntValue());
                 if (auto* ins = b->getProperty("inserts").getArray())
                     for (const auto& fxVar : *ins)
                         if (auto* fxObj = fxVar.getDynamicObject())

@@ -40,7 +40,7 @@ private:
         explicit Conn(CollabServer& o) : juce::InterprocessConnection(false), owner(o) {}
         void connectionMade() override {}
         void connectionLost() override { owner.handleLost(this); }
-        void messageReceived(const juce::MemoryBlock& m) override { owner.handleMessage(m); }
+        void messageReceived(const juce::MemoryBlock& m) override { owner.handleMessage(*this, m); }
         CollabServer& owner;
     };
 
@@ -52,19 +52,45 @@ private:
         return c;
     }
 
-    void handleMessage(const juce::MemoryBlock& message)
+    void handleMessage(Conn& from, const juce::MemoryBlock& message)
     {
-        auto parsed = juce::JSON::parse(juce::String::fromUTF8(static_cast<const char*>(message.getData()),
-                                                               static_cast<int>(message.getSize())));
-        if (auto* obj = parsed.getDynamicObject())
-            obj->setProperty("seq", juce::String(nextSeq.fetch_add(1) + 1));   // authoritative order
+        const auto parsed = wire::decode(message);
+        const auto kind = wire::kindOf(parsed);
 
-        const auto json = juce::JSON::toString(parsed, true);
-        juce::MemoryBlock out(json.toRawUTF8(), json.getNumBytesAsUTF8());
+        if (kind == wire::kindOp)
+        {
+            // Stamp the authoritative order, remember it for late joiners, fan it out.
+            auto opVar = parsed.getProperty("op", juce::var());
+            if (auto* opObj = opVar.getDynamicObject())
+                opObj->setProperty("seq", juce::String(nextSeq.fetch_add(1) + 1));
 
-        const juce::ScopedLock sl(lock);
-        for (auto* c : connections)
-            c->sendMessage(out);
+            const auto out = wire::encode(wire::opMessage(Op::fromVar(opVar)));
+            const juce::ScopedLock sl(lock);
+            opLog.add(out);
+            for (auto* c : connections)
+                c->sendMessage(out);
+            return;
+        }
+
+        if (kind == wire::kindSnapshot)
+        {
+            // The host published a fresh baseline: it supersedes every op logged before it.
+            const juce::ScopedLock sl(lock);
+            baseline = wire::encode(parsed);
+            hasBaseline = true;
+            opLog.clear();
+            return;
+        }
+
+        if (kind == wire::kindBacklog)
+        {
+            // A client just joined and is ready to listen: hand it the baseline, then the ops since.
+            const juce::ScopedLock sl(lock);
+            if (hasBaseline)
+                from.sendMessage(baseline);
+            for (const auto& logged : opLog)
+                from.sendMessage(logged);
+        }
     }
 
     void handleLost(Conn* c)
@@ -85,6 +111,12 @@ private:
     mutable juce::CriticalSection lock;
     juce::OwnedArray<Conn> connections;
     std::atomic<Seq> nextSeq { 0 };
+
+    // Session history, so someone joining a jam already in progress gets the full picture rather
+    // than only the edits made after they arrived.
+    juce::MemoryBlock baseline;
+    bool hasBaseline { false };
+    juce::Array<juce::MemoryBlock> opLog;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(CollabServer)
 };
