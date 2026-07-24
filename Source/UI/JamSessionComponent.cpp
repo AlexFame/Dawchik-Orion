@@ -810,6 +810,11 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
             addChatMessage("Orion", "Invite " + inviteCode + " copied.");
         else
             addChatMessage("Orion", "Session " + inviteCode + " is live.");
+
+        // Actually open the multiplayer session (the host's project becomes the session baseline).
+        if (! wasLive && onCreateSessionRequested)
+            onCreateSessionRequested();
+
         refreshControls();
         repaint();
     }
@@ -817,6 +822,10 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
     {
         connectionState = ConnectionState::live;
         addChatMessage("Orion", "Joined session " + inviteCode + ".");
+
+        if (onJoinSessionRequested)
+            onJoinSessionRequested();
+
         refreshControls();
         repaint();
     }

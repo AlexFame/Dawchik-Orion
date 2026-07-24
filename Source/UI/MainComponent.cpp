@@ -896,6 +896,8 @@ MainComponent::MainComponent()
     jamSession.setEmbeddedArrangementMode(true);
     jamSession.setVisible(false);
     jamSession.onClose = [this]() { toggleJamSessionFromUi(); };
+    jamSession.onCreateSessionRequested = [this]() { startJamHosting(); };
+    jamSession.onJoinSessionRequested   = [this]() { joinJamSession(); };
     jamSession.onMicEnabledChanged = [this](bool enabled)
     {
         return ! enabled || ensureAudioInputReady(true);
@@ -2385,6 +2387,17 @@ void MainComponent::updateTrackMeterLevels()
 
 void MainComponent::timerCallback()
 {
+    // Multiplayer Jam: diff the project against the last-synced shadow and broadcast whatever the
+    // user changed. This is why no edit path in the app needs to know collab exists.
+    // Costs nothing when solo (isActive() is false), and even in a session it runs at ~10 Hz rather
+    // than the timer's 60 — each sync copies the project to diff it, and a tenth of a second is
+    // still imperceptible next to network latency.
+    if (collabController.isActive() && ++collabSyncCounter >= 6)
+    {
+        collabSyncCounter = 0;
+        collabReconciler.sync();
+    }
+
     static constexpr double mpcPadRearmDelayMs = 140.0;
     if (! mpcHardwareNoteReleaseTimes.empty())
     {

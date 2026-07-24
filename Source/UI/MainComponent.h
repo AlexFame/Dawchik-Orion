@@ -17,6 +17,8 @@
 #include "../Audio/TransportController.h"
 #include "../Audio/TransportEngine.h"
 #include "../Core/ProjectSerializer.h"
+#include "../Collab/CollabController.h"
+#include "../Collab/CollabReconciler.h"
 #include "../Core/ProjectState.h"
 #include "../Plugins/PluginEditorWindow.h"
 #include "../Plugins/PluginManager.h"
@@ -180,6 +182,12 @@ private:
     void toggleStepSequencerFromUi();
     void toggleMpcSampleFromUi();
     void toggleJamSessionFromUi();
+    // Multiplayer Jam: start/join/leave a session, plus the light refresh applied when a peer's
+    // edit lands (deliberately gentler than the project-load path, which resets selection/scroll).
+    void startJamHosting();
+    void joinJamSession();
+    void leaveJamSession();
+    void refreshAfterRemoteJamEdit();
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();
@@ -249,6 +257,11 @@ private:
     juce::Rectangle<int> getBrowserResizeHandleBounds() const noexcept;
 
     ProjectState projectState;
+    // Multiplayer Jam. Both are inert until a session is started: the controller reports
+    // isActive()==false, broadcast() is a no-op and the reconciler's sync() returns immediately,
+    // so solo behaviour is exactly as before. Declared right after projectState — they bind to it.
+    collab::CollabController collabController { projectState };
+    collab::CollabReconciler collabReconciler { projectState, collabController };
     TransportEngine transportEngine;
     TransportController transportController;
     ArrangementTimelineComponent arrangementTimeline;
@@ -399,6 +412,7 @@ private:
     std::set<int> liveMidiDisplayNotes;
     int visibleMidiInputCount { 0 };
     int midiDeviceRescanCounter { 0 };            // throttles hot-plug rescans in timerCallback
+    int collabSyncCounter { 0 };                  // throttles the Jam reconciler to ~10 Hz
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;

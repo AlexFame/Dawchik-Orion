@@ -104,6 +104,7 @@ target_sources(
         Source/UI/MainComponentRouting.cpp
         Source/UI/MainComponentMidi.cpp
         Source/UI/MainComponentWiring.cpp
+        Source/UI/MainComponentJam.cpp
         Source/UI/MacCharacterPalette.mm
         Source/UI/MidiEditorOverlayComponent.cpp
         Source/UI/AddTrackDialogComponent.cpp

@@ -19,6 +19,10 @@ public:
     JamSessionComponent();
 
     std::function<void()> onClose;
+    // Fired when the user actually wants a multiplayer session opened/joined. The host handles the
+    // networking (Source/Collab); this panel only owns the presentation.
+    std::function<void()> onCreateSessionRequested;
+    std::function<void()> onJoinSessionRequested;
     std::function<bool(bool)> onMicEnabledChanged;
     std::function<bool(bool)> onCameraEnabledChanged;
     std::function<void(bool)> onShareEnabledChanged;
