@@ -44,6 +44,7 @@ public:
     void sendOp(const Op& op) override { sendMessage(wire::encode(wire::opMessage(op))); }
     void sendSnapshot(const juce::var& project) override { sendMessage(wire::encode(wire::snapshotMessage(project))); }
     void requestBacklog() override { sendMessage(wire::encode(wire::backlogRequest())); }
+    void sendPresence(const juce::var& presence) override { sendMessage(wire::encode(wire::presenceMessage(presence))); }
 
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return connectedFlag.load(); }
@@ -75,6 +76,16 @@ private:
                 if (auto* self = weak.get())
                     if (self->onOpReceived)
                         self->onOpReceived(op);
+            });
+        }
+        else if (kind == wire::kindPresence)
+        {
+            auto presence = decoded.getProperty("presence", juce::var());
+            juce::MessageManager::callAsync([weak, presence]
+            {
+                if (auto* self = weak.get())
+                    if (self->onPresenceReceived)
+                        self->onPresenceReceived(presence);
             });
         }
         else if (kind == wire::kindSnapshot)

@@ -11,12 +11,14 @@ CollabSession::CollabSession(ProjectState& stateToBind, CollabTransport& transpo
 {
     transport.onOpReceived = [this](const Op& op) { handleIncoming(op); };
     transport.onSnapshotReceived = [this](const juce::var& project) { handleSnapshot(project); };
+    transport.onPresenceReceived = [this](const juce::var& presence) { handlePresence(presence); };
 }
 
 CollabSession::~CollabSession()
 {
     transport.onOpReceived = nullptr;
     transport.onSnapshotReceived = nullptr;
+    transport.onPresenceReceived = nullptr;
 }
 
 ActorId CollabSession::localActor() const
@@ -51,6 +53,50 @@ void CollabSession::publishSnapshot()
 void CollabSession::requestBacklog()
 {
     transport.requestBacklog();
+}
+
+void CollabSession::publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
+                                   double beat, int trackIndex, bool overTimeline)
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty("actor", transport.localActor());
+    obj->setProperty("name", displayName);
+    obj->setProperty("colour", static_cast<juce::int64>(colourArgb));
+    obj->setProperty("beat", beat);
+    obj->setProperty("track", trackIndex);
+    obj->setProperty("over", overTimeline);
+    transport.sendPresence(juce::var(obj));
+}
+
+void CollabSession::handlePresence(const juce::var& presence)
+{
+    PeerPresence p;
+    p.actor = presence.getProperty("actor", juce::String()).toString();
+    if (p.actor.isEmpty() || p.actor == transport.localActor())
+        return;
+
+    p.name = presence.getProperty("name", juce::String()).toString();
+    p.colourArgb = static_cast<juce::uint32>(static_cast<juce::int64>(presence.getProperty("colour", 0)));
+    p.beat = static_cast<double>(presence.getProperty("beat", 0.0));
+    p.trackIndex = static_cast<int>(presence.getProperty("track", -1));
+    p.overTimeline = static_cast<bool>(presence.getProperty("over", false));
+    p.lastSeenMs = juce::Time::currentTimeMillis();
+    presenceByActor[p.actor] = p;
+}
+
+std::vector<PeerPresence> CollabSession::peers() const
+{
+    // Drop anyone we haven't heard from recently: a peer that quit or froze should stop haunting
+    // the timeline rather than leaving a cursor parked forever.
+    constexpr juce::int64 staleAfterMs = 5000;
+    const auto now = juce::Time::currentTimeMillis();
+
+    std::vector<PeerPresence> out;
+    out.reserve(presenceByActor.size());
+    for (const auto& [actor, p] : presenceByActor)
+        if (now - p.lastSeenMs < staleAfterMs)
+            out.push_back(p);
+    return out;
 }
 
 void CollabSession::handleSnapshot(const juce::var& project)

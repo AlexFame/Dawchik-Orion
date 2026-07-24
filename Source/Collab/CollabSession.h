@@ -4,6 +4,8 @@
 #include "CollabTypes.h"
 
 #include <functional>
+#include <map>
+#include <vector>
 
 namespace orion
 {
@@ -50,6 +52,13 @@ public:
     // callbacks are wired.
     void requestBacklog();
 
+    // Tell the others where we are (Figma-style live cursor). Cheap and frequent; never logged.
+    void publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
+                         double beat, int trackIndex, bool overTimeline);
+
+    // Peers seen recently, stalest entries dropped. Safe to call every frame.
+    std::vector<PeerPresence> peers() const;
+
     ActorId localActor() const;
 
     // Fired after a PEER op has been applied to the ProjectState, so the UI can refresh.
@@ -65,10 +74,12 @@ public:
 private:
     void handleIncoming(const Op& op);
     void handleSnapshot(const juce::var& project);
+    void handlePresence(const juce::var& presence);
 
     ProjectState& state;
     CollabTransport& transport;
     EntityIdGenerator ids;
+    std::map<ActorId, PeerPresence> presenceByActor;
 };
 } // namespace collab
 } // namespace orion

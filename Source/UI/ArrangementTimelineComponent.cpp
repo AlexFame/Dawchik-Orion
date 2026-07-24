@@ -1942,6 +1942,97 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     }
 
     paintToolPalette(g);
+    drawRemoteCursors(g);
+}
+
+void ArrangementTimelineComponent::setRemoteCursors(std::vector<RemoteCursor> cursors)
+{
+    // Cheap identity check: cursors move constantly, and repainting the whole arrangement on every
+    // presence packet would be wasteful when nothing actually moved.
+    const auto same = cursors.size() == remoteCursors.size()
+                   && std::equal(cursors.begin(), cursors.end(), remoteCursors.begin(),
+                                 [](const RemoteCursor& a, const RemoteCursor& b)
+                                 {
+                                     return a.name == b.name && a.trackIndex == b.trackIndex
+                                         && std::abs(a.beat - b.beat) < 1.0e-6;
+                                 });
+    if (same)
+        return;
+
+    remoteCursors = std::move(cursors);
+    repaint();
+}
+
+bool ArrangementTimelineComponent::pointToProjectPosition(juce::Point<int> point,
+                                                          double& beatOut,
+                                                          int& trackIndexOut) const
+{
+    if (point.x < trackHeaderWidth || ! getLocalBounds().contains(point))
+        return false;
+
+    const auto trackCount = static_cast<int>(project.getTracks().size());
+    for (int i = 0; i < trackCount; ++i)
+    {
+        if (getTrackLaneBounds(i).contains(point))
+        {
+            trackIndexOut = i;
+            beatOut = xToBeatPosition(point.x);
+            return true;
+        }
+    }
+    return false;
+}
+
+void ArrangementTimelineComponent::drawRemoteCursors(juce::Graphics& g)
+{
+    if (remoteCursors.empty())
+        return;
+
+    const auto trackCount = static_cast<int>(project.getTracks().size());
+
+    for (const auto& cursor : remoteCursors)
+    {
+        if (cursor.trackIndex < 0 || cursor.trackIndex >= trackCount)
+            continue;
+
+        const auto lane = getTrackLaneBounds(cursor.trackIndex);
+        if (lane.isEmpty())
+            continue;
+
+        const auto x = beatToX(cursor.beat, lane);
+        if (x < static_cast<float>(trackHeaderWidth) || x > static_cast<float>(getWidth()))
+            continue;
+
+        const auto y = static_cast<float>(lane.getCentreY());
+
+        // Arrow head.
+        juce::Path arrow;
+        arrow.startNewSubPath(x, y);
+        arrow.lineTo(x, y + 14.0f);
+        arrow.lineTo(x + 3.8f, y + 10.4f);
+        arrow.lineTo(x + 8.5f, y + 15.5f);
+        arrow.lineTo(x + 11.0f, y + 13.2f);
+        arrow.lineTo(x + 6.4f, y + 8.4f);
+        arrow.lineTo(x + 11.0f, y + 7.0f);
+        arrow.closeSubPath();
+
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.fillPath(arrow, juce::AffineTransform::translation(1.0f, 1.5f));
+        g.setColour(cursor.colour);
+        g.fillPath(arrow);
+
+        // Name tag beside it.
+        if (cursor.name.isNotEmpty())
+        {
+            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+            const auto textWidth = juce::jmin(140.0f, static_cast<float>(g.getCurrentFont().getStringWidth(cursor.name)) + 12.0f);
+            juce::Rectangle<float> tag(x + 12.0f, y + 12.0f, textWidth, 16.0f);
+            g.setColour(cursor.colour.withAlpha(0.92f));
+            g.fillRoundedRectangle(tag, 4.0f);
+            g.setColour(cursor.colour.contrasting(0.85f));
+            g.drawText(cursor.name, tag, juce::Justification::centred, false);
+        }
+    }
 }
 
 //============================================================================ chord lane

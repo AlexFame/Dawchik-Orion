@@ -87,6 +87,23 @@ public:
 
     const std::vector<SelectedClip>& getSelectedClips() const noexcept { return selectedClips; }
 
+    // A collaborator's live cursor. Carried in PROJECT coordinates (beat + track row), never
+    // pixels, so it lands in the right musical place no matter how the local user has scrolled or
+    // zoomed. The timeline simply draws what it is handed and knows nothing about the collab module.
+    struct RemoteCursor
+    {
+        juce::String name;
+        juce::Colour colour { juce::Colours::grey };
+        double beat { 0.0 };
+        int trackIndex { -1 };
+    };
+
+    void setRemoteCursors(std::vector<RemoteCursor> cursors);
+
+    // Where a point over the arrangement sits musically (beat + track row). Used to broadcast our
+    // own cursor in coordinates that mean the same thing on every collaborator's screen.
+    bool pointToProjectPosition(juce::Point<int> point, double& beatOut, int& trackIndexOut) const;
+
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -573,6 +590,8 @@ private:
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };
     int trackHeaderWidth { 214 };
+    std::vector<RemoteCursor> remoteCursors;
+    void drawRemoteCursors(juce::Graphics& g);
     bool fitTrackLanesToVisibleArea { false };
     std::map<int, int> customTrackHeights;
     std::optional<juce::Rectangle<int>> browserDropPreviewBounds;

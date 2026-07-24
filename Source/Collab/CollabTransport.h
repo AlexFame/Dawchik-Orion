@@ -36,6 +36,9 @@ public:
     // The server stores it and hands it to anyone joining later, ahead of the ops since.
     virtual void sendSnapshot(const juce::var& project) = 0;
 
+    // Broadcast our ephemeral presence (cursor position, name, colour) to the other clients.
+    virtual void sendPresence(const juce::var& presence) = 0;
+
     // Ask the server for the current baseline + every op since it. Called once by a joining client
     // AFTER its callbacks are installed, so the reply can't arrive before anyone is listening.
     virtual void requestBacklog() = 0;
@@ -53,6 +56,9 @@ public:
     // A full-project baseline arrived (we just joined a session already in progress). The receiver
     // replaces its ProjectState with this before applying any subsequent ops.
     std::function<void(const juce::var&)> onSnapshotReceived;
+
+    // A peer told us where they are. Fired often — treat it as cheap.
+    std::function<void(const juce::var&)> onPresenceReceived;
 
     // The roster changed (someone joined/left, name/colour updated).
     std::function<void(const std::vector<PeerInfo>&)> onPeersChanged;

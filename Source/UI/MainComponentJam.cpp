@@ -60,6 +60,41 @@ void jamLog(const juce::String& line)
 }
 }  // namespace
 
+// A stable colour per collaborator, derived from their actor id so both ends agree without any
+// negotiation and the same person keeps the same colour all session.
+static juce::uint32 colourForActor(const juce::String& actor)
+{
+    static const juce::uint32 palette[] = {
+        0xffd9785f, 0xff6957a8, 0xffa8774f, 0xffd2a98e, 0xff4f9dd2, 0xff5fbf8a, 0xffc25fa8, 0xffd2c25f
+    };
+    const auto hash = static_cast<juce::uint32>(std::abs(static_cast<int>(actor.hashCode())));
+    return palette[hash % (sizeof(palette) / sizeof(palette[0]))];
+}
+
+void MainComponent::publishJamPresence()
+{
+    if (! collabController.isActive())
+        return;
+
+    // Where our pointer is over the arrangement, in musical coordinates. Polling the component
+    // beats hooking every mouse handler: no existing edit path has to change.
+    double beat = 0.0;
+    int trackIndex = -1;
+    const auto overTimeline = arrangementTimeline.pointToProjectPosition(
+        arrangementTimeline.getMouseXYRelative(), beat, trackIndex);
+
+    const auto me = localActorId();
+    collabController.publishPresence(localDisplayName(), colourForActor(me), beat, trackIndex, overTimeline);
+
+    // And hand the peers' cursors to the timeline, which draws them without knowing what collab is.
+    std::vector<ArrangementTimelineComponent::RemoteCursor> cursors;
+    for (const auto& p : collabController.peers())
+        if (p.overTimeline)
+            cursors.push_back({ p.name, juce::Colour(p.colourArgb), p.beat, p.trackIndex });
+
+    arrangementTimeline.setRemoteCursors(std::move(cursors));
+}
+
 void MainComponent::updateJamDiagnostics()
 {
     const auto line = collabController.diagnosticsLine();

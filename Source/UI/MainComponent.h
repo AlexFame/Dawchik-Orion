@@ -189,6 +189,7 @@ private:
     void leaveJamSession();
     void refreshAfterRemoteJamEdit();
     void updateJamDiagnostics();
+    void publishJamPresence();
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();
@@ -415,6 +416,7 @@ private:
     int midiDeviceRescanCounter { 0 };            // throttles hot-plug rescans in timerCallback
     int collabSyncCounter { 0 };                  // throttles the Jam reconciler to ~10 Hz
     int collabDiagnosticsCounter { 0 };           // refreshes the Jam health line ~1 Hz
+    int collabPresenceCounter { 0 };              // broadcasts our live cursor ~20 Hz
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;

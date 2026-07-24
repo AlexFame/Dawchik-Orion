@@ -75,6 +75,18 @@ private:
             return;
         }
 
+        if (kind == wire::kindPresence)
+        {
+            // Forward to everyone else and forget it: presence must never enter the op log, or a
+            // late joiner would be replayed a stream of stale mouse positions.
+            const auto out = wire::encode(parsed);
+            const juce::ScopedLock sl(lock);
+            for (auto* c : connections)
+                if (c != &from)
+                    c->sendMessage(out);
+            return;
+        }
+
         if (kind == wire::kindSnapshot)
         {
             // The host published a fresh baseline: it supersedes every op logged before it.

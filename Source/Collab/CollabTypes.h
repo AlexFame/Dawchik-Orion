@@ -30,6 +30,20 @@ using Seq = juce::int64;
 
 constexpr EntityId noEntity = 0;
 
+// Where a collaborator currently is. Expressed in PROJECT coordinates (beat + track row), never in
+// pixels — each client has its own scroll and zoom, so a screen position would land somewhere else
+// on their timeline.
+struct PeerPresence
+{
+    ActorId      actor;
+    juce::String name;
+    juce::uint32 colourArgb { 0xff9e9e9e };
+    double       beat { 0.0 };
+    int          trackIndex { -1 };
+    bool         overTimeline { false };
+    juce::int64  lastSeenMs { 0 };
+};
+
 // Mints process-unique EntityIds that also never collide with other clients: the high 16 bits are
 // a random per-actor salt, the low 48 bits a monotonic counter. 48 bits of counter is ~281e12
 // ids per session — never exhausted in practice.
@@ -144,6 +158,10 @@ namespace wire
     inline constexpr const char* kindOp       = "op";
     inline constexpr const char* kindSnapshot = "snapshot";
     inline constexpr const char* kindBacklog  = "requestBacklog";
+    // Ephemeral "where is everyone" traffic: cursors, selections, who's live. Deliberately NOT an
+    // op — presence is high-frequency and worthless after the moment it describes, so the server
+    // forwards it but never logs it and never replays it to someone joining later.
+    inline constexpr const char* kindPresence = "presence";
 
     inline juce::String kindOf(const juce::var& message)
     {
@@ -170,6 +188,14 @@ namespace wire
     {
         auto* obj = new juce::DynamicObject();
         obj->setProperty("kind", kindBacklog);
+        return juce::var(obj);
+    }
+
+    inline juce::var presenceMessage(const juce::var& presence)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindPresence);
+        obj->setProperty("presence", presence);
         return juce::var(obj);
     }
 

@@ -24,6 +24,7 @@ public:
     // Defined out-of-line below (they need LoopbackTransport's full type).
     void publish(Op op);
     void publishSnapshot(const juce::var& project);
+    void publishPresence(LoopbackTransport* from, const juce::var& presence);
     void sendBacklogTo(LoopbackTransport* t);
 
 private:
@@ -49,6 +50,7 @@ public:
     void sendOp(const Op& op) override { hub.publish(op); }
     void sendSnapshot(const juce::var& project) override { hub.publishSnapshot(project); }
     void requestBacklog() override { hub.sendBacklogTo(this); }
+    void sendPresence(const juce::var& presence) override { hub.publishPresence(this, presence); }
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return true; }
 
@@ -57,6 +59,12 @@ public:
     {
         if (onOpReceived)
             onOpReceived(op);
+    }
+
+    void deliverPresence(const juce::var& presence)
+    {
+        if (onPresenceReceived)
+            onPresenceReceived(presence);
     }
 
     void deliverSnapshot(const juce::var& project)
@@ -83,6 +91,13 @@ inline void LoopbackHub::publishSnapshot(const juce::var& project)
     baseline = project;                // a fresh baseline supersedes everything logged before it
     hasBaseline = true;
     opLog.clear();
+}
+
+inline void LoopbackHub::publishPresence(LoopbackTransport* from, const juce::var& presence)
+{
+    for (auto* m : members)          // everyone except the sender; presence is never logged
+        if (m != from)
+            m->deliverPresence(presence);
 }
 
 inline void LoopbackHub::sendBacklogTo(LoopbackTransport* t)

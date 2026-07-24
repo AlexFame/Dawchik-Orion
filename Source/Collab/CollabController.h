@@ -99,6 +99,19 @@ public:
             session->sendLocal(op);
     }
 
+    // ---- Live presence (Figma-style cursors) ----
+    void publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
+                         double beat, int trackIndex, bool overTimeline)
+    {
+        if (session != nullptr)
+            session->publishPresence(displayName, colourArgb, beat, trackIndex, overTimeline);
+    }
+
+    std::vector<PeerPresence> peers() const
+    {
+        return session != nullptr ? session->peers() : std::vector<PeerPresence> {};
+    }
+
     // Fired after a peer's op mutated the ProjectState — MainComponent repaints / refreshes here.
     std::function<void()> onProjectChanged;
 

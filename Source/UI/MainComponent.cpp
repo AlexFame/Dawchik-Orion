@@ -2393,6 +2393,14 @@ void MainComponent::timerCallback()
     // Costs nothing when solo (isActive() is false), and even in a session it runs at ~10 Hz rather
     // than the timer's 60 — each sync copies the project to diff it, and a tenth of a second is
     // still imperceptible next to network latency.
+    // Live cursors need a faster cadence than edits to feel smooth, but far slower than the 60 Hz
+    // timer — presence is ephemeral and must never crowd out real ops.
+    if (collabController.isActive() && ++collabPresenceCounter >= 3)
+    {
+        collabPresenceCounter = 0;
+        publishJamPresence();
+    }
+
     if (collabController.isActive() && ++collabSyncCounter >= 6)
     {
         collabSyncCounter = 0;
