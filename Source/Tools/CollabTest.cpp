@@ -483,10 +483,58 @@ int main()
             check(pb.getTracks()[0].clips.size() == 1, "track-props sync left the clip intact");
         }
 
+        // Pitch slides (piano-roll glides) ride inside the clip, so whole-clip sync carries them
+        // for free — including curve and LFO/vibrato on each point.
+        {
+            PitchSlide slide;
+            slide.sourcePitch = 60;
+            slide.sourceNoteStartBeat = 0.0;
+            slide.points.push_back({ 0.0, 60.0, 0.5, 2, 1.5, 4.0 });
+            slide.points.push_back({ 2.0, 67.0, -0.3, 0, 0.0, 3.0 });
+            pa.getTracks()[0].clips[0].pitchSlides.push_back(slide);
+            rec.sync();
+
+            const auto& ps = pb.getTracks()[0].clips[0].pitchSlides;
+            check(ps.size() == 1 && ps[0].points.size() == 2
+                      && ps[0].points[0].lfoShape == 2
+                      && std::abs(ps[0].points[0].curve - 0.5) < 1.0e-9
+                      && std::abs(ps[0].points[1].pitch - 67.0) < 1.0e-9,
+                  "pitch slide (glide) synced incl. curve + LFO");
+        }
+
         pa.getTracks()[0].clips.clear();
         rec.sync();
         check(pb.getTracks()[0].clips.empty(), "clip deletion synced");
         check(rec.sync() == 0, "reconciler silent again once caught up");
+
+        // Mixer: aux buses (with an insert) and the master chain sync live.
+        {
+            BusState bus;
+            bus.name = "Reverb Bus";
+            bus.volumeDb = -3.0;
+            TrackState::InsertFx fx;
+            fx.pluginId = "Valhalla:Room";
+            fx.pluginName = "ValhallaRoom";
+            fx.stateBase64 = "Zm9vYmFy";
+            bus.inserts.push_back(fx);
+            pa.getBuses().push_back(std::move(bus));
+
+            TrackState::InsertFx masterFx;
+            masterFx.pluginId = "FabFilter:ProL2";
+            masterFx.pluginName = "Pro-L 2";
+            pa.getMasterInserts().push_back(masterFx);
+
+            rec.sync();
+
+            check(pb.getBuses().size() == 1 && pb.getBuses()[0].name == "Reverb Bus"
+                      && pb.getBuses()[0].inserts.size() == 1
+                      && pb.getBuses()[0].inserts[0].pluginId == "Valhalla:Room"
+                      && pb.getBuses()[0].inserts[0].stateBase64 == "Zm9vYmFy",
+                  "aux bus + its insert synced");
+            check(pb.getMasterInserts().size() == 1
+                      && pb.getMasterInserts()[0].pluginId == "FabFilter:ProL2",
+                  "master insert synced");
+        }
 
         // Echo-storm guard: a change that arrived FROM the peer must not be broadcast back.
         const auto remoteId = cb.newId();

@@ -39,5 +39,12 @@ public:
     // folder info…) as one blob rather than enumerating fields, so none silently desyncs.
     static juce::var trackToVar(const TrackState& track);
     static TrackState trackFromVar(const juce::var& source);
+
+    // Mixer state (aux buses + their inserts, and the master insert chain) in the same on-disk
+    // shape, so live mixer edits sync through collab ops and match the project file / snapshot.
+    static juce::var busesToVar(const ProjectState& projectState);
+    static void      busesFromVar(ProjectState& projectState, const juce::var& source);
+    static juce::var masterInsertsToVar(const ProjectState& projectState);
+    static void      masterInsertsFromVar(ProjectState& projectState, const juce::var& source);
 };
 }  // namespace orion

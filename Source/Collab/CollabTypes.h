@@ -102,6 +102,10 @@ enum class OpType
     removeSlide,
     editSlide,
 
+    // Mixer: aux buses (+ their inserts) and the master insert chain, each synced as one blob.
+    replaceBuses,
+    replaceMasterInserts,
+
     // Project-wide / transport (shared clock).
     setTempo,
     setTransport,       // play / stop / position — keeps everyone phase-locked
@@ -241,6 +245,8 @@ inline juce::String toString(OpType t)
         case OpType::addSlide:         return "addSlide";
         case OpType::removeSlide:      return "removeSlide";
         case OpType::editSlide:        return "editSlide";
+        case OpType::replaceBuses:     return "replaceBuses";
+        case OpType::replaceMasterInserts: return "replaceMasterInserts";
         case OpType::setTempo:         return "setTempo";
         case OpType::setTransport:     return "setTransport";
         case OpType::replaceClipNotes: return "replaceClipNotes";

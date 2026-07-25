@@ -44,6 +44,10 @@ namespace ops
 {
     Op setTempo(double bpm);
 
+    // Whole-mixer sync (buses + master inserts) from ProjectSerializer data.
+    Op replaceBuses(const juce::var& busesData);
+    Op replaceMasterInserts(const juce::var& insertsData);
+
     Op addTrack(EntityId newTrackId, const juce::String& name, bool isMidiTrack);
     Op removeTrack(EntityId trackId);
 

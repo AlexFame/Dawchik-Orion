@@ -46,6 +46,8 @@ CollabReconciler::Shadow CollabReconciler::snapshotOfLive() const
 {
     Shadow s;
     s.tempoBpm = live.getTempoBpm();
+    s.busesHash = juce::JSON::toString(ProjectSerializer::busesToVar(live), true).hashCode64();
+    s.masterInsertsHash = juce::JSON::toString(ProjectSerializer::masterInsertsToVar(live), true).hashCode64();
 
     for (const auto& t : live.getTracks())
     {
@@ -186,6 +188,17 @@ int CollabReconciler::sync()
     if (differs(current.tempoBpm, shadow.tempoBpm))
     {
         controller.broadcast(ops::setTempo(current.tempoBpm));
+        ++sent;
+    }
+
+    if (current.busesHash != shadow.busesHash)
+    {
+        controller.broadcast(ops::replaceBuses(ProjectSerializer::busesToVar(live)));
+        ++sent;
+    }
+    if (current.masterInsertsHash != shadow.masterInsertsHash)
+    {
+        controller.broadcast(ops::replaceMasterInserts(ProjectSerializer::masterInsertsToVar(live)));
         ++sent;
     }
 

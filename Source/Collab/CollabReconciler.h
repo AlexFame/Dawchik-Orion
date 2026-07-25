@@ -65,6 +65,8 @@ private:
         double tempoBpm { 0.0 };
         std::vector<TrackShadow> tracks;   // in project order
         std::vector<ClipShadow> clips;     // flat across all tracks
+        juce::int64 busesHash { 0 };       // aux buses + their inserts, as one blob
+        juce::int64 masterInsertsHash { 0 };
     };
 
     void stampNewEntities();               // give ids to anything the DAW just created

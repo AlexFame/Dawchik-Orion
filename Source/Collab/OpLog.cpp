@@ -120,6 +120,20 @@ namespace oplog
                 state.setTempoBpm(asNum(op.payload, "bpm", state.getTempoBpm()));
                 return true;
 
+            case OpType::replaceBuses:
+            {
+                const juce::ScopedLock sl(state.getAudioEditLock());
+                ProjectSerializer::busesFromVar(state, op.payload.getProperty("buses", juce::var()));
+                return true;
+            }
+
+            case OpType::replaceMasterInserts:
+            {
+                const juce::ScopedLock sl(state.getAudioEditLock());
+                ProjectSerializer::masterInsertsFromVar(state, op.payload.getProperty("inserts", juce::var()));
+                return true;
+            }
+
             case OpType::addTrack:
             {
                 const juce::ScopedLock sl(state.getAudioEditLock());
@@ -394,6 +408,20 @@ namespace ops
     {
         Op op; op.type = OpType::setTempo;
         op.payload = makePayload({ { "bpm", bpm } });
+        return op;
+    }
+
+    Op replaceBuses(const juce::var& busesData)
+    {
+        Op op; op.type = OpType::replaceBuses;
+        op.payload = makePayload({ { "buses", busesData } });
+        return op;
+    }
+
+    Op replaceMasterInserts(const juce::var& insertsData)
+    {
+        Op op; op.type = OpType::replaceMasterInserts;
+        op.payload = makePayload({ { "inserts", insertsData } });
         return op;
     }
 

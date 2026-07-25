@@ -470,6 +470,101 @@ TimelineClip ProjectSerializer::clipFromVar(const juce::var& source)
     return timelineClipFromVar(source);
 }
 
+namespace
+{
+// Standalone insert / bus (de)serialisers matching the on-disk shape exactly, so the collab
+// snapshot and the mixer ops share one format with the project file without touching the tested
+// file-format code above.
+juce::var insertFxToVarLocal(const orion::TrackState::InsertFx& fx)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty("pluginId", fx.pluginId);
+    o->setProperty("pluginName", fx.pluginName);
+    o->setProperty("stateBase64", fx.stateBase64);
+    o->setProperty("bypassed", fx.bypassed);
+    return juce::var(o);
+}
+
+orion::TrackState::InsertFx insertFxFromVarLocal(const juce::var& v)
+{
+    orion::TrackState::InsertFx fx;
+    if (auto* o = v.getDynamicObject())
+    {
+        fx.pluginId = o->getProperty("pluginId").toString();
+        fx.pluginName = o->getProperty("pluginName").toString();
+        fx.stateBase64 = o->getProperty("stateBase64").toString();
+        fx.bypassed = static_cast<bool>(o->getProperty("bypassed"));
+    }
+    return fx;
+}
+
+juce::var insertArrayToVar(const std::vector<orion::TrackState::InsertFx>& inserts)
+{
+    juce::Array<juce::var> arr;
+    for (const auto& fx : inserts)
+        arr.add(insertFxToVarLocal(fx));
+    return juce::var(arr);
+}
+
+std::vector<orion::TrackState::InsertFx> insertArrayFromVar(const juce::var& v)
+{
+    std::vector<orion::TrackState::InsertFx> out;
+    if (auto* arr = v.getArray())
+        for (const auto& fxVar : *arr)
+            out.push_back(insertFxFromVarLocal(fxVar));
+    return out;
+}
+} // namespace
+
+juce::var ProjectSerializer::busesToVar(const ProjectState& projectState)
+{
+    juce::Array<juce::var> arr;
+    for (const auto& bus : projectState.getBuses())
+    {
+        auto* b = new juce::DynamicObject();
+        b->setProperty("name", bus.name);
+        b->setProperty("colour", static_cast<int>(bus.colour.getARGB()));
+        b->setProperty("volumeDb", bus.volumeDb);
+        b->setProperty("pan", bus.pan);
+        b->setProperty("muted", bus.muted);
+        b->setProperty("id", juce::String(bus.id));
+        b->setProperty("inserts", insertArrayToVar(bus.inserts));
+        arr.add(juce::var(b));
+    }
+    return juce::var(arr);
+}
+
+void ProjectSerializer::busesFromVar(ProjectState& projectState, const juce::var& source)
+{
+    std::vector<BusState> newBuses;
+    if (auto* arr = source.getArray())
+        for (const auto& busVar : *arr)
+            if (auto* b = busVar.getDynamicObject())
+            {
+                BusState bus;
+                bus.name = b->getProperty("name").toString();
+                if (bus.name.isEmpty()) bus.name = "Bus";
+                bus.colour = juce::Colour(static_cast<juce::uint32>(static_cast<int>(b->getProperty("colour"))));
+                bus.volumeDb = static_cast<double>(b->getProperty("volumeDb"));
+                bus.pan = juce::jlimit(-1.0, 1.0, static_cast<double>(b->getProperty("pan")));
+                bus.muted = static_cast<bool>(b->getProperty("muted"));
+                bus.id = static_cast<juce::uint64>(b->getProperty("id").toString().getLargeIntValue());
+                bus.inserts = insertArrayFromVar(b->getProperty("inserts"));
+                newBuses.push_back(std::move(bus));
+            }
+    projectState.getBuses() = std::move(newBuses);
+}
+
+juce::var ProjectSerializer::masterInsertsToVar(const ProjectState& projectState)
+{
+    return insertArrayToVar(projectState.getMasterInserts());
+}
+
+void ProjectSerializer::masterInsertsFromVar(ProjectState& projectState, const juce::var& source)
+{
+    projectState.getMasterInserts() = insertArrayFromVar(source);
+}
+
 juce::var ProjectSerializer::trackToVar(const TrackState& track)
 {
     return trackStateToVar(track);
