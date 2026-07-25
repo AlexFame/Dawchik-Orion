@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CollabServer.h"
+#include "OpLog.h"
 #include "CollabSession.h"
 #include "CollabTransport.h"
 #include "CollabTypes.h"
@@ -39,6 +40,7 @@ public:
         transport = std::move(transportToOwn);
         session = std::make_unique<CollabSession>(state, *transport, actorSalt);
         session->onRemoteApplied = [this] { if (onProjectChanged) onProjectChanged(); };
+        session->onRemoteTransport = [this](bool playing, double beat) { if (onRemoteTransport) onRemoteTransport(playing, beat); };
         session->assignInitialIds();
     }
 
@@ -114,6 +116,15 @@ public:
 
     // Fired after a peer's op mutated the ProjectState — MainComponent repaints / refreshes here.
     std::function<void()> onProjectChanged;
+
+    // A peer started/stopped the shared transport. MainComponent drives its own transport to match.
+    std::function<void(bool playing, double beat)> onRemoteTransport;
+
+    void sendTransport(bool playing, double beat)
+    {
+        if (session != nullptr)
+            broadcast(collab::ops::setTransport(playing, beat));
+    }
 
     // One-line health summary for the Jam panel. A stalled session is otherwise invisible: this
     // says whether the socket is up, how many clients the server sees, and whether ops are

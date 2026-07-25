@@ -122,6 +122,16 @@ void CollabSession::handleIncoming(const Op& op)
         return;
 
     ++opsReceived;
+
+    // Transport isn't ProjectState — route it to the dedicated handler.
+    if (op.type == OpType::setTransport)
+    {
+        if (onRemoteTransport)
+            onRemoteTransport(static_cast<bool>(op.payload.getProperty("playing", false)),
+                              static_cast<double>(op.payload.getProperty("beat", 0.0)));
+        return;
+    }
+
     if (oplog::apply(state, op))
     {
         ++opsApplied;

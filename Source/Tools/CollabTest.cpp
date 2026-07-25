@@ -325,6 +325,27 @@ int main()
         check(! host.isHosting(), "embedded server torn down on disconnect");
     }
 
+    // ---- Shared transport: routed to a handler, never applied to ProjectState. ----
+    {
+        ProjectState pa, pb;
+        LoopbackHub h4;
+        CollabController ca(pa), cb(pb);
+
+        bool bPlaying = false;
+        double bBeat = -1.0;
+        cb.onRemoteTransport = [&](bool playing, double beat) { bPlaying = playing; bBeat = beat; };
+
+        ca.connect(std::make_unique<LoopbackTransport>(h4, "Ta"), 0x0E1);
+        cb.connect(std::make_unique<LoopbackTransport>(h4, "Tb"), 0x0E2);
+
+        ca.sendTransport(true, 12.5);
+        check(bPlaying && std::abs(bBeat - 12.5) < 1.0e-9, "peer received play at the shared beat");
+        check(pb.getTracks().empty(), "transport op did not touch ProjectState");
+
+        ca.sendTransport(false, 20.0);
+        check(! bPlaying && std::abs(bBeat - 20.0) < 1.0e-9, "peer received stop at position");
+    }
+
     // ---- Joining a session already in progress: the newcomer must get the WHOLE project. ----
     {
         auto pump = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };

@@ -411,6 +411,13 @@ namespace ops
         return op;
     }
 
+    Op setTransport(bool playing, double beat)
+    {
+        Op op; op.type = OpType::setTransport;
+        op.payload = makePayload({ { "playing", playing }, { "beat", beat } });
+        return op;
+    }
+
     Op replaceBuses(const juce::var& busesData)
     {
         Op op; op.type = OpType::replaceBuses;

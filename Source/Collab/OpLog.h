@@ -44,6 +44,10 @@ namespace ops
 {
     Op setTempo(double bpm);
 
+    // Shared transport (play/stop + start position). Routed by the session to a transport handler,
+    // NOT applied to ProjectState (the transport lives in TransportEngine).
+    Op setTransport(bool playing, double beat);
+
     // Whole-mixer sync (buses + master inserts) from ProjectSerializer data.
     Op replaceBuses(const juce::var& busesData);
     Op replaceMasterInserts(const juce::var& insertsData);

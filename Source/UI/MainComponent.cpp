@@ -2401,6 +2401,9 @@ void MainComponent::timerCallback()
         publishJamPresence();
     }
 
+    // Shared transport: broadcast our play/stop the instant it flips.
+    syncJamTransportOut();
+
     if (collabController.isActive() && ++collabSyncCounter >= 6)
     {
         collabSyncCounter = 0;

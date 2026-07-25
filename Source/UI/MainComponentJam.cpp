@@ -82,6 +82,46 @@ void MainComponent::updateJamDiagnostics()
     jamSession.setDiagnostics(collabController.diagnosticsLine());
 }
 
+void MainComponent::applyRemoteJamTransport(bool playing, double beat)
+{
+    // A peer hit play/stop. Match it, driving our transport through the same UI path so audio
+    // sources spin up correctly — not a bare TransportEngine::play() which wouldn't start playback.
+    // The guard stops our own timer poll from re-broadcasting this as a local change (feedback loop).
+    jamApplyingRemoteTransport = true;
+
+    if (playing)
+    {
+        transportEngine.setPlayheadBeat(beat);
+        if (! transportEngine.isPlaying())
+            toggleTransportFromUi();
+    }
+    else
+    {
+        if (transportEngine.isPlaying())
+            toggleTransportFromUi();
+        transportEngine.setPlayheadBeat(beat);
+    }
+
+    jamLastSentPlaying = transportEngine.isPlaying();
+    jamApplyingRemoteTransport = false;
+    updateTransportLabels();
+}
+
+void MainComponent::syncJamTransportOut()
+{
+    // Broadcast only the play/stop TRANSITION (not every position tick — that would flood the wire).
+    // The start position rides with the play event, so peers begin from the same beat.
+    if (! collabController.isActive() || jamApplyingRemoteTransport)
+        return;
+
+    const bool playing = transportEngine.isPlaying();
+    if (playing != jamLastSentPlaying)
+    {
+        jamLastSentPlaying = playing;
+        collabController.sendTransport(playing, transportEngine.getPlayheadBeat());
+    }
+}
+
 void MainComponent::refreshAfterRemoteJamEdit()
 {
     // A peer's op (or the joining snapshot) has already mutated projectState. Re-baseline FIRST so
@@ -110,6 +150,8 @@ void MainComponent::startJamHosting()
     }
 
     collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
+    collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
+    jamLastSentPlaying = transportEngine.isPlaying();
 
     if (! collabController.hostSession(jamDefaultPort, localActorId(), randomActorSalt()))
     {
@@ -158,6 +200,8 @@ void MainComponent::joinJamSession()
             return;
 
         collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
+        collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
+        jamLastSentPlaying = transportEngine.isPlaying();
 
         if (! collabController.joinSession(address, jamDefaultPort, localActorId(), randomActorSalt()))
         {

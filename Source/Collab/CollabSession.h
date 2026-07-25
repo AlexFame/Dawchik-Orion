@@ -64,6 +64,10 @@ public:
     // Fired after a PEER op has been applied to the ProjectState, so the UI can refresh.
     std::function<void()> onRemoteApplied;
 
+    // A PEER changed the shared transport (play/stop + start beat). Routed here instead of the
+    // op-log because the transport lives outside ProjectState.
+    std::function<void(bool playing, double beat)> onRemoteTransport;
+
     // Live counters — surfaced in the Jam panel so a stalled session can be diagnosed from the UI
     // instead of guessing which link in the chain is broken.
     int opsSent { 0 };

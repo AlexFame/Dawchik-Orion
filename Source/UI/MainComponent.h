@@ -190,6 +190,8 @@ private:
     void refreshAfterRemoteJamEdit();
     void updateJamDiagnostics();
     void publishJamPresence();
+    void syncJamTransportOut();
+    void applyRemoteJamTransport(bool playing, double beat);
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();
@@ -417,6 +419,8 @@ private:
     int collabSyncCounter { 0 };                  // throttles the Jam reconciler to ~10 Hz
     int collabDiagnosticsCounter { 0 };           // refreshes the Jam health line ~1 Hz
     int collabPresenceCounter { 0 };              // broadcasts our live cursor ~20 Hz
+    bool jamApplyingRemoteTransport { false };    // guards the transport feedback loop
+    bool jamLastSentPlaying { false };            // last play state we broadcast
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;
