@@ -1,6 +1,5 @@
 #include "MainComponent.h"
 
-#include <unistd.h>
 
 // Multiplayer Jam wiring — the whole seam between Orion and the Collab module lives here.
 //
@@ -41,23 +40,6 @@ collab::EntityId randomActorSalt()
     return static_cast<collab::EntityId>(juce::Random::getSystemRandom().nextInt(0xffff));
 }
 
-// Jam sessions involve two processes, so a stalled one can't be diagnosed from a single window.
-// Each instance appends its state to its own log file, which makes the whole picture readable
-// after the fact: ~/Library/Logs/Orion/collab-<pid>.log
-void jamLog(const juce::String& line)
-{
-    static const juce::File logFile = []
-    {
-        auto f = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
-                     .getChildFile("Library/Logs/Orion")
-                     .getChildFile("collab-" + juce::String(static_cast<int>(::getpid())) + ".log");
-        f.getParentDirectory().createDirectory();
-        f.replaceWithText({});
-        return f;
-    }();
-
-    logFile.appendText(juce::Time::getCurrentTime().toString(false, true, true, true) + "  " + line + "\n");
-}
 }  // namespace
 
 // A stable colour per collaborator, derived from their actor id so both ends agree without any
@@ -83,9 +65,6 @@ void MainComponent::publishJamPresence()
     const auto overTimeline = arrangementTimeline.pointToProjectPosition(
         arrangementTimeline.getMouseXYRelative(), beat, contentY);
 
-    jamPointerOverTimeline = overTimeline;
-    jamPointerDebug = arrangementTimeline.describePointerMapping(arrangementTimeline.getMouseXYRelative());
-
     const auto me = localActorId();
     collabController.publishPresence(localDisplayName(), colourForActor(me), beat, contentY, overTimeline);
 
@@ -95,18 +74,12 @@ void MainComponent::publishJamPresence()
         if (p.overTimeline)
             cursors.push_back({ p.name, juce::Colour(p.colourArgb), p.beat, p.contentY });
 
-    jamRemoteCursorCount = static_cast<int>(cursors.size());
     arrangementTimeline.setRemoteCursors(std::move(cursors));
 }
 
 void MainComponent::updateJamDiagnostics()
 {
-    auto line = collabController.diagnosticsLine();
-    line << "  myPointerOnLane " << (jamPointerOverTimeline ? 1 : 0)
-         << "  drawnCursors " << jamRemoteCursorCount
-         << "  | " << jamPointerDebug;
-    jamSession.setDiagnostics(line);
-    jamLog(line);
+    jamSession.setDiagnostics(collabController.diagnosticsLine());
 }
 
 void MainComponent::refreshAfterRemoteJamEdit()
@@ -141,7 +114,7 @@ void MainComponent::startJamHosting()
     if (! collabController.hostSession(jamDefaultPort, localActorId(), randomActorSalt()))
     {
         collabController.onProjectChanged = nullptr;
-        jamLog("EVENT host FAILED"); jamSession.setSessionStatus(false, "Could not host on port " + juce::String(jamDefaultPort)
+        jamSession.setSessionStatus(false, "Could not host on port " + juce::String(jamDefaultPort)
                                                + " - already in use?");
         return;
     }
@@ -151,7 +124,7 @@ void MainComponent::startJamHosting()
     collabReconciler.captureBaseline();
 
     const auto address = juce::IPAddress::getLocalAddress().toString();
-    jamLog("EVENT host ok"); jamSession.setSessionStatus(true, "HOSTING  -  " + address + ":" + juce::String(jamDefaultPort)
+    jamSession.setSessionStatus(true, "HOSTING  -  " + address + ":" + juce::String(jamDefaultPort)
                                           + "  (same Mac: 127.0.0.1)");
 }
 
@@ -189,7 +162,7 @@ void MainComponent::joinJamSession()
         if (! collabController.joinSession(address, jamDefaultPort, localActorId(), randomActorSalt()))
         {
             collabController.onProjectChanged = nullptr;
-            jamLog("EVENT join FAILED"); jamSession.setSessionStatus(false, "Could not reach " + address + ":"
+            jamSession.setSessionStatus(false, "Could not reach " + address + ":"
                                                    + juce::String(jamDefaultPort)
                                                    + " - is the host up?");
             return;
@@ -197,7 +170,7 @@ void MainComponent::joinJamSession()
 
         // The host's project arrives as a snapshot moments later and re-baselines us again.
         collabReconciler.captureBaseline();
-        jamLog("EVENT join ok"); jamSession.setSessionStatus(true, "JOINED  -  " + address + ":" + juce::String(jamDefaultPort));
+        jamSession.setSessionStatus(true, "JOINED  -  " + address + ":" + juce::String(jamDefaultPort));
     }), false);
 }
 

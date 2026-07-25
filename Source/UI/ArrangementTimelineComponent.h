@@ -104,9 +104,6 @@ public:
     // own cursor in coordinates that mean the same thing on every collaborator's screen.
     bool pointToProjectPosition(juce::Point<int> point, double& beatOut, double& contentYOut) const;
 
-    // Diagnostics only: what the timeline thinks its geometry is, for tracking down why a pointer
-    // position fails to map onto a track lane.
-    juce::String describePointerMapping(juce::Point<int> point) const;
 
     void paint(juce::Graphics& g) override;
     void resized() override;

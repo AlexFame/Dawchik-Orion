@@ -1983,20 +1983,6 @@ bool ArrangementTimelineComponent::pointToProjectPosition(juce::Point<int> point
     return true;
 }
 
-juce::String ArrangementTimelineComponent::describePointerMapping(juce::Point<int> point) const
-{
-    juce::String s;
-    s << "mouse(" << point.x << "," << point.y << ") comp(" << getWidth() << "x" << getHeight()
-      << ") hdr" << trackHeaderWidth << " tracks" << static_cast<int>(project.getTracks().size());
-
-    if (! project.getTracks().empty())
-    {
-        const auto lane = getTrackLaneBounds(0);
-        s << " lane0(" << lane.getX() << "," << lane.getY() << "," << lane.getWidth() << "x" << lane.getHeight() << ")";
-    }
-    return s;
-}
-
 void ArrangementTimelineComponent::drawRemoteCursors(juce::Graphics& g)
 {
     if (remoteCursors.empty())

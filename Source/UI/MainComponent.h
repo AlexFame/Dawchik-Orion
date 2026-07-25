@@ -417,9 +417,6 @@ private:
     int collabSyncCounter { 0 };                  // throttles the Jam reconciler to ~10 Hz
     int collabDiagnosticsCounter { 0 };           // refreshes the Jam health line ~1 Hz
     int collabPresenceCounter { 0 };              // broadcasts our live cursor ~20 Hz
-    bool jamPointerOverTimeline { false };        // diagnostics: is OUR pointer on a track lane
-    int  jamRemoteCursorCount { 0 };              // diagnostics: peer cursors handed to the timeline
-    juce::String jamPointerDebug;                 // diagnostics: raw pointer/lane geometry
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;
