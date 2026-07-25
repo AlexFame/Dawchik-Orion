@@ -31,6 +31,11 @@ public:
 
     // Live health line (link state, ops in/out, connected clients) shown in the header.
     void setDiagnostics(const juce::String& text);
+
+    // Real session roster, pushed in by the host: the local user plus each connected peer, with the
+    // colour they use for their cursor. Replaces the mockup participant list.
+    struct RosterMember { juce::String name; juce::uint32 colourArgb; bool isLocal; };
+    void setRoster(const std::vector<RosterMember>& members);
     std::function<bool(bool)> onMicEnabledChanged;
     std::function<bool(bool)> onCameraEnabledChanged;
     std::function<void(bool)> onShareEnabledChanged;
@@ -67,6 +72,13 @@ private:
         bool muted { false };
         bool cameraOff { false };
         bool sharing { false };
+
+        bool operator== (const Participant& o) const
+        {
+            return name == o.name && colour == o.colour && muted == o.muted
+                && cameraOff == o.cameraOff && sharing == o.sharing;
+        }
+        bool operator!= (const Participant& o) const { return ! (*this == o); }
     };
 
     struct BeatLane
@@ -101,11 +113,10 @@ private:
     void drawParticipantsPanel(juce::Graphics&, juce::Rectangle<float>, bool compact);
     void drawSetupPanel(juce::Graphics&, juce::Rectangle<float>, bool compact);
 
-    std::array<Participant, 4> participants {
-        Participant { "Alex R.", juce::Colour(0xffd9785f), true, true, false },
-        Participant { "Maya L.", juce::Colour(0xff6957a8), true, true, false },
-        Participant { "Jordan T.", juce::Colour(0xffa8774f), true, true, false },
-        Participant { "Sophie K.", juce::Colour(0xffd2a98e), true, true, false }
+    // Index 0 is always the local user; entries after it are live peers pushed in from the session.
+    // Seeded with just "You" — the old hardcoded Alex/Maya/Jordan/Sophie were a mockup.
+    std::vector<Participant> participants {
+        Participant { "You", juce::Colour(0xffd9785f), true, true, false }
     };
     std::vector<std::pair<juce::String, juce::String>> chatMessages;
     bool playlistDragOver { false };

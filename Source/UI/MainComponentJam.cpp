@@ -80,6 +80,14 @@ void MainComponent::publishJamPresence()
 void MainComponent::updateJamDiagnostics()
 {
     jamSession.setDiagnostics(collabController.diagnosticsLine());
+
+    // Real roster: this machine first, then every live peer with the colour it uses for its cursor.
+    std::vector<JamSessionComponent::RosterMember> roster;
+    const auto me = localActorId();
+    roster.push_back({ localDisplayName() + " (you)", colourForActor(me), true });
+    for (const auto& p : collabController.peers())
+        roster.push_back({ p.name, p.colourArgb, false });
+    jamSession.setRoster(roster);
 }
 
 void MainComponent::applyRemoteJamTransport(bool playing, double beat)

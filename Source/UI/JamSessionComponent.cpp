@@ -229,12 +229,7 @@ JamSessionComponent::JamSessionComponent()
 {
     setOpaque(true);
     addMouseListener(this, true);
-    chatMessages = {
-        { "Alex R.", "Drop the drum bus here, I'll add a bass layer." },
-        { "Maya L.", "Send the hat loop too, I want to tighten the groove." },
-        { "Jordan T.", "If you select the whole section, we can review it together." },
-        { "Sophie K.", "Chat stays clean. Blocks come in as attachments." }
-    };
+    chatMessages.clear();
 
     for (auto* button : { &createButton, &joinButton, &exitButton, &chatTab, &participantsTab, &setupTab,
                           &micButton, &cameraButton, &shareButton, &tipButton, &emoteButton, &settingsButton,
@@ -566,7 +561,13 @@ void JamSessionComponent::paint(juce::Graphics& g)
         {
             auto tile = tiles.removeFromLeft(tileW);
             if (i != 3) tiles.removeFromLeft(tileGap);
-            drawParticipantTile(g, tile, participants[static_cast<std::size_t>(i)], false);
+            if (i < static_cast<int>(participants.size()))
+                drawParticipantTile(g, tile, participants[static_cast<std::size_t>(i)], false);
+            else
+            {
+                g.setColour(theme::surface::primary.withAlpha(0.35f));
+                g.fillRoundedRectangle(tile, 8.0f);
+            }
         }
 
         auto chatArea = chat.reduced(16.0f);
@@ -643,7 +644,13 @@ void JamSessionComponent::paint(juce::Graphics& g)
     {
         auto tile = videoStrip.removeFromLeft(tileW);
         if (i != 3) videoStrip.removeFromLeft(tileGap);
-        drawParticipantTile(g, tile, participants[static_cast<std::size_t>(i)], false);
+        if (i < static_cast<int>(participants.size()))
+            drawParticipantTile(g, tile, participants[static_cast<std::size_t>(i)], false);
+        else
+        {
+            g.setColour(theme::surface::primary.withAlpha(0.35f));
+            g.fillRoundedRectangle(tile, 8.0f);
+        }
     }
 
     auto workspace = stage.reduced(16.0f);
@@ -958,6 +965,42 @@ void JamSessionComponent::addChatMessage(const juce::String& name, const juce::S
     if (chatMessages.size() > 40)
         chatMessages.erase(chatMessages.begin());
     repaint();
+}
+
+void JamSessionComponent::setRoster(const std::vector<RosterMember>& members)
+{
+    std::vector<Participant> next;
+    next.reserve(members.size());
+    for (const auto& m : members)
+    {
+        Participant p;
+        p.name = m.name;
+        p.colour = juce::Colour(m.colourArgb);
+        if (m.isLocal)
+        {
+            // The local row mirrors this machine's real mic/camera/share state.
+            p.muted = ! micEnabled;
+            p.cameraOff = ! cameraEnabled;
+            p.sharing = sharingEnabled;
+        }
+        else
+        {
+            // Peer mic/cam state isn't transmitted yet — show them present.
+            p.muted = false;
+            p.cameraOff = true;
+            p.sharing = false;
+        }
+        next.push_back(std::move(p));
+    }
+
+    if (next.empty())   // never leave the local row absent; other code indexes participants[0]
+        next.push_back(Participant { "You", juce::Colour(0xffd9785f), ! micEnabled, ! cameraEnabled, sharingEnabled });
+
+    if (next != participants)
+    {
+        participants = std::move(next);
+        repaint();
+    }
 }
 
 void JamSessionComponent::setDiagnostics(const juce::String& text)
