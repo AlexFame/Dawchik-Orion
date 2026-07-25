@@ -39,7 +39,10 @@ struct PeerPresence
     juce::String name;
     juce::uint32 colourArgb { 0xff9e9e9e };
     double       beat { 0.0 };
-    int          trackIndex { -1 };
+    // Vertical position in the timeline's CONTENT space (scroll already removed), so it lands at
+    // the same musical row on a peer who has scrolled differently. A track index alone would pin
+    // the cursor to one height and lose all vertical movement between/below tracks.
+    double       contentY { 0.0 };
     bool         overTimeline { false };
     juce::int64  lastSeenMs { 0 };
 };

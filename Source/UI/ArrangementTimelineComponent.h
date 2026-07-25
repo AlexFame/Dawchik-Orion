@@ -95,14 +95,18 @@ public:
         juce::String name;
         juce::Colour colour { juce::Colours::grey };
         double beat { 0.0 };
-        int trackIndex { -1 };
+        double contentY { 0.0 };   // vertical position with scroll removed
     };
 
     void setRemoteCursors(std::vector<RemoteCursor> cursors);
 
     // Where a point over the arrangement sits musically (beat + track row). Used to broadcast our
     // own cursor in coordinates that mean the same thing on every collaborator's screen.
-    bool pointToProjectPosition(juce::Point<int> point, double& beatOut, int& trackIndexOut) const;
+    bool pointToProjectPosition(juce::Point<int> point, double& beatOut, double& contentYOut) const;
+
+    // Diagnostics only: what the timeline thinks its geometry is, for tracking down why a pointer
+    // position fails to map onto a track lane.
+    juce::String describePointerMapping(juce::Point<int> point) const;
 
     void paint(juce::Graphics& g) override;
     void resized() override;

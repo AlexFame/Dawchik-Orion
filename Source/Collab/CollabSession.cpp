@@ -56,15 +56,16 @@ void CollabSession::requestBacklog()
 }
 
 void CollabSession::publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
-                                   double beat, int trackIndex, bool overTimeline)
+                                   double beat, double contentY, bool overTimeline)
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty("actor", transport.localActor());
     obj->setProperty("name", displayName);
     obj->setProperty("colour", static_cast<juce::int64>(colourArgb));
     obj->setProperty("beat", beat);
-    obj->setProperty("track", trackIndex);
+    obj->setProperty("y", contentY);
     obj->setProperty("over", overTimeline);
+    ++presenceSent;
     transport.sendPresence(juce::var(obj));
 }
 
@@ -78,9 +79,10 @@ void CollabSession::handlePresence(const juce::var& presence)
     p.name = presence.getProperty("name", juce::String()).toString();
     p.colourArgb = static_cast<juce::uint32>(static_cast<juce::int64>(presence.getProperty("colour", 0)));
     p.beat = static_cast<double>(presence.getProperty("beat", 0.0));
-    p.trackIndex = static_cast<int>(presence.getProperty("track", -1));
+    p.contentY = static_cast<double>(presence.getProperty("y", 0.0));
     p.overTimeline = static_cast<bool>(presence.getProperty("over", false));
     p.lastSeenMs = juce::Time::currentTimeMillis();
+    ++presenceReceived;
     presenceByActor[p.actor] = p;
 }
 

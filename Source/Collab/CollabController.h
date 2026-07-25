@@ -101,10 +101,10 @@ public:
 
     // ---- Live presence (Figma-style cursors) ----
     void publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
-                         double beat, int trackIndex, bool overTimeline)
+                         double beat, double contentY, bool overTimeline)
     {
         if (session != nullptr)
-            session->publishPresence(displayName, colourArgb, beat, trackIndex, overTimeline);
+            session->publishPresence(displayName, colourArgb, beat, contentY, overTimeline);
     }
 
     std::vector<PeerPresence> peers() const
@@ -129,6 +129,10 @@ public:
           << "  in " << session->opsReceived
           << "  applied " << session->opsApplied
           << "  snap " << session->snapshotsReceived;
+
+        s << "  presOut " << session->presenceSent
+          << "  presIn " << session->presenceReceived
+          << "  peers " << static_cast<int>(session->peers().size());
 
         if (embeddedServer != nullptr)
             s << "  clients " << embeddedServer->numConnections();

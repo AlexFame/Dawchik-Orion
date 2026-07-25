@@ -79,25 +79,32 @@ void MainComponent::publishJamPresence()
     // Where our pointer is over the arrangement, in musical coordinates. Polling the component
     // beats hooking every mouse handler: no existing edit path has to change.
     double beat = 0.0;
-    int trackIndex = -1;
+    double contentY = 0.0;
     const auto overTimeline = arrangementTimeline.pointToProjectPosition(
-        arrangementTimeline.getMouseXYRelative(), beat, trackIndex);
+        arrangementTimeline.getMouseXYRelative(), beat, contentY);
+
+    jamPointerOverTimeline = overTimeline;
+    jamPointerDebug = arrangementTimeline.describePointerMapping(arrangementTimeline.getMouseXYRelative());
 
     const auto me = localActorId();
-    collabController.publishPresence(localDisplayName(), colourForActor(me), beat, trackIndex, overTimeline);
+    collabController.publishPresence(localDisplayName(), colourForActor(me), beat, contentY, overTimeline);
 
     // And hand the peers' cursors to the timeline, which draws them without knowing what collab is.
     std::vector<ArrangementTimelineComponent::RemoteCursor> cursors;
     for (const auto& p : collabController.peers())
         if (p.overTimeline)
-            cursors.push_back({ p.name, juce::Colour(p.colourArgb), p.beat, p.trackIndex });
+            cursors.push_back({ p.name, juce::Colour(p.colourArgb), p.beat, p.contentY });
 
+    jamRemoteCursorCount = static_cast<int>(cursors.size());
     arrangementTimeline.setRemoteCursors(std::move(cursors));
 }
 
 void MainComponent::updateJamDiagnostics()
 {
-    const auto line = collabController.diagnosticsLine();
+    auto line = collabController.diagnosticsLine();
+    line << "  myPointerOnLane " << (jamPointerOverTimeline ? 1 : 0)
+         << "  drawnCursors " << jamRemoteCursorCount
+         << "  | " << jamPointerDebug;
     jamSession.setDiagnostics(line);
     jamLog(line);
 }

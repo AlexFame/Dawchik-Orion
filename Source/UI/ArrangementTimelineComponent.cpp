@@ -1953,8 +1953,9 @@ void ArrangementTimelineComponent::setRemoteCursors(std::vector<RemoteCursor> cu
                    && std::equal(cursors.begin(), cursors.end(), remoteCursors.begin(),
                                  [](const RemoteCursor& a, const RemoteCursor& b)
                                  {
-                                     return a.name == b.name && a.trackIndex == b.trackIndex
-                                         && std::abs(a.beat - b.beat) < 1.0e-6;
+                                     return a.name == b.name
+                                         && std::abs(a.beat - b.beat) < 1.0e-6
+                                         && std::abs(a.contentY - b.contentY) < 0.5;
                                  });
     if (same)
         return;
@@ -1965,22 +1966,35 @@ void ArrangementTimelineComponent::setRemoteCursors(std::vector<RemoteCursor> cu
 
 bool ArrangementTimelineComponent::pointToProjectPosition(juce::Point<int> point,
                                                           double& beatOut,
-                                                          int& trackIndexOut) const
+                                                          double& contentYOut) const
 {
     if (point.x < trackHeaderWidth || ! getLocalBounds().contains(point))
         return false;
 
-    const auto trackCount = static_cast<int>(project.getTracks().size());
-    for (int i = 0; i < trackCount; ++i)
+    // Anywhere over the grid counts, not just on top of a track. Requiring a lane hit meant a
+    // collaborator had no cursor at all on an empty project, and it blinked out whenever they moved
+    // through the space below the last track — Figma shows you the pointer anywhere on the canvas.
+    beatOut = xToBeatPosition(point.x);
+
+    // Content space = screen position minus the track area's origin, with the local scroll added
+    // back in. The peer reverses it with their own scroll, so the cursor tracks the same row.
+    const auto area = getVisibleTrackAreaBounds(*this);
+    contentYOut = static_cast<double>(point.y - area.getY()) + scrollY;
+    return true;
+}
+
+juce::String ArrangementTimelineComponent::describePointerMapping(juce::Point<int> point) const
+{
+    juce::String s;
+    s << "mouse(" << point.x << "," << point.y << ") comp(" << getWidth() << "x" << getHeight()
+      << ") hdr" << trackHeaderWidth << " tracks" << static_cast<int>(project.getTracks().size());
+
+    if (! project.getTracks().empty())
     {
-        if (getTrackLaneBounds(i).contains(point))
-        {
-            trackIndexOut = i;
-            beatOut = xToBeatPosition(point.x);
-            return true;
-        }
+        const auto lane = getTrackLaneBounds(0);
+        s << " lane0(" << lane.getX() << "," << lane.getY() << "," << lane.getWidth() << "x" << lane.getHeight() << ")";
     }
-    return false;
+    return s;
 }
 
 void ArrangementTimelineComponent::drawRemoteCursors(juce::Graphics& g)
@@ -1988,22 +2002,21 @@ void ArrangementTimelineComponent::drawRemoteCursors(juce::Graphics& g)
     if (remoteCursors.empty())
         return;
 
-    const auto trackCount = static_cast<int>(project.getTracks().size());
+    const auto gridArea = getVisibleTrackAreaBounds(*this);
 
     for (const auto& cursor : remoteCursors)
     {
-        if (cursor.trackIndex < 0 || cursor.trackIndex >= trackCount)
+        if (gridArea.isEmpty())
             continue;
 
-        const auto lane = getTrackLaneBounds(cursor.trackIndex);
-        if (lane.isEmpty())
-            continue;
-
-        const auto x = beatToX(cursor.beat, lane);
+        const auto x = beatToX(cursor.beat, gridArea);
         if (x < static_cast<float>(trackHeaderWidth) || x > static_cast<float>(getWidth()))
             continue;
 
-        const auto y = static_cast<float>(lane.getCentreY());
+        // Undo our own scroll to place their content-space position on our screen.
+        const auto y = static_cast<float>(gridArea.getY() + cursor.contentY - scrollY);
+        if (y < static_cast<float>(gridArea.getY() - 4) || y > static_cast<float>(gridArea.getBottom()))
+            continue;
 
         // Arrow head.
         juce::Path arrow;

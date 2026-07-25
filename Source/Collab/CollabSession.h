@@ -54,7 +54,7 @@ public:
 
     // Tell the others where we are (Figma-style live cursor). Cheap and frequent; never logged.
     void publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
-                         double beat, int trackIndex, bool overTimeline);
+                         double beat, double contentY, bool overTimeline);
 
     // Peers seen recently, stalest entries dropped. Safe to call every frame.
     std::vector<PeerPresence> peers() const;
@@ -70,6 +70,8 @@ public:
     int opsReceived { 0 };      // peer ops that arrived (whether or not they applied)
     int opsApplied { 0 };
     int snapshotsReceived { 0 };
+    int presenceSent { 0 };
+    int presenceReceived { 0 };
 
 private:
     void handleIncoming(const Op& op);
