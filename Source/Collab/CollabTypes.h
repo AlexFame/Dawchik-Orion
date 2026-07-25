@@ -87,6 +87,11 @@ enum class OpType
     // being forgotten, which silently desyncs.
     replaceClip,
 
+    // Sync a track's properties wholesale (VST instrument+state, sampler, MPC, inserts, sends…)
+    // from its serialised form. Its CLIPS are handled by the clip ops, so this never touches them —
+    // avoids clips racing down two paths at once.
+    updateTrackProps,
+
     // Notes within a clip.
     addNote,
     removeNote,
@@ -220,6 +225,7 @@ inline juce::String toString(OpType t)
     switch (t)
     {
         case OpType::addTrack:         return "addTrack";
+        case OpType::updateTrackProps: return "updateTrackProps";
         case OpType::removeTrack:      return "removeTrack";
         case OpType::moveTrack:        return "moveTrack";
         case OpType::setTrackField:    return "setTrackField";

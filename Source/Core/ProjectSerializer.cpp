@@ -470,6 +470,16 @@ TimelineClip ProjectSerializer::clipFromVar(const juce::var& source)
     return timelineClipFromVar(source);
 }
 
+juce::var ProjectSerializer::trackToVar(const TrackState& track)
+{
+    return trackStateToVar(track);
+}
+
+TrackState ProjectSerializer::trackFromVar(const juce::var& source)
+{
+    return trackStateFromVar(source);
+}
+
 juce::var ProjectSerializer::toVar(const ProjectState& projectState)
 {
     auto* rootObject = new juce::DynamicObject();

@@ -33,5 +33,11 @@ public:
     // bars, key data, fades, sample bounds…), and any one left out silently desyncs.
     static juce::var clipToVar(const TimelineClip& clip);
     static TimelineClip clipFromVar(const juce::var& source);
+
+    // A single track in the same representation. Like clips, the collab layer syncs a track's ~40
+    // properties (VST instrument + its state, sampler config, MPC kit/tune/chop, inserts, sends,
+    // folder info…) as one blob rather than enumerating fields, so none silently desyncs.
+    static juce::var trackToVar(const TrackState& track);
+    static TrackState trackFromVar(const juce::var& source);
 };
 }  // namespace orion

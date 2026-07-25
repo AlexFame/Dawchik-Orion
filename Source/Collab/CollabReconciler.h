@@ -48,18 +48,16 @@ private:
         juce::int64 dataHash { 0 };
     };
 
+    // Like clips, a track is tracked by a hash of its whole serialised form (minus its clips, which
+    // the clip diff owns). A TrackState has ~40 properties — VST instrument + state, sampler config,
+    // MPC kit/tune/chop, inserts, sends — and hand-listing them is how instrument/sampler/MPC state
+    // silently failed to sync. name/isMidiTrack are kept out of the hash: they seed addTrack.
     struct TrackShadow
     {
         EntityId id { noEntity };
         juce::String name;
         bool isMidiTrack { false };
-        bool muted { false };
-        bool solo { false };
-        bool recordArmed { false };
-        double volumeDb { 0.0 };
-        double pan { 0.0 };
-        double trackGainDb { 0.0 };
-        juce::uint32 colour { 0 };
+        juce::int64 propsHash { 0 };
     };
 
     struct Shadow

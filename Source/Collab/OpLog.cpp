@@ -144,6 +144,22 @@ namespace oplog
                 return false;
             }
 
+            case OpType::updateTrackProps:
+            {
+                auto* t = findTrack(state, op.track);
+                if (t == nullptr)
+                    return false;
+
+                auto incoming = ProjectSerializer::trackFromVar(op.payload.getProperty("track", juce::var()));
+                // Preserve identity and the clips this op deliberately ignores (clip ops own them).
+                incoming.id = t->id;
+                incoming.clips = std::move(t->clips);
+
+                const juce::ScopedLock sl(state.getAudioEditLock());
+                *t = std::move(incoming);
+                return true;
+            }
+
             case OpType::moveTrack:
             {
                 auto& tracks = state.getTracks();
@@ -391,6 +407,13 @@ namespace ops
     Op removeTrack(EntityId trackId)
     {
         Op op; op.type = OpType::removeTrack; op.track = trackId;
+        return op;
+    }
+
+    Op updateTrackProps(EntityId trackId, const juce::var& trackData)
+    {
+        Op op; op.type = OpType::updateTrackProps; op.track = trackId;
+        op.payload = makePayload({ { "track", trackData } });
         return op;
     }
 

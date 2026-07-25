@@ -46,6 +46,9 @@ namespace ops
 
     Op addTrack(EntityId newTrackId, const juce::String& name, bool isMidiTrack);
     Op removeTrack(EntityId trackId);
+
+    // Replace a track's properties (not its clips) from ProjectSerializer::trackToVar data.
+    Op updateTrackProps(EntityId trackId, const juce::var& trackData);
     Op moveTrack(EntityId trackId, int newIndex);
     Op setTrackField(EntityId trackId, const juce::String& field, const juce::var& value);
 

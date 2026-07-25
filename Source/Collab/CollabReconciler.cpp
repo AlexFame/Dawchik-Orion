@@ -13,8 +13,6 @@ namespace
 {
     constexpr double epsilon = 1.0e-9;
     bool differs(double a, double b) noexcept { return std::abs(a - b) > epsilon; }
-
-    juce::var colourVar(juce::uint32 argb) { return juce::var(static_cast<juce::int64>(argb)); }
 }
 
 CollabReconciler::CollabReconciler(ProjectState& liveProject, CollabController& controllerToUse)
@@ -55,13 +53,13 @@ CollabReconciler::Shadow CollabReconciler::snapshotOfLive() const
         ts.id = t.id;
         ts.name = t.name;
         ts.isMidiTrack = t.isMidiTrack;
-        ts.muted = t.muted;
-        ts.solo = t.solo;
-        ts.recordArmed = t.recordArmed;
-        ts.volumeDb = t.volumeDb;
-        ts.pan = t.pan;
-        ts.trackGainDb = t.trackGainDb;
-        ts.colour = t.colour.getARGB();
+        // Hash everything EXCEPT the clips, which the clip diff syncs — otherwise a note edit would
+        // also fire a whole-track op. Cheapest way to exclude them is to hash a clip-less copy.
+        {
+            TrackState propsOnly = t;
+            propsOnly.clips.clear();
+            ts.propsHash = juce::JSON::toString(ProjectSerializer::trackToVar(propsOnly), true).hashCode64();
+        }
         s.tracks.push_back(std::move(ts));
 
         for (const auto& c : t.clips)
@@ -100,40 +98,25 @@ int CollabReconciler::diffTracks(const Shadow& current)
             ++sent;
         }
 
-    // Added.
-    for (const auto& t : current.tracks)
-        if (before.find(t.id) == before.end())
-        {
-            controller.broadcast(ops::addTrack(t.id, t.name, t.isMidiTrack));
-            ++sent;
-
-            // Carry the non-default properties of a freshly created track.
-            const TrackShadow fresh {};
-            if (t.muted != fresh.muted)             { controller.broadcast(ops::setTrackField(t.id, "muted", t.muted)); ++sent; }
-            if (t.solo != fresh.solo)               { controller.broadcast(ops::setTrackField(t.id, "solo", t.solo)); ++sent; }
-            if (differs(t.volumeDb, fresh.volumeDb)){ controller.broadcast(ops::setTrackField(t.id, "volumeDb", t.volumeDb)); ++sent; }
-            if (differs(t.pan, fresh.pan))          { controller.broadcast(ops::setTrackField(t.id, "pan", t.pan)); ++sent; }
-            if (differs(t.trackGainDb, fresh.trackGainDb)) { controller.broadcast(ops::setTrackField(t.id, "trackGainDb", t.trackGainDb)); ++sent; }
-            controller.broadcast(ops::setTrackField(t.id, "colour", colourVar(t.colour)));
-            ++sent;
-        }
-
-    // Field changes on tracks present in both.
+    // Added, and any property change on an existing track — both ship the whole track's properties
+    // (VST/sampler/MPC/inserts included) via one op, so no field can be forgotten.
     for (const auto& t : current.tracks)
     {
         const auto it = before.find(t.id);
-        if (it == before.end())
-            continue;
+        const bool isNew = it == before.end();
 
-        const auto& was = *it->second;
-        if (t.name != was.name)                   { controller.broadcast(ops::setTrackField(t.id, "name", t.name)); ++sent; }
-        if (t.muted != was.muted)                 { controller.broadcast(ops::setTrackField(t.id, "muted", t.muted)); ++sent; }
-        if (t.solo != was.solo)                   { controller.broadcast(ops::setTrackField(t.id, "solo", t.solo)); ++sent; }
-        if (t.recordArmed != was.recordArmed)     { controller.broadcast(ops::setTrackField(t.id, "recordArmed", t.recordArmed)); ++sent; }
-        if (differs(t.volumeDb, was.volumeDb))    { controller.broadcast(ops::setTrackField(t.id, "volumeDb", t.volumeDb)); ++sent; }
-        if (differs(t.pan, was.pan))              { controller.broadcast(ops::setTrackField(t.id, "pan", t.pan)); ++sent; }
-        if (differs(t.trackGainDb, was.trackGainDb)) { controller.broadcast(ops::setTrackField(t.id, "trackGainDb", t.trackGainDb)); ++sent; }
-        if (t.colour != was.colour)               { controller.broadcast(ops::setTrackField(t.id, "colour", colourVar(t.colour))); ++sent; }
+        if (isNew)
+        {
+            controller.broadcast(ops::addTrack(t.id, t.name, t.isMidiTrack));
+            ++sent;
+        }
+
+        if (isNew || it->second->propsHash != t.propsHash)
+            if (const auto* liveTrack = oplog::findTrack(live, t.id))
+            {
+                controller.broadcast(ops::updateTrackProps(t.id, ProjectSerializer::trackToVar(*liveTrack)));
+                ++sent;
+            }
     }
 
     // Order. Compare the id sequences that survive on both sides; if they disagree, walk the live

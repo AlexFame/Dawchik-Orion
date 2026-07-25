@@ -457,6 +457,32 @@ int main()
             check(std::abs(peerClip.sampleEndRatio - 0.75) < 1.0e-9, "clip sample bounds synced");
         }
 
+        // Track-level state beyond the basic fields — VST instrument, sampler, MPC kit — must sync,
+        // or a collaborator hears a track with no instrument. Whole-track sync covers all of it.
+        {
+            auto& t = pa.getTracks()[0];
+            t.instrumentPluginId = "Arturia:AnalogLab";
+            t.instrumentPluginName = "Analog Lab";
+            t.instrumentStateBase64 = "AAECAwQF";
+            t.samplerSourcePath = "/tmp/kit.wav";
+            t.isMpcKit = true;
+            t.mpcKitSamples[0] = "/tmp/kick.wav";
+            t.mpcKitSamples[3] = "/tmp/snare.wav";
+            rec.sync();
+
+            const auto& pt = pb.getTracks()[0];
+            check(pt.instrumentPluginId == "Arturia:AnalogLab"
+                      && pt.instrumentStateBase64 == "AAECAwQF",
+                  "VST instrument + its saved state synced");
+            check(pt.samplerSourcePath == "/tmp/kit.wav", "sampler source synced");
+            check(pt.isMpcKit && pt.mpcKitSamples[0] == "/tmp/kick.wav"
+                      && pt.mpcKitSamples[3] == "/tmp/snare.wav",
+                  "MPC kit pad samples synced");
+
+            // And this must NOT have disturbed the clip that lives on the same track.
+            check(pb.getTracks()[0].clips.size() == 1, "track-props sync left the clip intact");
+        }
+
         pa.getTracks()[0].clips.clear();
         rec.sync();
         check(pb.getTracks()[0].clips.empty(), "clip deletion synced");
