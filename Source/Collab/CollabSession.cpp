@@ -132,6 +132,14 @@ void CollabSession::handleIncoming(const Op& op)
         return;
     }
 
+    if (op.type == OpType::chatMessage)
+    {
+        if (onChat)
+            onChat(op.payload.getProperty("name", juce::String()).toString(),
+                   op.payload.getProperty("text", juce::String()).toString());
+        return;
+    }
+
     if (oplog::apply(state, op))
     {
         ++opsApplied;

@@ -190,6 +190,7 @@ private:
     void refreshAfterRemoteJamEdit();
     void updateJamDiagnostics();
     void publishJamPresence();
+    void sendJamChat(const juce::String& text);
     void syncJamTransportOut();
     void applyRemoteJamTransport(bool playing, double beat);
     void saveProjectInteractively();

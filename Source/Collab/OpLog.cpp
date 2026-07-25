@@ -418,6 +418,13 @@ namespace ops
         return op;
     }
 
+    Op chat(const juce::String& fromName, const juce::String& text)
+    {
+        Op op; op.type = OpType::chatMessage;
+        op.payload = makePayload({ { "name", fromName }, { "text", text } });
+        return op;
+    }
+
     Op replaceBuses(const juce::var& busesData)
     {
         Op op; op.type = OpType::replaceBuses;

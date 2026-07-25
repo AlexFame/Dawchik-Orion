@@ -48,6 +48,9 @@ namespace ops
     // NOT applied to ProjectState (the transport lives in TransportEngine).
     Op setTransport(bool playing, double beat);
 
+    // A chat line. Routed to the chat handler; logged by the server so a late joiner sees history.
+    Op chat(const juce::String& fromName, const juce::String& text);
+
     // Whole-mixer sync (buses + master inserts) from ProjectSerializer data.
     Op replaceBuses(const juce::var& busesData);
     Op replaceMasterInserts(const juce::var& insertsData);

@@ -77,6 +77,11 @@ void MainComponent::publishJamPresence()
     arrangementTimeline.setRemoteCursors(std::move(cursors));
 }
 
+void MainComponent::sendJamChat(const juce::String& text)
+{
+    collabController.sendChat(localDisplayName(), text);
+}
+
 void MainComponent::updateJamDiagnostics()
 {
     jamSession.setDiagnostics(collabController.diagnosticsLine());
@@ -159,6 +164,7 @@ void MainComponent::startJamHosting()
 
     collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
     collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
+    collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
     jamLastSentPlaying = transportEngine.isPlaying();
 
     if (! collabController.hostSession(jamDefaultPort, localActorId(), randomActorSalt()))
@@ -209,6 +215,7 @@ void MainComponent::joinJamSession()
 
         collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
         collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
+        collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
         jamLastSentPlaying = transportEngine.isPlaying();
 
         if (! collabController.joinSession(address, jamDefaultPort, localActorId(), randomActorSalt()))

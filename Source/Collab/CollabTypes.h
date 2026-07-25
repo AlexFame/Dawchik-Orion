@@ -109,6 +109,7 @@ enum class OpType
     // Project-wide / transport (shared clock).
     setTempo,
     setTransport,       // play / stop / position — keeps everyone phase-locked
+    chatMessage,        // routed to the chat handler (not ProjectState); logged so joiners see history
 
     // Bring-up escape hatch: replace one clip's whole note vector in a single op. Coarser than
     // per-note ops (loses fine-grained merging) but trivially correct — used before per-note
@@ -249,6 +250,7 @@ inline juce::String toString(OpType t)
         case OpType::replaceMasterInserts: return "replaceMasterInserts";
         case OpType::setTempo:         return "setTempo";
         case OpType::setTransport:     return "setTransport";
+        case OpType::chatMessage:      return "chatMessage";
         case OpType::replaceClipNotes: return "replaceClipNotes";
         case OpType::unknown:          break;
     }

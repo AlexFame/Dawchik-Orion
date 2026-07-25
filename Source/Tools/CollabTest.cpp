@@ -344,6 +344,13 @@ int main()
 
         ca.sendTransport(false, 20.0);
         check(! bPlaying && std::abs(bBeat - 20.0) < 1.0e-9, "peer received stop at position");
+
+        // Chat rides the same routed channel.
+        juce::String gotName, gotText;
+        cb.onRemoteChat = [&](const juce::String& n, const juce::String& t) { gotName = n; gotText = t; };
+        ca.sendChat("Alex", "yo drop the 808");
+        check(gotName == "Alex" && gotText == "yo drop the 808", "peer received chat line");
+        check(pb.getTracks().empty(), "chat op did not touch ProjectState");
     }
 
     // ---- Joining a session already in progress: the newcomer must get the WHOLE project. ----

@@ -41,6 +41,7 @@ public:
         session = std::make_unique<CollabSession>(state, *transport, actorSalt);
         session->onRemoteApplied = [this] { if (onProjectChanged) onProjectChanged(); };
         session->onRemoteTransport = [this](bool playing, double beat) { if (onRemoteTransport) onRemoteTransport(playing, beat); };
+        session->onChat = [this](const juce::String& name, const juce::String& text) { if (onRemoteChat) onRemoteChat(name, text); };
         session->assignInitialIds();
     }
 
@@ -124,6 +125,15 @@ public:
     {
         if (session != nullptr)
             broadcast(collab::ops::setTransport(playing, beat));
+    }
+
+    // A peer sent a chat line (or history is replaying on join).
+    std::function<void(const juce::String& name, const juce::String& text)> onRemoteChat;
+
+    void sendChat(const juce::String& name, const juce::String& text)
+    {
+        if (session != nullptr)
+            broadcast(collab::ops::chat(name, text));
     }
 
     // One-line health summary for the Jam panel. A stalled session is otherwise invisible: this

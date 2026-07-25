@@ -24,6 +24,10 @@ public:
     std::function<void()> onCreateSessionRequested;
     std::function<void()> onJoinSessionRequested;
     std::function<void()> onLeaveSessionRequested;
+    // Fired when the local user sends a chat line; the host relays it over the network.
+    std::function<void(const juce::String& text)> onSendChat;
+    // Called by the host when a peer's chat line (or replayed history) arrives.
+    void receiveChat(const juce::String& name, const juce::String& text);
 
     // Real networking state, pushed in by the host. The panel no longer flips itself to "live" on
     // a click — it only goes live when a session actually connected, so what you see is the truth.

@@ -954,7 +954,9 @@ void JamSessionComponent::sendChatMessage()
     const auto text = chatEditor.getText().trim();
     if (text.isNotEmpty())
     {
-        addChatMessage("You", text);
+        addChatMessage("You", text);   // instant local echo; our own network echo is filtered out
+        if (onSendChat)
+            onSendChat(text);
         chatEditor.clear();
     }
 }
@@ -965,6 +967,11 @@ void JamSessionComponent::addChatMessage(const juce::String& name, const juce::S
     if (chatMessages.size() > 40)
         chatMessages.erase(chatMessages.begin());
     repaint();
+}
+
+void JamSessionComponent::receiveChat(const juce::String& name, const juce::String& text)
+{
+    addChatMessage(name.isEmpty() ? juce::String("Peer") : name, text);
 }
 
 void JamSessionComponent::setRoster(const std::vector<RosterMember>& members)

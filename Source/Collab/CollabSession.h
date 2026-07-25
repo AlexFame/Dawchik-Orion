@@ -68,6 +68,9 @@ public:
     // op-log because the transport lives outside ProjectState.
     std::function<void(bool playing, double beat)> onRemoteTransport;
 
+    // A chat line arrived (peer message live, or session history replayed on join).
+    std::function<void(const juce::String& name, const juce::String& text)> onChat;
+
     // Live counters — surfaced in the Jam panel so a stalled session can be diagnosed from the UI
     // instead of guessing which link in the chain is broken.
     int opsSent { 0 };

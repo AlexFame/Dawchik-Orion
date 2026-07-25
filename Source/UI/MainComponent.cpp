@@ -899,6 +899,7 @@ MainComponent::MainComponent()
     jamSession.onCreateSessionRequested = [this]() { startJamHosting(); };
     jamSession.onJoinSessionRequested   = [this]() { joinJamSession(); };
     jamSession.onLeaveSessionRequested  = [this]() { leaveJamSession(); };
+    jamSession.onSendChat = [this](const juce::String& text) { sendJamChat(text); };
     jamSession.onMicEnabledChanged = [this](bool enabled)
     {
         return ! enabled || ensureAudioInputReady(true);
