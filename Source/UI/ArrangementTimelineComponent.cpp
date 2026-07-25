@@ -1988,14 +1988,19 @@ void ArrangementTimelineComponent::drawRemoteCursors(juce::Graphics& g)
     if (remoteCursors.empty())
         return;
 
-    const auto gridArea = getVisibleTrackAreaBounds(*this);
+    auto gridArea = getVisibleTrackAreaBounds(*this);
+    // beatToX measures from the lane area's left edge, which sits AFTER the track headers — the same
+    // inset getClipBounds applies. Without removing it here the cursor lands ~trackHeaderWidth px too
+    // far left (it must map beats identically to xToBeatPosition, which the sender uses).
+    auto beatArea = gridArea;
+    beatArea.removeFromLeft(trackHeaderWidth);
 
     for (const auto& cursor : remoteCursors)
     {
         if (gridArea.isEmpty())
             continue;
 
-        const auto x = beatToX(cursor.beat, gridArea);
+        const auto x = beatToX(cursor.beat, beatArea);
         if (x < static_cast<float>(trackHeaderWidth) || x > static_cast<float>(getWidth()))
             continue;
 
