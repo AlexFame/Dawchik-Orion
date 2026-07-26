@@ -16,6 +16,7 @@
 #include "../Audio/WarpEngine.h"
 #include "../Audio/TransportController.h"
 #include "../Audio/TransportEngine.h"
+#include "../Audio/VoiceChatEngine.h"
 #include "../Core/ProjectSerializer.h"
 #include "../Collab/CollabController.h"
 #include "../Collab/CollabReconciler.h"
@@ -195,6 +196,7 @@ private:
     void applyRemoteJamTransport(bool playing, double beat);
     void pollJamReconnect();
     void onJamConnectionChanged(bool connected);
+    bool toggleJamMic(bool enabled);
     void refreshJamViews();
     bool performJamUndo();
     bool performJamRedo();
@@ -272,6 +274,7 @@ private:
     // so solo behaviour is exactly as before. Declared right after projectState — they bind to it.
     collab::CollabController collabController { projectState };
     collab::CollabReconciler collabReconciler { projectState, collabController };
+    VoiceChatEngine voiceChat;
     TransportEngine transportEngine;
     TransportController transportController;
     ArrangementTimelineComponent arrangementTimeline;

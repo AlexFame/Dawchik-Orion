@@ -77,6 +77,31 @@ void MainComponent::publishJamPresence()
     arrangementTimeline.setRemoteCursors(std::move(cursors));
 }
 
+bool MainComponent::toggleJamMic(bool enabled)
+{
+    // Voice is strictly opt-in: nothing in the audio path changes until the user turns the mic on,
+    // so a jam without voice can't destabilise the main engine. Enabling starts BOTH capture and
+    // playback (talk + hear); disabling stops both.
+    if (! enabled)
+    {
+        voiceChat.stop();
+        return true;
+    }
+
+    voiceChat.onCaptured = [this](int rate, const juce::MemoryBlock& pcm) { collabController.sendVoice(rate, pcm); };
+    collabController.onVoiceReceived = [this](const juce::String&, int rate, const juce::MemoryBlock& pcm)
+    { voiceChat.pushRemoteVoice(rate, pcm); };
+
+    juce::String err;
+    if (! voiceChat.startPlayback(err) || ! voiceChat.startCapture(err))
+    {
+        voiceChat.stop();
+        jamSession.setSessionStatus(collabController.isActive(), "Voice error: " + err);
+        return false;
+    }
+    return true;
+}
+
 void MainComponent::sendJamChat(const juce::String& text)
 {
     collabController.sendChat(localDisplayName(), text);
@@ -143,6 +168,8 @@ void MainComponent::pollJamReconnect()
         collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
         collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
         collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
+        collabController.onVoiceReceived = [this](const juce::String&, int rate, const juce::MemoryBlock& pcm)
+        { voiceChat.pushRemoteVoice(rate, pcm); };
         collabReconciler.captureBaseline();
         jamSession.setSessionStatus(true, "RECONNECTED  -  " + collabController.reconnectDisplay());
     }
@@ -309,6 +336,7 @@ void MainComponent::leaveJamSession()
     if (! collabController.isActive())
         return;
 
+    voiceChat.stop();
     collabController.disconnect();
     collabController.onProjectChanged = nullptr;
     jamSession.setSessionStatus(false, "Left the session.");

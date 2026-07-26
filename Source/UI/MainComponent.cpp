@@ -904,7 +904,7 @@ MainComponent::MainComponent()
     jamSession.onSendChat = [this](const juce::String& text) { sendJamChat(text); };
     jamSession.onMicEnabledChanged = [this](bool enabled)
     {
-        return ! enabled || ensureAudioInputReady(true);
+        return toggleJamMic(enabled);
     };
     jamSession.onCameraEnabledChanged = [this](bool enabled)
     {

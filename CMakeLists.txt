@@ -80,6 +80,7 @@ target_sources(
         Source/Audio/StemSeparator.cpp
         Source/Audio/TransportController.cpp
         Source/Audio/TransportEngine.cpp
+        Source/Audio/VoiceChatEngine.cpp
         Source/Audio/WarpEngine.cpp
         Source/Core/ProjectSerializer.cpp
         Source/Core/ProjectState.cpp
