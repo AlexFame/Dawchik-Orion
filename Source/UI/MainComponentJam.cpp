@@ -120,6 +120,45 @@ void MainComponent::applyRemoteJamTransport(bool playing, double beat)
     updateTransportLabels();
 }
 
+void MainComponent::pollJamReconnect()
+{
+    if (! collabController.isActive() || ! collabController.canReconnect())
+        return;
+
+    if (collabController.isConnected())
+    {
+        jamReconnectCounter = 0;
+        return;
+    }
+
+    // Dropped. Retry every ~2s (120 ticks at 60 Hz) so we don't hammer a downed host.
+    if (++jamReconnectCounter < 120)
+        return;
+    jamReconnectCounter = 0;
+
+    if (collabController.tryReconnect())
+    {
+        // A fresh session; re-arm our transport baseline and let the incoming snapshot re-sync us.
+        collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
+        collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
+        collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
+        collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
+        collabReconciler.captureBaseline();
+        jamSession.setSessionStatus(true, "RECONNECTED  -  " + collabController.reconnectDisplay());
+    }
+    else
+    {
+        jamSession.setSessionStatus(true, "Reconnecting to host...");
+    }
+}
+
+void MainComponent::onJamConnectionChanged(bool connected)
+{
+    if (! connected && jamWasConnected)
+        jamSession.setSessionStatus(true, "Connection lost - reconnecting...");
+    jamWasConnected = connected;
+}
+
 void MainComponent::syncJamTransportOut()
 {
     // Broadcast only the play/stop TRANSITION (not every position tick — that would flood the wire).
@@ -165,6 +204,8 @@ void MainComponent::startJamHosting()
     collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
     collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
     collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
+    collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
+    jamWasConnected = true;
     jamLastSentPlaying = transportEngine.isPlaying();
 
     if (! collabController.hostSession(jamDefaultPort, localActorId(), randomActorSalt()))
@@ -216,6 +257,8 @@ void MainComponent::joinJamSession()
         collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
         collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
         collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
+        collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
+        jamWasConnected = true;
         jamLastSentPlaying = transportEngine.isPlaying();
 
         if (! collabController.joinSession(address, jamDefaultPort, localActorId(), randomActorSalt()))

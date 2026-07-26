@@ -2405,6 +2405,9 @@ void MainComponent::timerCallback()
     // Shared transport: broadcast our play/stop the instant it flips.
     syncJamTransportOut();
 
+    // Auto-reconnect a dropped guest.
+    pollJamReconnect();
+
     if (collabController.isActive() && ++collabSyncCounter >= 6)
     {
         collabSyncCounter = 0;

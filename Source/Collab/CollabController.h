@@ -50,6 +50,7 @@ public:
         session.reset();     // detaches the transport callback first (session dtor)
         transport.reset();
         embeddedServer.reset();
+        reconnectAddress = {};   // an explicit Leave must not trigger auto-reconnect
     }
 
     // ---- One-call session bootstrap, so the DAW's wiring stays a single line. ----
@@ -81,10 +82,39 @@ public:
         if (! socket->connectToServer(address, port))
             return false;
 
+        // Remember how we got in so a dropped guest can silently reconnect.
+        reconnectAddress = address;
+        reconnectPort = port;
+        reconnectActor = me;
+        reconnectSalt = actorSalt;
+
         connect(std::move(socket), actorSalt);
         // Callbacks are wired now, so it is safe to ask for the baseline + everything since.
         session->requestBacklog();
         return true;
+    }
+
+    // A guest whose socket dropped is still "active" (the session object lives) but not connected.
+    bool isConnected() const noexcept { return transport != nullptr && transport->isConnected(); }
+    bool canReconnect() const noexcept { return reconnectAddress.isNotEmpty(); }
+    juce::String reconnectDisplay() const { return reconnectAddress + ":" + juce::String(reconnectPort); }
+
+    // Re-establish a dropped guest connection: fresh socket to the same host, then re-request the
+    // backlog so we catch up on everything missed. Returns false if the host still isn't reachable.
+    bool tryReconnect()
+    {
+        if (reconnectAddress.isEmpty())
+            return false;   // host doesn't auto-reconnect (its server is local)
+
+        // Keep the reconnect params: disconnect() clears the session but we re-join with the same id.
+        const auto address = reconnectAddress;
+        const auto port = reconnectPort;
+        const auto me = reconnectActor;
+        const auto salt = reconnectSalt;
+
+        session.reset();
+        transport.reset();
+        return joinSession(address, port, me, salt);
     }
 
     bool isHosting() const noexcept { return embeddedServer != nullptr; }
@@ -130,6 +160,9 @@ public:
     // A peer sent a chat line (or history is replaying on join).
     std::function<void(const juce::String& name, const juce::String& text)> onRemoteChat;
 
+    // Fired when the socket connects/drops (guest). MainComponent shows status + drives reconnect.
+    std::function<void(bool connected)> onConnectionChanged;
+
     void sendChat(const juce::String& name, const juce::String& text)
     {
         if (session != nullptr)
@@ -166,6 +199,11 @@ private:
     std::unique_ptr<CollabServer> embeddedServer;   // only when hosting
     std::unique_ptr<CollabTransport> transport;
     std::unique_ptr<CollabSession> session;
+
+    juce::String reconnectAddress;   // set only for a guest, so it can silently reconnect on a drop
+    int reconnectPort { 0 };
+    ActorId reconnectActor;
+    EntityId reconnectSalt { 0 };
 };
 } // namespace collab
 } // namespace orion

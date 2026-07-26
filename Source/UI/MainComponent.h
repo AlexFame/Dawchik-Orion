@@ -193,6 +193,8 @@ private:
     void sendJamChat(const juce::String& text);
     void syncJamTransportOut();
     void applyRemoteJamTransport(bool playing, double beat);
+    void pollJamReconnect();
+    void onJamConnectionChanged(bool connected);
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();
@@ -422,6 +424,8 @@ private:
     int collabPresenceCounter { 0 };              // broadcasts our live cursor ~20 Hz
     bool jamApplyingRemoteTransport { false };    // guards the transport feedback loop
     bool jamLastSentPlaying { false };            // last play state we broadcast
+    int  jamReconnectCounter { 0 };               // throttles guest reconnect attempts (~2s)
+    bool jamWasConnected { true };                // tracks the socket state for status messaging
     juce::AudioSourcePlayer previewSourcePlayer;
     juce::MixerAudioSource masterMixerSource;
     juce::AudioTransportSource previewTransportSource;
