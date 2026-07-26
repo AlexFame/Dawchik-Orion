@@ -691,11 +691,13 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case menuProjectExport:   exportProjectInteractively(); break;
         case menuProjectSettings: openSettingsDialog(); break;
         case menuEditUndo:
-            arrangementTimeline.undo();
+            if (! performJamUndo())
+                arrangementTimeline.undo();
             updateTransportLabels();
             break;
         case menuEditRedo:
-            arrangementTimeline.redo();
+            if (! performJamRedo())
+                arrangementTimeline.redo();
             updateTransportLabels();
             break;
         case menuMixMixer:        toggleMixerFromUi(); break;
@@ -2146,11 +2148,13 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress('a', juce::ModifierKeys::commandModifier, 0))
         return arrangementTimeline.selectAllClips();
 
-    if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0) && arrangementTimeline.undo())
+    if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)
+        && (performJamUndo() || arrangementTimeline.undo()))
         return true;
 
     if ((key == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)
-         || key == juce::KeyPress('y', juce::ModifierKeys::commandModifier, 0)) && arrangementTimeline.redo())
+         || key == juce::KeyPress('y', juce::ModifierKeys::commandModifier, 0))
+        && (performJamRedo() || arrangementTimeline.redo()))
         return true;
 
     // Delete/Backspace: forward to the timeline so deleting the selected clip(s) or track(s) works even
@@ -2673,12 +2677,14 @@ void MainComponent::buttonClicked(juce::Button* button)
         rewindTransportFromUi();
     else if (button == &undoButton)
     {
-        arrangementTimeline.undo();
+        if (! performJamUndo())
+            arrangementTimeline.undo();
         updateTransportLabels();
     }
     else if (button == &redoButton)
     {
-        arrangementTimeline.redo();
+        if (! performJamRedo())
+            arrangementTimeline.redo();
         updateTransportLabels();
     }
     else if (button == &loopButton)

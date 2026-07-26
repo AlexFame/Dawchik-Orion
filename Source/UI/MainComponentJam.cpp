@@ -174,15 +174,11 @@ void MainComponent::syncJamTransportOut()
     }
 }
 
-void MainComponent::refreshAfterRemoteJamEdit()
+void MainComponent::refreshJamViews()
 {
-    // A peer's op (or the joining snapshot) has already mutated projectState. Re-baseline FIRST so
-    // the reconciler doesn't diff the peer's change as one of ours and send it straight back.
-    collabReconciler.captureBaseline();
-
-    // Then refresh the views that read the project. Deliberately gentler than the project-load
-    // path: no resetForNewProject(), which would drop the local user's selection and scroll
-    // position mid-jam.
+    // Refresh the views that read the project after it was mutated out-of-band (a peer op, or our
+    // own collab undo/redo). Deliberately gentler than the project-load path: no
+    // resetForNewProject(), which would drop the local user's selection and scroll position mid-jam.
     refreshAudioClipWarpLengths();
     refreshClipInspector();
     refreshClipEditor();
@@ -191,6 +187,38 @@ void MainComponent::refreshAfterRemoteJamEdit()
     arrangementTimeline.repaint();
     stepSequencer.repaint();
     mixerPanel.repaint();
+}
+
+void MainComponent::refreshAfterRemoteJamEdit()
+{
+    // A peer's op (or the joining snapshot) has already mutated projectState. Re-shadow FIRST so
+    // the reconciler doesn't diff the peer's change as one of ours and send it straight back —
+    // keeping our undo history, since the peer's edit doesn't undo ours.
+    collabReconciler.foldRemoteChange();
+    refreshJamViews();
+}
+
+bool MainComponent::performJamUndo()
+{
+    // In a session, undo goes through the collab op-log (targeted inverse ops), NOT the app's own
+    // snapshot undo — which would restore a whole-project snapshot and wipe concurrent peer edits.
+    // Returning true consumes the key even with an empty stack, so it can't fall through to that.
+    if (! collabController.isActive())
+        return false;
+
+    if (collabReconciler.undo())
+        refreshJamViews();
+    return true;
+}
+
+bool MainComponent::performJamRedo()
+{
+    if (! collabController.isActive())
+        return false;
+
+    if (collabReconciler.redo())
+        refreshJamViews();
+    return true;
 }
 
 void MainComponent::startJamHosting()

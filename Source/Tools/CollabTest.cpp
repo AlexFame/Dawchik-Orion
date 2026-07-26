@@ -570,8 +570,65 @@ int main()
         oplog::apply(pb, remoteOp);
         cb.broadcast(remoteOp);
         check(pa.getTracks().size() == 2, "A applied the peer's track");
-        rec.captureBaseline();   // exactly what MainComponent does in onProjectChanged
+        rec.foldRemoteChange();   // exactly what MainComponent does after a remote op
         check(rec.sync() == 0, "a remotely-applied change is never echoed back");
+    }
+
+    // ---- Collaborative undo: my undo reverts only MY change; a concurrent peer edit survives. ----
+    {
+        ProjectState pa, pb;
+        LoopbackHub h5;
+        CollabController ca(pa), cb(pb);
+        ca.connect(std::make_unique<LoopbackTransport>(h5, "UA"), 0x0F1);
+        cb.connect(std::make_unique<LoopbackTransport>(h5, "UB"), 0x0F2);
+
+        CollabReconciler rec(pa, ca);
+        rec.captureBaseline();
+        check(! rec.canUndo(), "no undo history at the start");
+
+        // I add a track.
+        { TrackState t; t.name = "Mine"; pa.getTracks().push_back(std::move(t)); }
+        rec.sync();
+        const auto myTrackId = pa.getTracks()[0].id;
+        check(pb.getTracks().size() == 1 && rec.canUndo(), "my track synced and is undoable");
+
+        // Meanwhile the peer adds their own track (arrives as a remote op on my side).
+        const auto peerTrackId = cb.newId();
+        auto peerOp = ops::addTrack(peerTrackId, "Theirs", true);
+        oplog::apply(pb, peerOp);
+        cb.broadcast(peerOp);
+        rec.foldRemoteChange();   // fold the peer change in, keep my undo history
+        check(pa.getTracks().size() == 2, "peer's track landed on my project");
+        check(rec.canUndo(), "peer edit did not wipe my undo history");
+
+        // I undo. Only MY track goes; the peer's stays — on both projects.
+        check(rec.undo(), "undo ran");
+        check(pa.getTracks().size() == 1 && pa.getTracks()[0].id == peerTrackId,
+              "my undo removed only my track, kept the peer's");
+        check(pb.getTracks().size() == 1 && pb.getTracks()[0].id == peerTrackId,
+              "the undo propagated to the peer (their view matches)");
+
+        // Redo brings my track back.
+        check(rec.redo(), "redo ran");
+        bool mineBack = false;
+        for (const auto& t : pb.getTracks()) if (t.id == myTrackId) mineBack = true;
+        check(pa.getTracks().size() == 2 && mineBack, "redo restored my track on both sides");
+
+        // Undo of a whole clip-with-notes edit round-trips its content.
+        rec.captureBaseline();
+        {
+            TimelineClip c; c.name = "Loop"; c.startBeat = 4.0;
+            c.midiNotes.push_back(MidiNote { 64, 0.0, 1.0, 100 });
+            // put it on my track
+            for (auto& t : pa.getTracks()) if (t.id == myTrackId) t.clips.push_back(std::move(c));
+        }
+        rec.sync();
+        EntityId addedClipId = 0;
+        for (auto& t : pa.getTracks()) if (t.id == myTrackId && ! t.clips.empty()) addedClipId = t.clips[0].id;
+        check(addedClipId != 0 && oplog::findClip(pb, addedClipId) != nullptr, "my new clip synced");
+        check(rec.undo(), "undo the clip add");
+        check(oplog::findClip(pa, addedClipId) == nullptr && oplog::findClip(pb, addedClipId) == nullptr,
+              "undo removed the clip on both sides");
     }
 
     std::cout << std::endl;

@@ -195,6 +195,9 @@ private:
     void applyRemoteJamTransport(bool playing, double beat);
     void pollJamReconnect();
     void onJamConnectionChanged(bool connected);
+    void refreshJamViews();
+    bool performJamUndo();
+    bool performJamRedo();
     void saveProjectInteractively();
     void newProjectInteractively();
     void openProjectInteractively();
