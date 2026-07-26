@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AssetStore.h"
 #include "CollabTransport.h"
 #include "CollabTypes.h"
 
@@ -25,7 +26,7 @@ class CollabSession
 {
 public:
     // actorSalt seeds this client's EntityIdGenerator so two clients never mint the same id.
-    CollabSession(ProjectState& state, CollabTransport& transport, EntityId actorSalt);
+    CollabSession(ProjectState& state, CollabTransport& transport, AssetStore& assets, EntityId actorSalt);
     ~CollabSession();
 
     // Mint a fresh, globally-unique id for a new entity the local user is creating.
@@ -71,6 +72,12 @@ public:
     // A chat line arrived (peer message live, or session history replayed on join).
     std::function<void(const juce::String& name, const juce::String& text)> onChat;
 
+    // A requested audio asset finished downloading into the cache (hash -> local file).
+    std::function<void(const juce::String& hash, const juce::File& file)> onAssetReady;
+
+    // Ask peers for an audio file by content hash.
+    void requestAsset(const juce::String& hash) { transport.sendAssetRequest(hash); }
+
     // Live counters — surfaced in the Jam panel so a stalled session can be diagnosed from the UI
     // instead of guessing which link in the chain is broken.
     int opsSent { 0 };
@@ -87,6 +94,7 @@ private:
 
     ProjectState& state;
     CollabTransport& transport;
+    AssetStore& assets;
     EntityIdGenerator ids;
     std::map<ActorId, PeerPresence> presenceByActor;
 };

@@ -25,6 +25,8 @@ public:
     void publish(Op op);
     void publishSnapshot(const juce::var& project);
     void publishPresence(LoopbackTransport* from, const juce::var& presence);
+    void publishAssetRequest(LoopbackTransport* from, const juce::String& hash);
+    void publishAssetData(LoopbackTransport* from, const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes);
     void sendBacklogTo(LoopbackTransport* t);
 
 private:
@@ -51,6 +53,8 @@ public:
     void sendSnapshot(const juce::var& project) override { hub.publishSnapshot(project); }
     void requestBacklog() override { hub.sendBacklogTo(this); }
     void sendPresence(const juce::var& presence) override { hub.publishPresence(this, presence); }
+    void sendAssetRequest(const juce::String& hash) override { hub.publishAssetRequest(this, hash); }
+    void sendAssetData(const juce::String& h, const juce::String& n, const juce::MemoryBlock& b) override { hub.publishAssetData(this, h, n, b); }
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return true; }
 
@@ -66,6 +70,9 @@ public:
         if (onPresenceReceived)
             onPresenceReceived(presence);
     }
+
+    void deliverAssetRequest(const juce::String& hash) { if (onAssetRequested) onAssetRequested(hash); }
+    void deliverAssetData(const juce::String& h, const juce::String& n, const juce::MemoryBlock& b) { if (onAssetData) onAssetData(h, n, b); }
 
     void deliverSnapshot(const juce::var& project)
     {
@@ -98,6 +105,16 @@ inline void LoopbackHub::publishPresence(LoopbackTransport* from, const juce::va
     for (auto* m : members)          // everyone except the sender; presence is never logged
         if (m != from)
             m->deliverPresence(presence);
+}
+
+inline void LoopbackHub::publishAssetRequest(LoopbackTransport* from, const juce::String& hash)
+{
+    for (auto* m : members) if (m != from) m->deliverAssetRequest(hash);
+}
+
+inline void LoopbackHub::publishAssetData(LoopbackTransport* from, const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)
+{
+    for (auto* m : members) if (m != from) m->deliverAssetData(hash, name, bytes);
 }
 
 inline void LoopbackHub::sendBacklogTo(LoopbackTransport* t)

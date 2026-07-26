@@ -45,6 +45,9 @@ public:
     void sendSnapshot(const juce::var& project) override { sendMessage(wire::encode(wire::snapshotMessage(project))); }
     void requestBacklog() override { sendMessage(wire::encode(wire::backlogRequest())); }
     void sendPresence(const juce::var& presence) override { sendMessage(wire::encode(wire::presenceMessage(presence))); }
+    void sendAssetRequest(const juce::String& hash) override { sendMessage(wire::encode(wire::assetRequestMessage(hash))); }
+    void sendAssetData(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes) override
+    { sendMessage(wire::encode(wire::assetDataMessage(hash, name, bytes))); }
 
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return connectedFlag.load(); }
@@ -86,6 +89,29 @@ private:
                 if (auto* self = weak.get())
                     if (self->onPresenceReceived)
                         self->onPresenceReceived(presence);
+            });
+        }
+        else if (kind == wire::kindAssetRequest)
+        {
+            const auto hash = decoded.getProperty("hash", juce::String()).toString();
+            juce::MessageManager::callAsync([weak, hash]
+            {
+                if (auto* self = weak.get())
+                    if (self->onAssetRequested)
+                        self->onAssetRequested(hash);
+            });
+        }
+        else if (kind == wire::kindAssetData)
+        {
+            const auto hash = decoded.getProperty("hash", juce::String()).toString();
+            const auto name = decoded.getProperty("name", juce::String()).toString();
+            juce::MemoryBlock bytes;
+            bytes.fromBase64Encoding(decoded.getProperty("bytes", juce::String()).toString());
+            juce::MessageManager::callAsync([weak, hash, name, bytes]
+            {
+                if (auto* self = weak.get())
+                    if (self->onAssetData)
+                        self->onAssetData(hash, name, bytes);
             });
         }
         else if (kind == wire::kindSnapshot)

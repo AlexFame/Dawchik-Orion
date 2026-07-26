@@ -39,6 +39,10 @@ public:
     // Broadcast our ephemeral presence (cursor position, name, colour) to the other clients.
     virtual void sendPresence(const juce::var& presence) = 0;
 
+    // Audio asset transfer (content-addressed): request a file by hash, or ship its bytes.
+    virtual void sendAssetRequest(const juce::String& hash) = 0;
+    virtual void sendAssetData(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes) = 0;
+
     // Ask the server for the current baseline + every op since it. Called once by a joining client
     // AFTER its callbacks are installed, so the reply can't arrive before anyone is listening.
     virtual void requestBacklog() = 0;
@@ -59,6 +63,11 @@ public:
 
     // A peer told us where they are. Fired often — treat it as cheap.
     std::function<void(const juce::var&)> onPresenceReceived;
+
+    // A peer asked for an asset by hash (we may have its bytes to send back).
+    std::function<void(const juce::String& hash)> onAssetRequested;
+    // An asset's bytes arrived (hash, original filename, bytes).
+    std::function<void(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)> onAssetData;
 
     // The roster changed (someone joined/left, name/colour updated).
     std::function<void(const std::vector<PeerInfo>&)> onPeersChanged;

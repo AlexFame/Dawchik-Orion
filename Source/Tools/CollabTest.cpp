@@ -12,6 +12,7 @@
 #include "../Collab/SocketTransport.h"
 #include "../Core/ProjectState.h"
 
+#include <cstring>
 #include <iostream>
 
 using namespace orion;
@@ -95,8 +96,10 @@ int main()
     ProjectState projA, projB;
     LoopbackHub hub;
     LoopbackTransport transA(hub, "A"), transB(hub, "B");
-    CollabSession sessA(projA, transA, /*salt*/ 0x00A1);
-    CollabSession sessB(projB, transB, /*salt*/ 0x00B2);
+    const auto assetTmp = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("OrionCollabTest-assets");
+    AssetStore assetsA(assetTmp.getChildFile("A")), assetsB(assetTmp.getChildFile("B"));
+    CollabSession sessA(projA, transA, assetsA, /*salt*/ 0x00A1);
+    CollabSession sessB(projB, transB, assetsB, /*salt*/ 0x00B2);
 
     // A builds an arrangement.
     const auto trackId = sessA.newId();
@@ -629,6 +632,56 @@ int main()
         check(rec.undo(), "undo the clip add");
         check(oplog::findClip(pa, addedClipId) == nullptr && oplog::findClip(pb, addedClipId) == nullptr,
               "undo removed the clip on both sides");
+    }
+
+    // ---- Asset transfer: a sample the peer lacks is fetched by content hash. ----
+    {
+        auto pump = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+        const int port = 57000 + juce::Random::getSystemRandom().nextInt(800);
+
+        // A writes a real file (the "sample") only it has.
+        const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("OrionAssetTest");
+        tmp.createDirectory();
+        const auto sampleFile = tmp.getChildFile("kick_" + juce::String(port) + ".wav");
+        juce::MemoryBlock payload;
+        for (int i = 0; i < 4096; ++i) payload.append(&i, 1);
+        sampleFile.replaceWithData(payload.getData(), payload.getSize());
+
+        // Isolated, freshly-cleared cache dirs so the test doesn't see a prior run's cached copy.
+        const auto cacheH = tmp.getChildFile("cacheHost");
+        const auto cacheG = tmp.getChildFile("cacheGuest");
+        cacheH.deleteRecursively();
+        cacheG.deleteRecursively();
+
+        ProjectState ph, pg;
+        CollabController host(ph, cacheH), guest(pg, cacheG);
+        check(host.hostSession(port, "AH", 0xB1), "asset host up");
+        check(guest.joinSession("127.0.0.1", port, "AG", 0xB2), "asset guest joined");
+        pump(120);
+
+        // A registers its local sample -> content hash.
+        const auto hash = host.registerAsset(sampleFile);
+        check(hash.isNotEmpty() && host.hasAsset(hash), "host registered its sample by hash");
+        check(! guest.hasAsset(hash), "guest does not have the sample yet");
+
+        // Guest asks for it; A serves the bytes; guest caches them.
+        juce::File delivered;
+        guest.onAssetReady = [&](const juce::String& h, const juce::File& f) { if (h == hash) delivered = f; };
+        guest.requestAsset(hash);
+        for (int i = 0; i < 40 && ! guest.hasAsset(hash); ++i) pump(25);
+
+        check(guest.hasAsset(hash), "guest received and cached the sample");
+        check(delivered.existsAsFile(), "onAssetReady fired with the local cache file");
+        juce::MemoryBlock got;
+        check(delivered.loadFileAsData(got) && got.getSize() == payload.getSize()
+                  && std::memcmp(got.getData(), payload.getData(), got.getSize()) == 0,
+              "cached bytes match the original exactly");
+        check(AssetStore::hashOfFile(delivered) == hash, "cached file re-hashes to the same content hash");
+
+        guest.disconnect();
+        host.disconnect();
+        pump(30);
+        sampleFile.deleteFile();
     }
 
     std::cout << std::endl;

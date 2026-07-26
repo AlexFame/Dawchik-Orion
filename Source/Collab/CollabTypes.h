@@ -175,6 +175,10 @@ namespace wire
     // op — presence is high-frequency and worthless after the moment it describes, so the server
     // forwards it but never logs it and never replays it to someone joining later.
     inline constexpr const char* kindPresence = "presence";
+    // Content-addressed audio transfer: "I need this file" / "here are its bytes". Not ops — bulk,
+    // request/response, forwarded by the server but not logged into the project history.
+    inline constexpr const char* kindAssetRequest = "assetReq";
+    inline constexpr const char* kindAssetData    = "assetData";
 
     inline juce::String kindOf(const juce::var& message)
     {
@@ -209,6 +213,24 @@ namespace wire
         auto* obj = new juce::DynamicObject();
         obj->setProperty("kind", kindPresence);
         obj->setProperty("presence", presence);
+        return juce::var(obj);
+    }
+
+    inline juce::var assetRequestMessage(const juce::String& hash)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindAssetRequest);
+        obj->setProperty("hash", hash);
+        return juce::var(obj);
+    }
+
+    inline juce::var assetDataMessage(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindAssetData);
+        obj->setProperty("hash", hash);
+        obj->setProperty("name", name);
+        obj->setProperty("bytes", bytes.toBase64Encoding());
         return juce::var(obj);
     }
 

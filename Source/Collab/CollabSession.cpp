@@ -6,12 +6,28 @@
 
 namespace orion::collab
 {
-CollabSession::CollabSession(ProjectState& stateToBind, CollabTransport& transportToUse, EntityId actorSalt)
-    : state(stateToBind), transport(transportToUse), ids(actorSalt)
+CollabSession::CollabSession(ProjectState& stateToBind, CollabTransport& transportToUse, AssetStore& assetStore, EntityId actorSalt)
+    : state(stateToBind), transport(transportToUse), assets(assetStore), ids(actorSalt)
 {
     transport.onOpReceived = [this](const Op& op) { handleIncoming(op); };
     transport.onSnapshotReceived = [this](const juce::var& project) { handleSnapshot(project); };
     transport.onPresenceReceived = [this](const juce::var& presence) { handlePresence(presence); };
+
+    // Serve an asset a peer asked for, if we have its bytes.
+    transport.onAssetRequested = [this](const juce::String& hash)
+    {
+        juce::MemoryBlock bytes;
+        if (assets.loadBytes(hash, bytes))
+            transport.sendAssetData(hash, assets.localFor(hash).getFileName(), bytes);
+    };
+
+    // Cache an asset that arrived and tell the app so it can point clips at the local copy.
+    transport.onAssetData = [this](const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)
+    {
+        const auto file = assets.store(hash, bytes, name);
+        if (file.existsAsFile() && onAssetReady)
+            onAssetReady(hash, file);
+    };
 }
 
 CollabSession::~CollabSession()
@@ -19,6 +35,8 @@ CollabSession::~CollabSession()
     transport.onOpReceived = nullptr;
     transport.onSnapshotReceived = nullptr;
     transport.onPresenceReceived = nullptr;
+    transport.onAssetRequested = nullptr;
+    transport.onAssetData = nullptr;
 }
 
 ActorId CollabSession::localActor() const

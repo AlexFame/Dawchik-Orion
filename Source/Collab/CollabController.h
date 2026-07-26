@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AssetStore.h"
 #include "CollabServer.h"
 #include "OpLog.h"
 #include "CollabSession.h"
@@ -31,14 +32,20 @@ namespace collab
 class CollabController
 {
 public:
-    explicit CollabController(ProjectState& stateToBind) : state(stateToBind) {}
+    explicit CollabController(ProjectState& stateToBind, juce::File assetCacheDir = {})
+        : state(stateToBind),
+          assets(assetCacheDir != juce::File()
+                     ? assetCacheDir
+                     : juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("Orion/collab-assets"))
+    {}
 
     // Go live over the given transport (ownership taken). Stamps stable ids onto the existing
     // project so subsequent ops have something to target, then starts relaying.
     void connect(std::unique_ptr<CollabTransport> transportToOwn, EntityId actorSalt)
     {
         transport = std::move(transportToOwn);
-        session = std::make_unique<CollabSession>(state, *transport, actorSalt);
+        session = std::make_unique<CollabSession>(state, *transport, assets, actorSalt);
+        session->onAssetReady = [this](const juce::String& hash, const juce::File& file) { if (onAssetReady) onAssetReady(hash, file); };
         session->onRemoteApplied = [this] { if (onProjectChanged) onProjectChanged(); };
         session->onRemoteTransport = [this](bool playing, double beat) { if (onRemoteTransport) onRemoteTransport(playing, beat); };
         session->onChat = [this](const juce::String& name, const juce::String& text) { if (onRemoteChat) onRemoteChat(name, text); };
@@ -163,6 +170,20 @@ public:
     // Fired when the socket connects/drops (guest). MainComponent shows status + drives reconnect.
     std::function<void(bool connected)> onConnectionChanged;
 
+    // ---- Audio assets (content-addressed sample transfer) ----
+    // Register a local audio file we reference, returning its content hash (empty if unreadable).
+    juce::String registerAsset(const juce::File& file)
+    {
+        const auto hash = AssetStore::hashOfFile(file);
+        assets.registerLocal(hash, file);
+        return hash;
+    }
+    bool hasAsset(const juce::String& hash) const { return assets.has(hash); }
+    juce::File assetPath(const juce::String& hash) const { return assets.localFor(hash); }
+    void requestAsset(const juce::String& hash) { if (session != nullptr) session->requestAsset(hash); }
+    // A missing asset finished downloading (hash -> local cache file).
+    std::function<void(const juce::String& hash, const juce::File& file)> onAssetReady;
+
     void sendChat(const juce::String& name, const juce::String& text)
     {
         if (session != nullptr)
@@ -199,6 +220,7 @@ private:
     std::unique_ptr<CollabServer> embeddedServer;   // only when hosting
     std::unique_ptr<CollabTransport> transport;
     std::unique_ptr<CollabSession> session;
+    AssetStore assets;
 
     juce::String reconnectAddress;   // set only for a guest, so it can silently reconnect on a drop
     int reconnectPort { 0 };
