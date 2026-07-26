@@ -13,6 +13,7 @@ CollabSession::CollabSession(ProjectState& stateToBind, CollabTransport& transpo
     transport.onOpReceived = [this](const Op& op) { handleIncoming(op); };
     transport.onSnapshotReceived = [this](const juce::var& project) { handleSnapshot(project); };
     transport.onPresenceReceived = [this](const juce::var& presence) { handlePresence(presence); };
+    transport.onVoice = [this](const juce::String& actor, int rate, const juce::MemoryBlock& pcm) { if (onVoice) onVoice(actor, rate, pcm); };
 
     // Serve an asset a peer asked for, if we have its bytes.
     transport.onAssetRequested = [this](const juce::String& hash)
@@ -44,6 +45,7 @@ CollabSession::~CollabSession()
     transport.onPresenceReceived = nullptr;
     transport.onAssetRequested = nullptr;
     transport.onAssetData = nullptr;
+    transport.onVoice = nullptr;
 }
 
 ActorId CollabSession::localActor() const

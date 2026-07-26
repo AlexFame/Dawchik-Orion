@@ -27,6 +27,7 @@ public:
     void publishPresence(LoopbackTransport* from, const juce::var& presence);
     void publishAssetRequest(LoopbackTransport* from, const juce::String& hash);
     void publishAssetData(LoopbackTransport* from, const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes);
+    void publishVoice(LoopbackTransport* from, const juce::String& actor, int rate, const juce::MemoryBlock& pcm);
     void sendBacklogTo(LoopbackTransport* t);
 
 private:
@@ -55,6 +56,7 @@ public:
     void sendPresence(const juce::var& presence) override { hub.publishPresence(this, presence); }
     void sendAssetRequest(const juce::String& hash) override { hub.publishAssetRequest(this, hash); }
     void sendAssetData(const juce::String& h, const juce::String& n, const juce::MemoryBlock& b) override { hub.publishAssetData(this, h, n, b); }
+    void sendVoice(const juce::String& a, int r, const juce::MemoryBlock& p) override { hub.publishVoice(this, a, r, p); }
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return true; }
 
@@ -73,6 +75,7 @@ public:
 
     void deliverAssetRequest(const juce::String& hash) { if (onAssetRequested) onAssetRequested(hash); }
     void deliverAssetData(const juce::String& h, const juce::String& n, const juce::MemoryBlock& b) { if (onAssetData) onAssetData(h, n, b); }
+    void deliverVoice(const juce::String& a, int r, const juce::MemoryBlock& p) { if (onVoice) onVoice(a, r, p); }
 
     void deliverSnapshot(const juce::var& project)
     {
@@ -115,6 +118,11 @@ inline void LoopbackHub::publishAssetRequest(LoopbackTransport* from, const juce
 inline void LoopbackHub::publishAssetData(LoopbackTransport* from, const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)
 {
     for (auto* m : members) if (m != from) m->deliverAssetData(hash, name, bytes);
+}
+
+inline void LoopbackHub::publishVoice(LoopbackTransport* from, const juce::String& actor, int rate, const juce::MemoryBlock& pcm)
+{
+    for (auto* m : members) if (m != from) m->deliverVoice(actor, rate, pcm);
 }
 
 inline void LoopbackHub::sendBacklogTo(LoopbackTransport* t)

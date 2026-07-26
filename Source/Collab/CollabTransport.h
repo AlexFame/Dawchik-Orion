@@ -43,6 +43,9 @@ public:
     virtual void sendAssetRequest(const juce::String& hash) = 0;
     virtual void sendAssetData(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes) = 0;
 
+    // Live voice chunk (mono int16 PCM) tagged with our actor id and its sample rate.
+    virtual void sendVoice(const juce::String& actor, int sampleRate, const juce::MemoryBlock& pcm) = 0;
+
     // Ask the server for the current baseline + every op since it. Called once by a joining client
     // AFTER its callbacks are installed, so the reply can't arrive before anyone is listening.
     virtual void requestBacklog() = 0;
@@ -68,6 +71,8 @@ public:
     std::function<void(const juce::String& hash)> onAssetRequested;
     // An asset's bytes arrived (hash, original filename, bytes).
     std::function<void(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)> onAssetData;
+    // A peer's voice chunk arrived (their actor id, sample rate, mono int16 PCM).
+    std::function<void(const juce::String& actor, int sampleRate, const juce::MemoryBlock& pcm)> onVoice;
 
     // The roster changed (someone joined/left, name/colour updated).
     std::function<void(const std::vector<PeerInfo>&)> onPeersChanged;

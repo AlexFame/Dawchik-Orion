@@ -48,6 +48,8 @@ public:
     void sendAssetRequest(const juce::String& hash) override { sendMessage(wire::encode(wire::assetRequestMessage(hash))); }
     void sendAssetData(const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes) override
     { sendMessage(wire::encode(wire::assetDataMessage(hash, name, bytes))); }
+    void sendVoice(const juce::String& actor, int sampleRate, const juce::MemoryBlock& pcm) override
+    { sendMessage(wire::encode(wire::voiceMessage(actor, sampleRate, pcm))); }
 
     ActorId localActor() const override { return actorId; }
     bool isConnected() const override { return connectedFlag.load(); }
@@ -112,6 +114,20 @@ private:
                 if (auto* self = weak.get())
                     if (self->onAssetData)
                         self->onAssetData(hash, name, bytes);
+            });
+        }
+        else if (kind == wire::kindVoice)
+        {
+            const auto actor = decoded.getProperty("actor", juce::String()).toString();
+            const auto rate = static_cast<int>(decoded.getProperty("rate", 24000));
+            juce::MemoryBlock pcm;
+            pcm.fromBase64Encoding(decoded.getProperty("pcm", juce::String()).toString());
+            juce::WeakReference<SocketTransport> w2(this);
+            juce::MessageManager::callAsync([w2, actor, rate, pcm]
+            {
+                if (auto* self = w2.get())
+                    if (self->onVoice)
+                        self->onVoice(actor, rate, pcm);
             });
         }
         else if (kind == wire::kindSnapshot)

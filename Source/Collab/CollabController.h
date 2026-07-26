@@ -51,6 +51,7 @@ public:
         session->onRemoteApplied = [this] { if (onProjectChanged) onProjectChanged(); };
         session->onRemoteTransport = [this](bool playing, double beat) { if (onRemoteTransport) onRemoteTransport(playing, beat); };
         session->onChat = [this](const juce::String& name, const juce::String& text) { if (onRemoteChat) onRemoteChat(name, text); };
+        session->onVoice = [this](const juce::String& actor, int rate, const juce::MemoryBlock& pcm) { if (onVoiceReceived) onVoiceReceived(actor, rate, pcm); };
         session->assignInitialIds();
     }
 
@@ -216,6 +217,10 @@ public:
     void requestAsset(const juce::String& hash) { if (session != nullptr) session->requestAsset(hash); }
     // A missing asset finished downloading (hash -> local cache file).
     std::function<void(const juce::String& hash, const juce::File& file)> onAssetReady;
+
+    // ---- Live voice ----
+    void sendVoice(int sampleRate, const juce::MemoryBlock& pcm) { if (session != nullptr) session->sendVoice(sampleRate, pcm); }
+    std::function<void(const juce::String& actor, int sampleRate, const juce::MemoryBlock& pcm)> onVoiceReceived;
 
     void sendChat(const juce::String& name, const juce::String& text)
     {

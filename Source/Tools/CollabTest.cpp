@@ -739,6 +739,29 @@ int main()
         sample.deleteFile();
     }
 
+    // ---- Voice frames route to peers and survive the round trip (bytes intact). ----
+    {
+        ProjectState pa, pb;
+        LoopbackHub h6;
+        CollabController ca(pa), cb(pb);
+
+        juce::String heardActor; int heardRate = 0; juce::MemoryBlock heardPcm;
+        cb.onVoiceReceived = [&](const juce::String& actor, int rate, const juce::MemoryBlock& pcm)
+        { heardActor = actor; heardRate = rate; heardPcm = pcm; };
+
+        ca.connect(std::make_unique<LoopbackTransport>(h6, "VoiceA"), 0x0F5);
+        cb.connect(std::make_unique<LoopbackTransport>(h6, "VoiceB"), 0x0F6);
+
+        juce::MemoryBlock frame;
+        for (int i = 0; i < 480; ++i) { const juce::int16 s = static_cast<juce::int16>(i * 31 - 4000); frame.append(&s, sizeof(s)); }
+        ca.sendVoice(24000, frame);
+
+        check(heardActor == "VoiceA" && heardRate == 24000, "peer received the voice frame tagged with sender + rate");
+        check(heardPcm.getSize() == frame.getSize()
+                  && std::memcmp(heardPcm.getData(), frame.getData(), frame.getSize()) == 0,
+              "voice PCM bytes arrived intact");
+    }
+
     std::cout << std::endl;
     if (failures == 0)
         std::cout << "all checks passed" << std::endl;

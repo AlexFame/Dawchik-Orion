@@ -78,6 +78,10 @@ public:
     // Ask peers for an audio file by content hash.
     void requestAsset(const juce::String& hash) { transport.sendAssetRequest(hash); }
 
+    // Live voice: send our mic chunk; onVoice fires when a peer's chunk arrives.
+    void sendVoice(int sampleRate, const juce::MemoryBlock& pcm) { transport.sendVoice(transport.localActor(), sampleRate, pcm); }
+    std::function<void(const juce::String& actor, int sampleRate, const juce::MemoryBlock& pcm)> onVoice;
+
     // Live counters — surfaced in the Jam panel so a stalled session can be diagnosed from the UI
     // instead of guessing which link in the chain is broken.
     int opsSent { 0 };

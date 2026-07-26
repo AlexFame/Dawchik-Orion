@@ -179,6 +179,9 @@ namespace wire
     // request/response, forwarded by the server but not logged into the project history.
     inline constexpr const char* kindAssetRequest = "assetReq";
     inline constexpr const char* kindAssetData    = "assetData";
+    // Live voice: a short chunk of the speaker's mic audio. Ephemeral like presence — forwarded,
+    // never logged, never replayed. Mono int16 PCM as base64.
+    inline constexpr const char* kindVoice        = "voice";
 
     inline juce::String kindOf(const juce::var& message)
     {
@@ -231,6 +234,16 @@ namespace wire
         obj->setProperty("hash", hash);
         obj->setProperty("name", name);
         obj->setProperty("bytes", bytes.toBase64Encoding());
+        return juce::var(obj);
+    }
+
+    inline juce::var voiceMessage(const juce::String& actor, int sampleRate, const juce::MemoryBlock& pcm)
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("kind", kindVoice);
+        obj->setProperty("actor", actor);
+        obj->setProperty("rate", sampleRate);
+        obj->setProperty("pcm", pcm.toBase64Encoding());
         return juce::var(obj);
     }
 

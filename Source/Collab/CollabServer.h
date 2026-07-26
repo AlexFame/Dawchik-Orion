@@ -75,7 +75,8 @@ private:
             return;
         }
 
-        if (kind == wire::kindPresence || kind == wire::kindAssetRequest || kind == wire::kindAssetData)
+        if (kind == wire::kindPresence || kind == wire::kindAssetRequest
+            || kind == wire::kindAssetData || kind == wire::kindVoice)
         {
             // Forward to everyone else and forget it: presence must never enter the op log, or a
             // late joiner would be replayed a stream of stale mouse positions.
