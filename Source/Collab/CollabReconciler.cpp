@@ -1,5 +1,6 @@
 #include "CollabReconciler.h"
 
+#include "AssetRefs.h"
 #include "CollabController.h"
 #include "OpLog.h"
 #include "../Core/ProjectSerializer.h"
@@ -45,8 +46,12 @@ void CollabReconciler::stampNewEntities()
     }
 }
 
-CollabReconciler::Shadow CollabReconciler::snapshotOfLive() const
+CollabReconciler::Shadow CollabReconciler::snapshotOfLive()
 {
+    // Audio references are stored (and therefore broadcast) as content hashes, never local paths —
+    // so both machines converge on the same shadow for the same audio and nothing re-broadcasts.
+    const PathToHash toHash = [this](const juce::String& p) { return controller.assetHashForPath(p); };
+
     Shadow s;
     s.tempoBpm = live.getTempoBpm();
     s.busesJson = toJson(ProjectSerializer::busesToVar(live));
@@ -61,6 +66,7 @@ CollabReconciler::Shadow CollabReconciler::snapshotOfLive() const
         {
             TrackState propsOnly = t;   // hash/store everything EXCEPT clips (the clip diff owns them)
             propsOnly.clips.clear();
+            encodeAssetRefs(propsOnly, toHash);
             ts.propsJson = toJson(ProjectSerializer::trackToVar(propsOnly));
         }
         s.tracks.push_back(std::move(ts));
@@ -70,7 +76,9 @@ CollabReconciler::Shadow CollabReconciler::snapshotOfLive() const
             ClipShadow cs;
             cs.id = c.id;
             cs.owner = t.id;
-            cs.json = toJson(ProjectSerializer::clipToVar(c));
+            TimelineClip encoded = c;
+            encodeAssetRefs(encoded, toHash);
+            cs.json = toJson(ProjectSerializer::clipToVar(encoded));
             s.clips.push_back(std::move(cs));
         }
     }

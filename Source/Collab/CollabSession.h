@@ -91,6 +91,8 @@ private:
     void handleIncoming(const Op& op);
     void handleSnapshot(const juce::var& project);
     void handlePresence(const juce::var& presence);
+    // Turn received "asset://<hash>" audio refs into local paths, requesting any file we lack.
+    void resolveAllAssetRefs();
 
     ProjectState& state;
     CollabTransport& transport;

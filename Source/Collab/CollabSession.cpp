@@ -1,5 +1,6 @@
 #include "CollabSession.h"
 
+#include "AssetRefs.h"
 #include "OpLog.h"
 #include "../Core/ProjectSerializer.h"
 #include "../Core/ProjectState.h"
@@ -25,8 +26,14 @@ CollabSession::CollabSession(ProjectState& stateToBind, CollabTransport& transpo
     transport.onAssetData = [this](const juce::String& hash, const juce::String& name, const juce::MemoryBlock& bytes)
     {
         const auto file = assets.store(hash, bytes, name);
-        if (file.existsAsFile() && onAssetReady)
+        if (! file.existsAsFile())
+            return;
+        if (onAssetReady)
             onAssetReady(hash, file);
+        // A file we were missing arrived — point any clips/tracks waiting on it at the local copy.
+        resolveAllAssetRefs();
+        if (onRemoteApplied)
+            onRemoteApplied();
     };
 }
 
@@ -119,6 +126,30 @@ std::vector<PeerPresence> CollabSession::peers() const
     return out;
 }
 
+void CollabSession::resolveAllAssetRefs()
+{
+    std::vector<juce::String> missing;
+    {
+        const juce::ScopedLock sl(state.getAudioEditLock());
+        const HashToPath resolver = [this, &missing](const juce::String& hash) -> juce::String
+        {
+            const auto f = assets.localFor(hash);
+            if (f.existsAsFile())
+                return f.getFullPathName();
+            missing.push_back(hash);
+            return {};
+        };
+        for (auto& t : state.getTracks())
+        {
+            resolveAssetRefs(t, resolver);
+            for (auto& c : t.clips)
+                resolveAssetRefs(c, resolver);
+        }
+    }
+    for (const auto& h : missing)   // request outside the lock
+        transport.sendAssetRequest(h);
+}
+
 void CollabSession::handleSnapshot(const juce::var& project)
 {
     // Replacing the whole project reallocates every clips/notes vector the audio thread may be
@@ -128,6 +159,7 @@ void CollabSession::handleSnapshot(const juce::var& project)
         const juce::ScopedLock sl(state.getAudioEditLock());
         ProjectSerializer::fromVar(state, project);
     }
+    resolveAllAssetRefs();
 
     if (onRemoteApplied)
         onRemoteApplied();
@@ -161,6 +193,7 @@ void CollabSession::handleIncoming(const Op& op)
     if (oplog::apply(state, op))
     {
         ++opsApplied;
+        resolveAllAssetRefs();
         if (onRemoteApplied)
             onRemoteApplied();
     }

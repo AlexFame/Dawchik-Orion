@@ -684,6 +684,61 @@ int main()
         sampleFile.deleteFile();
     }
 
+    // ---- End to end: a clip's audio file is fetched and its path resolved on the peer. ----
+    {
+        auto pump = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+        const int port = 58000 + juce::Random::getSystemRandom().nextInt(800);
+
+        const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("OrionAssetE2E");
+        tmp.createDirectory();
+        const auto cacheH = tmp.getChildFile("cH"); cacheH.deleteRecursively();
+        const auto cacheG = tmp.getChildFile("cG"); cacheG.deleteRecursively();
+        const auto sample = tmp.getChildFile("bass_" + juce::String(port) + ".wav");
+        juce::MemoryBlock payload;
+        for (int i = 0; i < 5000; ++i) { const auto b = juce::uint8(i * 7); payload.append(&b, 1); }
+        sample.replaceWithData(payload.getData(), payload.getSize());
+
+        ProjectState ph, pg;
+        CollabController host(ph, cacheH), guest(pg, cacheG);
+        check(host.hostSession(port, "E2EH", 0x1), "e2e host up");
+        check(guest.joinSession("127.0.0.1", port, "E2EG", 0x2), "e2e guest joined");
+        CollabReconciler rec(ph, host);
+        rec.captureBaseline();
+        pump(120);
+
+        // Host drops in an audio clip referencing a local file the guest has never seen.
+        {
+            TrackState t; t.name = "Bass";
+            TimelineClip c; c.name = "BassLoop"; c.type = ClipType::audio;
+            c.sourcePath = sample.getFullPathName();
+            t.clips.push_back(std::move(c));
+            ph.getTracks().push_back(std::move(t));
+        }
+        rec.sync();
+
+        // Let the clip op reach the guest, which then fetches the missing sample and resolves it.
+        for (int i = 0; i < 80; ++i)
+        {
+            pump(25);
+            if (! pg.getTracks().empty() && ! pg.getTracks()[0].clips.empty()
+                && ! isAssetRef(pg.getTracks()[0].clips[0].sourcePath))
+                break;
+        }
+
+        check(pg.getTracks().size() == 1 && pg.getTracks()[0].clips.size() == 1, "guest received the audio clip");
+        const auto guestPath = pg.getTracks()[0].clips[0].sourcePath;
+        check(! guestPath.isEmpty() && ! isAssetRef(guestPath), "guest clip path resolved off the asset:// sentinel");
+        check(juce::File(guestPath).existsAsFile(), "guest clip points at a real local file");
+        check(AssetStore::hashOfFile(juce::File(guestPath)) == AssetStore::hashOfFile(sample),
+              "the fetched file is byte-identical to the host's sample");
+        check(juce::File(guestPath) != sample, "and it is the guest's OWN local copy, not the host's path");
+
+        guest.disconnect();
+        host.disconnect();
+        pump(30);
+        sample.deleteFile();
+    }
+
     std::cout << std::endl;
     if (failures == 0)
         std::cout << "all checks passed" << std::endl;

@@ -91,7 +91,7 @@ private:
     };
 
     void stampNewEntities();               // give ids to anything the DAW just created
-    Shadow snapshotOfLive() const;
+    Shadow snapshotOfLive();               // non-const: memoised asset hashing may populate a cache
 
     // Build the forward ops (what changed) and the inverse ops (how to undo it) between the current
     // shadow and `current`. Forward ops are broadcast; both are recorded for undo/redo.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AssetRefs.h"
 #include "AssetStore.h"
 #include "CollabServer.h"
 #include "OpLog.h"
@@ -9,6 +10,7 @@
 #include "SocketTransport.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 
 namespace orion
@@ -178,6 +180,37 @@ public:
         assets.registerLocal(hash, file);
         return hash;
     }
+
+    // Local path -> content hash, memoised by (path, modtime) so a WAV isn't re-hashed on every
+    // sync tick. Registers the file as a local original. Empty if the path is missing/unreadable.
+    juce::String assetHashForPath(const juce::String& path)
+    {
+        if (path.isEmpty())
+            return {};
+
+        juce::File f(path);
+        if (! f.existsAsFile())
+            return {};
+
+        const auto stamp = f.getLastModificationTime().toMilliseconds();
+        if (auto it = pathHashCache.find(path); it != pathHashCache.end() && it->second.first == stamp)
+            return it->second.second;
+
+        const auto hash = registerAsset(f);
+        pathHashCache[path] = { stamp, hash };
+        return hash;
+    }
+
+    // A hash -> a local path if we already have the file; otherwise request it and return empty so
+    // the caller keeps the sentinel until the bytes arrive.
+    juce::String assetPathOrRequest(const juce::String& hash)
+    {
+        const auto f = assets.localFor(hash);
+        if (f.existsAsFile())
+            return f.getFullPathName();
+        requestAsset(hash);
+        return {};
+    }
     bool hasAsset(const juce::String& hash) const { return assets.has(hash); }
     juce::File assetPath(const juce::String& hash) const { return assets.localFor(hash); }
     void requestAsset(const juce::String& hash) { if (session != nullptr) session->requestAsset(hash); }
@@ -221,6 +254,7 @@ private:
     std::unique_ptr<CollabTransport> transport;
     std::unique_ptr<CollabSession> session;
     AssetStore assets;
+    std::map<juce::String, std::pair<juce::int64, juce::String>> pathHashCache;   // path -> (modtime, hash)
 
     juce::String reconnectAddress;   // set only for a guest, so it can silently reconnect on a drop
     int reconnectPort { 0 };
