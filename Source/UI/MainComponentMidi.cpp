@@ -79,12 +79,12 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
     else
         lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
 
-    if (pendingMpcCommandLearn && message.isController()
+    if (mpc.pendingCommandLearn && message.isController()
         && mpcHardwareBridge.shouldHandleInput(message, sourceName, mpcSamplePanel.isVisible()))
     {
-        const auto command = *pendingMpcCommandLearn;
-        pendingMpcCommandLearn.reset();
-        mpcCcCommandMap[mpcCcKey(message.getChannel(), message.getControllerNumber())] = command;
+        const auto command = *mpc.pendingCommandLearn;
+        mpc.pendingCommandLearn.reset();
+        mpc.ccCommandMap[mpcCcKey(message.getChannel(), message.getControllerNumber())] = command;
         appendLiveMidiDebugLog(message, sourceName, -1);
         lastLiveMidiSignalText = "MPC map cc " + juce::String(message.getControllerNumber())
             + " -> " + mpcCommandName(command);
@@ -107,8 +107,8 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
         const auto pad = mpcHardwareBridge.handleIncomingMessage(message, sourceName);
         if (message.isController())
         {
-            const auto mapped = mpcCcCommandMap.find(mpcCcKey(message.getChannel(), message.getControllerNumber()));
-            if (mapped != mpcCcCommandMap.end())
+            const auto mapped = mpc.ccCommandMap.find(mpcCcKey(message.getChannel(), message.getControllerNumber()));
+            if (mapped != mpc.ccCommandMap.end())
             {
                 appendLiveMidiDebugLog(message, sourceName, -1);
                 if (message.getControllerValue() >= 64)
@@ -135,8 +135,8 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
 
         // Kit mode: only loaded pads sound. 16 Levels/Tune mode: one selected sample
         // is pitched across all 16 pad notes, so empty pads must still be consumed here.
-        const bool tuneMode = mpcSixteenLevels && mpcTuneSourcePath.isNotEmpty();
-        const bool chopMode = mpcChopMode && mpcChopSourcePath.isNotEmpty();
+        const bool tuneMode = mpc.sixteenLevels && mpc.tuneSourcePath.isNotEmpty();
+        const bool chopMode = mpc.chopMode && mpc.chopSourcePath.isNotEmpty();
         if (mpcSamplePanel.isVisible() && pad && (tuneMode || chopMode || mpcSamplePanel.isPadLoaded(pad->padIndex)))
         {
             int tunePadIndex = pad->padIndex;
@@ -146,7 +146,7 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
                 // encoding the "level" as channel or velocity variation instead of chromatic notes.
                 // If all hits map to the selected root pad, use channel first and velocity buckets
                 // so Orion still produces 16 pitched levels instead of replaying one note.
-                const int rootPad = juce::jlimit(0, 15, mpcTuneRootNote - 36);
+                const int rootPad = juce::jlimit(0, 15, mpc.tuneRootNote - 36);
                 if (pad->padIndex == rootPad)
                 {
                     if (message.getChannel() >= 1 && message.getChannel() <= 16)
@@ -156,8 +156,8 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
 
                     if (message.isNoteOn() && tunePadIndex == rootPad && pad->velocity == 127)
                     {
-                        ++mpcRepeatedRootNoteCount;
-                        if (mpcRepeatedRootNoteCount >= 4)
+                        ++mpc.repeatedRootNoteCount;
+                        if (mpc.repeatedRootNoteCount >= 4)
                             statusLabel.setText("MPC 16 Levels: hardware is sending only note "
                                                 + juce::String(message.getNoteNumber())
                                                 + " / pad " + juce::String(rootPad + 1)
@@ -166,7 +166,7 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
                     }
                     else
                     {
-                        mpcRepeatedRootNoteCount = 0;
+                        mpc.repeatedRootNoteCount = 0;
                     }
                 }
             }
@@ -175,28 +175,28 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
             const int hardwareNoteKey = message.getChannel() * 128 + message.getNoteNumber();
             if (message.isNoteOn())
             {
-                if (mpcHeldHardwareNoteKeys.count(hardwareNoteKey) > 0)
+                if (mpc.heldHardwareNoteKeys.count(hardwareNoteKey) > 0)
                 {
-                    const auto releaseIt = mpcHardwareNoteReleaseTimes.find(hardwareNoteKey);
+                    const auto releaseIt = mpc.hardwareNoteReleaseTimes.find(hardwareNoteKey);
                     const auto now = juce::Time::getMillisecondCounterHiRes();
-                    if (releaseIt == mpcHardwareNoteReleaseTimes.end()
+                    if (releaseIt == mpc.hardwareNoteReleaseTimes.end()
                         || now - releaseIt->second < mpcPadRearmDelayMs)
                     {
-                        mpcHardwareNoteReleaseTimes.erase(hardwareNoteKey);
+                        mpc.hardwareNoteReleaseTimes.erase(hardwareNoteKey);
                         return;
                     }
 
-                    mpcHeldHardwareNoteKeys.erase(hardwareNoteKey);
-                    mpcHardwareNoteReleaseTimes.erase(hardwareNoteKey);
-                    mpcHardwareNotePads.erase(hardwareNoteKey);
+                    mpc.heldHardwareNoteKeys.erase(hardwareNoteKey);
+                    mpc.hardwareNoteReleaseTimes.erase(hardwareNoteKey);
+                    mpc.hardwareNotePads.erase(hardwareNoteKey);
                 }
 
-                mpcHeldHardwareNoteKeys.insert(hardwareNoteKey);
-                mpcHardwareNotePads[hardwareNoteKey] = tunePadIndex;
+                mpc.heldHardwareNoteKeys.insert(hardwareNoteKey);
+                mpc.hardwareNotePads[hardwareNoteKey] = tunePadIndex;
                 if (tuneMode)
                 {
                     liveMidiDisplayNotes.erase(message.getNoteNumber());
-                    liveMidiDisplayNotes.insert(mpcTuneRootNote + (tunePadIndex - juce::jlimit(0, 15, mpcTuneRootNote - 36)));
+                    liveMidiDisplayNotes.insert(mpc.tuneRootNote + (tunePadIndex - juce::jlimit(0, 15, mpc.tuneRootNote - 36)));
                     lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
                 }
                 playMpcPad(tunePadIndex, pad->velocity);
@@ -205,10 +205,10 @@ void MainComponent::routeLiveMidiMessage(const juce::MidiMessage& message, const
             {
                 if (tuneMode)
                 {
-                    liveMidiDisplayNotes.erase(mpcTuneRootNote + (tunePadIndex - juce::jlimit(0, 15, mpcTuneRootNote - 36)));
+                    liveMidiDisplayNotes.erase(mpc.tuneRootNote + (tunePadIndex - juce::jlimit(0, 15, mpc.tuneRootNote - 36)));
                     lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
                 }
-                mpcHardwareNoteReleaseTimes[hardwareNoteKey] = juce::Time::getMillisecondCounterHiRes();
+                mpc.hardwareNoteReleaseTimes[hardwareNoteKey] = juce::Time::getMillisecondCounterHiRes();
             }
 
             return;

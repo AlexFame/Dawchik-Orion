@@ -18,7 +18,7 @@ void MainComponent::triggerMpcPad(int padIndex, int velocity)
     padIndex = juce::jlimit(0, 15, padIndex);
     if (velocity > 0)
     {
-        mpcSelectedPad = padIndex;
+        mpc.selectedPad = padIndex;
         updateMpcPerformanceState();
     }
 
@@ -35,7 +35,7 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
     if (padIndex < 0 || padIndex > 15 || arrangementPlaybackSource == nullptr)
         return;
 
-    if (velocity > 0 && mpcPadActiveNotes.count(padIndex) > 0)
+    if (velocity > 0 && mpc.padActiveNotes.count(padIndex) > 0)
         return;
 
     // Tune/melodic mode: one sample pitched across the pads. For live play, keep the
@@ -48,28 +48,28 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
     const bool trackChop = kit >= 0
                         && projectState.getTracks()[static_cast<std::size_t>(kit)].isMpcChopMode
                         && projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample.isNotEmpty();
-    const bool tune = mpcSixteenLevels && (mpcTuneSourcePath.isNotEmpty() || trackTune);
-    const bool chop = ! tune && mpcChopMode && (mpcChopSourcePath.isNotEmpty() || trackChop);
-    const int note = (velocity > 0 || mpcPadActiveNotes.count(padIndex) == 0)
+    const bool tune = mpc.sixteenLevels && (mpc.tuneSourcePath.isNotEmpty() || trackTune);
+    const bool chop = ! tune && mpc.chopMode && (mpc.chopSourcePath.isNotEmpty() || trackChop);
+    const int note = (velocity > 0 || mpc.padActiveNotes.count(padIndex) == 0)
         ? (tune ? mpcTuneMidiNoteForPad(padIndex) : 36 + padIndex)
-        : mpcPadActiveNotes[padIndex];
+        : mpc.padActiveNotes[padIndex];
 
     juce::String sourcePath;
-    int rootNote = tune ? (mpcTuneRootNote + mpcTuneOctaveOffset * 12) : note;
+    int rootNote = tune ? (mpc.tuneRootNote + mpc.tuneOctaveOffset * 12) : note;
     if (chop)
     {
-        if (mpcChopSourcePath.isNotEmpty())
-            sourcePath = mpcChopSourcePath;
+        if (mpc.chopSourcePath.isNotEmpty())
+            sourcePath = mpc.chopSourcePath;
         else
             sourcePath = projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample;
         rootNote = 36;
     }
     else if (tune)
     {
-        if (mpcTuneSourcePath.isNotEmpty())
+        if (mpc.tuneSourcePath.isNotEmpty())
         {
-            sourcePath = mpcTuneSourcePath;
-            rootNote = mpcTuneRootNote;
+            sourcePath = mpc.tuneSourcePath;
+            rootNote = mpc.tuneRootNote;
         }
         else
         {
@@ -90,8 +90,8 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
         // Kit mode is drum-style: each pad is one sound. Tune/16 Levels is melodic, so let
         // Orion's shared Chord Mode expand a pad into a chord just like the sampler keyboard.
         const auto pitches = tune ? chordPitchesForNote(note) : std::vector<int>{ note };
-        mpcPadActiveNotes[padIndex] = note;
-        mpcChordVoicing[note] = pitches;
+        mpc.padActiveNotes[padIndex] = note;
+        mpc.chordVoicing[note] = pitches;
         for (const auto p : pitches)
         {
             arrangementPlaybackSource->samplerNoteOn(sourcePath, p, velocity, rootNote, 0.0,
@@ -105,10 +105,10 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
     else
     {
         auto pitches = std::vector<int>{ note };
-        if (const auto it = mpcChordVoicing.find(note); it != mpcChordVoicing.end())
+        if (const auto it = mpc.chordVoicing.find(note); it != mpc.chordVoicing.end())
         {
             pitches = it->second;
-            mpcChordVoicing.erase(it);
+            mpc.chordVoicing.erase(it);
         }
 
         for (const auto p : pitches)
@@ -116,15 +116,15 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
             arrangementPlaybackSource->samplerNoteOff(p, SamplerPlaybackMode::oneShot, false);
             recordNoteOff(p);
         }
-        mpcPadActiveNotes.erase(padIndex);
+        mpc.padActiveNotes.erase(padIndex);
     }
 }
 
 int MainComponent::mpcTuneMidiNoteForPad(int padIndex) const
 {
-    const int rootPad = juce::jlimit(0, 15, mpcTuneRootNote - 36);
+    const int rootPad = juce::jlimit(0, 15, mpc.tuneRootNote - 36);
     const int degreeOffset = juce::jlimit(0, 15, padIndex) - rootPad;
-    const int chromatic = mpcTuneRootNote + degreeOffset + mpcTuneOctaveOffset * 12;
+    const int chromatic = mpc.tuneRootNote + degreeOffset + mpc.tuneOctaveOffset * 12;
 
     if (! projectState.isKeyEnabled() || ! projectState.isScaleLockEnabled())
         return juce::jlimit(0, 127, chromatic);
@@ -134,7 +134,7 @@ int MainComponent::mpcTuneMidiNoteForPad(int padIndex) const
     const auto& scale = projectState.isKeyMinor() ? minorScale : majorScale;
     const int keyRoot = ((projectState.getKeyRoot() % 12) + 12) % 12;
 
-    const int rootPc = (((mpcTuneRootNote - keyRoot) % 12) + 12) % 12;
+    const int rootPc = (((mpc.tuneRootNote - keyRoot) % 12) + 12) % 12;
     int rootDegree = 0;
     int bestDistance = 128;
     int bestDelta = 0;
@@ -152,7 +152,7 @@ int MainComponent::mpcTuneMidiNoteForPad(int padIndex) const
         }
     }
 
-    const int snappedRoot = mpcTuneRootNote + bestDelta + mpcTuneOctaveOffset * 12;
+    const int snappedRoot = mpc.tuneRootNote + bestDelta + mpc.tuneOctaveOffset * 12;
     const int snappedRootOctave = (snappedRoot - keyRoot - scale[static_cast<std::size_t>(rootDegree)]) / 12;
     const int totalDegree = rootDegree + degreeOffset;
     const int octaveCarry = totalDegree >= 0 ? totalDegree / 7 : -((-totalDegree + 6) / 7);
@@ -238,15 +238,15 @@ void MainComponent::syncMpcTuneMode()
             }
 
     const auto tunePath = mpcSamplePanel.getPadSourcePath(selPad);
-    mpcTuneSourcePath = mpcSixteenLevels ? tunePath : juce::String();
-    mpcTuneRootNote = 36 + selPad;
+    mpc.tuneSourcePath = mpc.sixteenLevels ? tunePath : juce::String();
+    mpc.tuneRootNote = 36 + selPad;
 
     {
         const juce::ScopedLock sl(projectState.getAudioEditLock());
         auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
         if (tunePath.isNotEmpty())
             t.mpcKitSamples[static_cast<std::size_t>(selPad)] = tunePath;
-        t.isMpcTuneMode = mpcSixteenLevels && tunePath.isNotEmpty();
+        t.isMpcTuneMode = mpc.sixteenLevels && tunePath.isNotEmpty();
         t.mpcTuneSample = tunePath;
         t.mpcTuneRoot   = 36 + selPad;   // the selected pad plays at original pitch
         if (t.isMpcTuneMode)
@@ -272,9 +272,9 @@ void MainComponent::assignMpcKitSample(int padIndex, const juce::String& sourceP
         auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
         t.isMpcKit = true;
         t.mpcKitSamples[static_cast<std::size_t>(padIndex)] = sourcePath;
-        if (mpcChopMode && padIndex == mpcSamplePanel.getSelectedPad())
+        if (mpc.chopMode && padIndex == mpcSamplePanel.getSelectedPad())
         {
-            mpcChopSourcePath = sourcePath;
+            mpc.chopSourcePath = sourcePath;
             t.isMpcTuneMode = false;
             t.mpcTuneSample = {};
             t.isMpcChopMode = true;
@@ -283,9 +283,9 @@ void MainComponent::assignMpcKitSample(int padIndex, const juce::String& sourceP
             t.mpcChopSliceCount = 16;
         }
     }
-    if (mpcSixteenLevels)
+    if (mpc.sixteenLevels)
     {
-        mpcRepeatedRootNoteCount = 0;
+        mpc.repeatedRootNoteCount = 0;
         syncMpcTuneMode();
     }
     arrangementTimeline.repaint();
@@ -321,29 +321,29 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
             statusLabel.setText("MPC: sequence mode selected", juce::dontSendNotification);
             break;
         case MpcSamplePanelComponent::Command::padFx:
-            mpcFullLevel = ! mpcFullLevel;
-            statusLabel.setText(mpcFullLevel ? "MPC: Full Level on" : "MPC: Full Level off", juce::dontSendNotification);
+            mpc.fullLevel = ! mpc.fullLevel;
+            statusLabel.setText(mpc.fullLevel ? "MPC: Full Level on" : "MPC: Full Level off", juce::dontSendNotification);
             break;
         case MpcSamplePanelComponent::Command::knobFx:
             statusLabel.setText("MPC: knob FX is hardware-side", juce::dontSendNotification);
             break;
         case MpcSamplePanelComponent::Command::shift:
-            mpcSixteenLevels = false;
-            mpcChopMode = false;
-            mpcChopSourcePath = {};
-            mpcFullLevel = false;
-            mpcPadBank = 0;
-            mpcTuneOctaveOffset = 0;
-            mpcHeldHardwareNoteKeys.clear();
-            mpcHardwareNoteReleaseTimes.clear();
-            mpcHardwareNotePads.clear();
-            mpcPadActiveNotes.clear();
-            mpcChordVoicing.clear();
+            mpc.sixteenLevels = false;
+            mpc.chopMode = false;
+            mpc.chopSourcePath = {};
+            mpc.fullLevel = false;
+            mpc.padBank = 0;
+            mpc.tuneOctaveOffset = 0;
+            mpc.heldHardwareNoteKeys.clear();
+            mpc.hardwareNoteReleaseTimes.clear();
+            mpc.hardwareNotePads.clear();
+            mpc.padActiveNotes.clear();
+            mpc.chordVoicing.clear();
             statusLabel.setText("MPC: performance reset", juce::dontSendNotification);
             break;
         case MpcSamplePanelComponent::Command::padBank:
-            mpcPadBank = (mpcPadBank + 1) % 4;
-            statusLabel.setText("MPC: Pad bank " + juce::String(static_cast<juce::juce_wchar>('A' + mpcPadBank)),
+            mpc.padBank = (mpc.padBank + 1) % 4;
+            statusLabel.setText("MPC: Pad bank " + juce::String(static_cast<juce::juce_wchar>('A' + mpc.padBank)),
                                 juce::dontSendNotification);
             break;
         case MpcSamplePanelComponent::Command::chop:
@@ -360,23 +360,23 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
             const auto chopPath = mpcSamplePanel.getPadSourcePath(sourcePad);
             if (chopPath.isEmpty())
             {
-                mpcChopMode = false;
-                mpcChopSourcePath = {};
+                mpc.chopMode = false;
+                mpc.chopSourcePath = {};
                 statusLabel.setText("MPC Chop: drop a sample on a pad first", juce::dontSendNotification);
                 break;
             }
 
-            mpcChopMode = ! mpcChopMode;
-            mpcSixteenLevels = false;
-            mpcTuneSourcePath = {};
-            mpcTuneOctaveOffset = 0;
-            mpcChopSourcePath = mpcChopMode ? chopPath : juce::String();
-            mpcSelectedPad = sourcePad;
-            mpcHeldHardwareNoteKeys.clear();
-            mpcHardwareNoteReleaseTimes.clear();
-            mpcHardwareNotePads.clear();
-            mpcPadActiveNotes.clear();
-            mpcChordVoicing.clear();
+            mpc.chopMode = ! mpc.chopMode;
+            mpc.sixteenLevels = false;
+            mpc.tuneSourcePath = {};
+            mpc.tuneOctaveOffset = 0;
+            mpc.chopSourcePath = mpc.chopMode ? chopPath : juce::String();
+            mpc.selectedPad = sourcePad;
+            mpc.heldHardwareNoteKeys.clear();
+            mpc.hardwareNoteReleaseTimes.clear();
+            mpc.hardwareNotePads.clear();
+            mpc.padActiveNotes.clear();
+            mpc.chordVoicing.clear();
 
             if (const int idx = mpcKitTrackIndex(); idx >= 0 && idx < static_cast<int>(projectState.getTracks().size()))
             {
@@ -384,13 +384,13 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
                 auto& t = projectState.getTracks()[static_cast<std::size_t>(idx)];
                 t.isMpcTuneMode = false;
                 t.mpcTuneSample = {};
-                t.isMpcChopMode = mpcChopMode;
-                t.mpcChopSample = mpcChopSourcePath;
+                t.isMpcChopMode = mpc.chopMode;
+                t.mpcChopSample = mpc.chopSourcePath;
                 t.mpcChopRootPad = sourcePad;
                 t.mpcChopSliceCount = 16;
             }
 
-            statusLabel.setText(mpcChopMode ? "MPC Chop: pads trigger 16 slices"
+            statusLabel.setText(mpc.chopMode ? "MPC Chop: pads trigger 16 slices"
                                             : "MPC Chop: off",
                                 juce::dontSendNotification);
             break;
@@ -414,30 +414,30 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
 
             if (! hasSampleForTune)
             {
-                mpcSixteenLevels = false;
-                mpcTuneSourcePath = {};
-                mpcChopMode = false;
-                mpcChopSourcePath = {};
-                mpcHeldHardwareNoteKeys.clear();
-                mpcHardwareNoteReleaseTimes.clear();
-                mpcHardwareNotePads.clear();
-                mpcPadActiveNotes.clear();
-                mpcChordVoicing.clear();
+                mpc.sixteenLevels = false;
+                mpc.tuneSourcePath = {};
+                mpc.chopMode = false;
+                mpc.chopSourcePath = {};
+                mpc.heldHardwareNoteKeys.clear();
+                mpc.hardwareNoteReleaseTimes.clear();
+                mpc.hardwareNotePads.clear();
+                mpc.padActiveNotes.clear();
+                mpc.chordVoicing.clear();
                 statusLabel.setText("MPC: drop a sample on a pad before 16 Levels", juce::dontSendNotification);
                 break;
             }
 
-            mpcSixteenLevels = ! mpcSixteenLevels;
-            mpcChopMode = false;
-            mpcChopSourcePath = {};
-            mpcRepeatedRootNoteCount = 0;
-            mpcHeldHardwareNoteKeys.clear();
-            mpcHardwareNoteReleaseTimes.clear();
-            mpcHardwareNotePads.clear();
-            mpcPadActiveNotes.clear();
-            mpcChordVoicing.clear();
+            mpc.sixteenLevels = ! mpc.sixteenLevels;
+            mpc.chopMode = false;
+            mpc.chopSourcePath = {};
+            mpc.repeatedRootNoteCount = 0;
+            mpc.heldHardwareNoteKeys.clear();
+            mpc.hardwareNoteReleaseTimes.clear();
+            mpc.hardwareNotePads.clear();
+            mpc.padActiveNotes.clear();
+            mpc.chordVoicing.clear();
             syncMpcTuneMode();   // Tune/melodic: one sample pitched across the pads
-            statusLabel.setText(mpcSixteenLevels ? "MPC: Tune — scale pads, +/- octave"
+            statusLabel.setText(mpc.sixteenLevels ? "MPC: Tune — scale pads, +/- octave"
                                                  : "MPC: Kit mode", juce::dontSendNotification);
             break;
         }
@@ -460,17 +460,17 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
             toggleTransportFromUi();
             break;
         case MpcSamplePanelComponent::Command::undo:
-            if (mpcSixteenLevels)
+            if (mpc.sixteenLevels)
             {
                 if (arrangementPlaybackSource != nullptr)
                     arrangementPlaybackSource->allSamplerNotesOff();
-                mpcTuneOctaveOffset = juce::jlimit(-4, 4, mpcTuneOctaveOffset - 1);
-                mpcHeldHardwareNoteKeys.clear();
-                mpcHardwareNoteReleaseTimes.clear();
-                mpcHardwareNotePads.clear();
-                mpcPadActiveNotes.clear();
-                mpcChordVoicing.clear();
-                statusLabel.setText("MPC: Octave " + juce::String(mpcTuneOctaveOffset), juce::dontSendNotification);
+                mpc.tuneOctaveOffset = juce::jlimit(-4, 4, mpc.tuneOctaveOffset - 1);
+                mpc.heldHardwareNoteKeys.clear();
+                mpc.hardwareNoteReleaseTimes.clear();
+                mpc.hardwareNotePads.clear();
+                mpc.padActiveNotes.clear();
+                mpc.chordVoicing.clear();
+                statusLabel.setText("MPC: Octave " + juce::String(mpc.tuneOctaveOffset), juce::dontSendNotification);
             }
             else
             {
@@ -478,17 +478,17 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
             }
             break;
         case MpcSamplePanelComponent::Command::redo:
-            if (mpcSixteenLevels)
+            if (mpc.sixteenLevels)
             {
                 if (arrangementPlaybackSource != nullptr)
                     arrangementPlaybackSource->allSamplerNotesOff();
-                mpcTuneOctaveOffset = juce::jlimit(-4, 4, mpcTuneOctaveOffset + 1);
-                mpcHeldHardwareNoteKeys.clear();
-                mpcHardwareNoteReleaseTimes.clear();
-                mpcHardwareNotePads.clear();
-                mpcPadActiveNotes.clear();
-                mpcChordVoicing.clear();
-                statusLabel.setText("MPC: Octave " + juce::String(mpcTuneOctaveOffset), juce::dontSendNotification);
+                mpc.tuneOctaveOffset = juce::jlimit(-4, 4, mpc.tuneOctaveOffset + 1);
+                mpc.heldHardwareNoteKeys.clear();
+                mpc.hardwareNoteReleaseTimes.clear();
+                mpc.hardwareNotePads.clear();
+                mpc.padActiveNotes.clear();
+                mpc.chordVoicing.clear();
+                statusLabel.setText("MPC: Octave " + juce::String(mpc.tuneOctaveOffset), juce::dontSendNotification);
             }
             else
             {
@@ -505,7 +505,7 @@ void MainComponent::handleMpcCommand(MpcSamplePanelComponent::Command command)
 
 void MainComponent::beginMpcCommandLearn(MpcSamplePanelComponent::Command command)
 {
-    pendingMpcCommandLearn = command;
+    mpc.pendingCommandLearn = command;
     statusLabel.setText("MPC Learn: press hardware control for " + mpcCommandName(command),
                         juce::dontSendNotification);
     lastLiveMidiSignalText = "MPC learn " + mpcCommandName(command);
@@ -516,31 +516,31 @@ void MainComponent::beginMpcCommandLearn(MpcSamplePanelComponent::Command comman
 
 void MainComponent::updateMpcPerformanceState()
 {
-    mpcSamplePanel.setPerformanceState(mpcFullLevel, mpcSixteenLevels, mpcChopMode, mpcPadBank, mpcSelectedPad);
+    mpcSamplePanel.setPerformanceState(mpc.fullLevel, mpc.sixteenLevels, mpc.chopMode, mpc.padBank, mpc.selectedPad);
 }
 
 void MainComponent::mpcTapTempo()
 {
     const auto now = juce::Time::getMillisecondCounterHiRes();
-    if (mpcLastTapMs > 0.0)
+    if (mpc.lastTapMs > 0.0)
     {
-        const auto interval = now - mpcLastTapMs;
+        const auto interval = now - mpc.lastTapMs;
         if (interval > 250.0 && interval < 2000.0)
         {
-            mpcTapIntervalsMs.push_back(interval);
-            while (mpcTapIntervalsMs.size() > 4)
-                mpcTapIntervalsMs.erase(mpcTapIntervalsMs.begin());
+            mpc.tapIntervalsMs.push_back(interval);
+            while (mpc.tapIntervalsMs.size() > 4)
+                mpc.tapIntervalsMs.erase(mpc.tapIntervalsMs.begin());
 
-            const auto sum = std::accumulate(mpcTapIntervalsMs.begin(), mpcTapIntervalsMs.end(), 0.0);
-            const auto bpm = 60000.0 / (sum / static_cast<double>(mpcTapIntervalsMs.size()));
+            const auto sum = std::accumulate(mpc.tapIntervalsMs.begin(), mpc.tapIntervalsMs.end(), 0.0);
+            const auto bpm = 60000.0 / (sum / static_cast<double>(mpc.tapIntervalsMs.size()));
             transportController.setTempoBpm(bpm);
             updateTransportLabels();
             statusLabel.setText("MPC: Tap tempo " + juce::String(projectState.getTempoBpm(), 1) + " BPM",
                                 juce::dontSendNotification);
         }
         else
-            mpcTapIntervalsMs.clear();
+            mpc.tapIntervalsMs.clear();
     }
-    mpcLastTapMs = now;
+    mpc.lastTapMs = now;
 }
 } // namespace orion

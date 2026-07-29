@@ -208,13 +208,13 @@ void MainComponent::loadProjectFromFile(const juce::File& file)
             for (int pad = 0; pad < 16; ++pad)
                 if (t.mpcKitSamples[static_cast<std::size_t>(pad)].isNotEmpty())
                     mpcSamplePanel.loadSampleOntoPad(pad, juce::File(t.mpcKitSamples[static_cast<std::size_t>(pad)]));
-            mpcSixteenLevels = t.isMpcTuneMode;   // restore Tune toggle for the panel indicator
-            mpcTuneSourcePath = t.isMpcTuneMode ? t.mpcTuneSample : juce::String();
-            mpcTuneRootNote = t.mpcTuneRoot;
-            mpcChopMode = t.isMpcChopMode;
-            mpcChopSourcePath = t.isMpcChopMode ? t.mpcChopSample : juce::String();
-            if (mpcChopMode)
-                mpcSixteenLevels = false;
+            mpc.sixteenLevels = t.isMpcTuneMode;   // restore Tune toggle for the panel indicator
+            mpc.tuneSourcePath = t.isMpcTuneMode ? t.mpcTuneSample : juce::String();
+            mpc.tuneRootNote = t.mpcTuneRoot;
+            mpc.chopMode = t.isMpcChopMode;
+            mpc.chopSourcePath = t.isMpcChopMode ? t.mpcChopSample : juce::String();
+            if (mpc.chopMode)
+                mpc.sixteenLevels = false;
             updateMpcPerformanceState();
             break;
         }

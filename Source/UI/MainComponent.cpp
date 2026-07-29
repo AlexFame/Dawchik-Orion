@@ -2432,10 +2432,10 @@ void MainComponent::timerCallback()
     }
 
     static constexpr double mpcPadRearmDelayMs = 140.0;
-    if (! mpcHardwareNoteReleaseTimes.empty())
+    if (! mpc.hardwareNoteReleaseTimes.empty())
     {
         const auto now = juce::Time::getMillisecondCounterHiRes();
-        for (auto it = mpcHardwareNoteReleaseTimes.begin(); it != mpcHardwareNoteReleaseTimes.end();)
+        for (auto it = mpc.hardwareNoteReleaseTimes.begin(); it != mpc.hardwareNoteReleaseTimes.end();)
         {
             if (now - it->second < mpcPadRearmDelayMs)
             {
@@ -2444,13 +2444,13 @@ void MainComponent::timerCallback()
             }
 
             const auto key = it->first;
-            const auto padIt = mpcHardwareNotePads.find(key);
-            if (padIt != mpcHardwareNotePads.end())
+            const auto padIt = mpc.hardwareNotePads.find(key);
+            if (padIt != mpc.hardwareNotePads.end())
                 playMpcPad(padIt->second, 0);
 
-            mpcHeldHardwareNoteKeys.erase(key);
-            mpcHardwareNotePads.erase(key);
-            it = mpcHardwareNoteReleaseTimes.erase(it);
+            mpc.heldHardwareNoteKeys.erase(key);
+            mpc.hardwareNotePads.erase(key);
+            it = mpc.hardwareNoteReleaseTimes.erase(it);
         }
     }
 
@@ -2746,11 +2746,11 @@ void MainComponent::refreshMidiInputDevices()
     const auto outputDevices = juce::MidiOutput::getAvailableDevices();
     visibleMidiInputCount = devices.size();
     const auto mpcState = mpcHardwareBridge.refreshDevices(devices, outputDevices);
-    if (mpcState.inputConnected != mpcInputConnected || mpcState.inputName != mpcInputName)
+    if (mpcState.inputConnected != mpc.inputConnected || mpcState.inputName != mpc.inputName)
     {
-        mpcInputConnected = mpcState.inputConnected;
-        mpcInputName = mpcState.inputName;
-        statusLabel.setText(mpcInputConnected ? "MPC MIDI IN: " + mpcInputName : "MPC MIDI IN: listening",
+        mpc.inputConnected = mpcState.inputConnected;
+        mpc.inputName = mpcState.inputName;
+        statusLabel.setText(mpc.inputConnected ? "MPC MIDI IN: " + mpc.inputName : "MPC MIDI IN: listening",
                             juce::dontSendNotification);
     }
     mpcSamplePanel.setConnectionState(mpcState.inputConnected, mpcState.inputName);

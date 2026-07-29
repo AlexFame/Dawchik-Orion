@@ -35,6 +35,7 @@
 #include "MpcSampleHardwareBridge.h"
 #include "MpcSampleMapping.h"
 #include "MpcSamplePanelComponent.h"
+#include "MpcState.h"
 #include "PluginPickerComponent.h"
 #include "SelectionInspectorComponent.h"
 #include "StepSequencerComponent.h"
@@ -121,11 +122,7 @@ private:
     void syncChordModeToSurfaces();
     std::map<int, std::vector<int>> liveChordVoicing;      // hardware-MIDI held keys → sounded pitches
     std::map<int, std::vector<int>> samplerChordVoicing;   // sampler-keyboard held keys → sounded pitches
-    std::map<int, std::vector<int>> mpcChordVoicing;       // MPC 16 Levels held pads → sounded pitches
-    std::map<int, int> mpcPadActiveNotes;                  // pad index → exact note sounded at note-on
-    std::set<int> mpcHeldHardwareNoteKeys;                 // channel/note latch: ignore repeat note-ons while held
-    std::map<int, double> mpcHardwareNoteReleaseTimes;     // delayed re-arm: filters MPC pressure/note-repeat chatter
-    std::map<int, int> mpcHardwareNotePads;                // channel/note → Orion pad index for delayed note-off
+    // (MPC 16-Levels voicing + hardware note-latch state now live in `mpc` — see MpcState.h.)
     // Enables + attaches every available MIDI input device, skipping ones already
     // connected. Called at launch and polled so freshly plugged-in keyboards work
     // without a restart.
@@ -295,23 +292,11 @@ private:
     MixerPanelComponent mixerPanel;
     MpcSamplePanelComponent mpcSamplePanel;
     MpcSampleHardwareBridge mpcHardwareBridge;
-    bool mpcFullLevel { false };
-    bool mpcSixteenLevels { false };
-    bool mpcChopMode { false };
-    juce::String mpcTuneSourcePath;
-    juce::String mpcChopSourcePath;
-    int mpcTuneRootNote { 36 };
-    int mpcTuneOctaveOffset { 0 };
-    int mpcRepeatedRootNoteCount { 0 };
+    // All MPC Sample runtime state (modes, tune/chop sources, tap-tempo, command-learn, note-latch).
+    MpcState mpc;
     void appendLiveMidiDebugLog(const juce::MidiMessage& message,
                                 const juce::String& sourceName,
                                 int mappedPadIndex);
-    std::optional<MpcSamplePanelComponent::Command> pendingMpcCommandLearn;
-    std::map<int, MpcSamplePanelComponent::Command> mpcCcCommandMap;
-    int mpcPadBank { 0 };
-    int mpcSelectedPad { 0 };
-    double mpcLastTapMs { 0.0 };
-    std::vector<double> mpcTapIntervalsMs;
     AddTrackDialogComponent addTrackDialog;
     PluginPickerComponent pluginPicker;
     int pluginPickerTargetTrack { 0 };
@@ -422,8 +407,7 @@ private:
     bool globalSpacePreviewWasRecordArmed { false };
     bool jamSessionOpen { false };
     juce::StringArray seenMidiInputDeviceIds;     // devices auto-enabled once (plug-and-play)
-    bool mpcInputConnected { false };
-    juce::String mpcInputName;
+    // (mpcInputConnected / mpcInputName now live in `mpc` — see MpcState.h.)
     double lastLiveMidiActivityMs { -10000.0 };
     juce::String lastLiveMidiSignalText { "MIDI --" };
     std::set<int> liveMidiDisplayNotes;
