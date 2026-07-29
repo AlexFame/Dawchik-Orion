@@ -66,7 +66,8 @@ void MainComponent::publishJamPresence()
         arrangementTimeline.getMouseXYRelative(), beat, contentY);
 
     const auto me = localActorId();
-    collabController.publishPresence(localDisplayName(), colourForActor(me), beat, contentY, overTimeline);
+    collabController.publishPresence(localDisplayName(), colourForActor(me), beat, contentY, overTimeline,
+                                     jamSession.isInCall());
 
     // And hand the peers' cursors to the timeline, which draws them without knowing what collab is.
     std::vector<ArrangementTimelineComponent::RemoteCursor> cursors;
@@ -114,9 +115,9 @@ void MainComponent::updateJamDiagnostics()
     // Real roster: this machine first, then every live peer with the colour it uses for its cursor.
     std::vector<JamSessionComponent::RosterMember> roster;
     const auto me = localActorId();
-    roster.push_back({ localDisplayName() + " (you)", colourForActor(me), true });
+    roster.push_back({ localDisplayName() + " (you)", colourForActor(me), true, jamSession.isInCall() });
     for (const auto& p : collabController.peers())
-        roster.push_back({ p.name, p.colourArgb, false });
+        roster.push_back({ p.name, p.colourArgb, false, p.inCall });
     jamSession.setRoster(roster);
 }
 
@@ -145,6 +146,14 @@ void MainComponent::applyRemoteJamTransport(bool playing, double beat)
     updateTransportLabels();
 }
 
+void MainComponent::applyRemoteCallEnded()
+{
+    // The host ended the call for everyone. Drop our own A/V call, but don't bounce the message back.
+    jamApplyingRemoteCallEnd = true;
+    jamSession.endCall();
+    jamApplyingRemoteCallEnd = false;
+}
+
 void MainComponent::pollJamReconnect()
 {
     if (! collabController.isActive() || ! collabController.canReconnect())
@@ -167,6 +176,7 @@ void MainComponent::pollJamReconnect()
         collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
         collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
         collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
+        collabController.onRemoteCallEnded = [this] { applyRemoteCallEnded(); };
         collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
         collabController.onVoiceReceived = [this](const juce::String&, int rate, const juce::MemoryBlock& pcm)
         { voiceChat.pushRemoteVoice(rate, pcm); };
@@ -259,6 +269,7 @@ void MainComponent::startJamHosting()
     collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
     collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
     collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
+    collabController.onRemoteCallEnded = [this] { applyRemoteCallEnded(); };
     collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
     jamWasConnected = true;
     jamLastSentPlaying = transportEngine.isPlaying();
@@ -312,6 +323,7 @@ void MainComponent::joinJamSession()
         collabController.onProjectChanged = [this] { refreshAfterRemoteJamEdit(); };
         collabController.onRemoteTransport = [this](bool playing, double beat) { applyRemoteJamTransport(playing, beat); };
         collabController.onRemoteChat = [this](const juce::String& name, const juce::String& text) { jamSession.receiveChat(name, text); };
+        collabController.onRemoteCallEnded = [this] { applyRemoteCallEnded(); };
         collabController.onConnectionChanged = [this](bool c) { onJamConnectionChanged(c); };
         jamWasConnected = true;
         jamLastSentPlaying = transportEngine.isPlaying();

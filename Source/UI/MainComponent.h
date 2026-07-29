@@ -194,6 +194,7 @@ private:
     void sendJamChat(const juce::String& text);
     void syncJamTransportOut();
     void applyRemoteJamTransport(bool playing, double beat);
+    void applyRemoteCallEnded();
     void pollJamReconnect();
     void onJamConnectionChanged(bool connected);
     bool toggleJamMic(bool enabled);
@@ -275,6 +276,8 @@ private:
     collab::CollabController collabController { projectState };
     collab::CollabReconciler collabReconciler { projectState, collabController };
     VoiceChatEngine voiceChat;
+    // Enables hover tooltips app-wide (JUCE needs one live TooltipWindow in the hierarchy).
+    juce::TooltipWindow tooltipWindow { this, 600 };
     TransportEngine transportEngine;
     TransportController transportController;
     ArrangementTimelineComponent arrangementTimeline;
@@ -429,6 +432,7 @@ private:
     int collabDiagnosticsCounter { 0 };           // refreshes the Jam health line ~1 Hz
     int collabPresenceCounter { 0 };              // broadcasts our live cursor ~20 Hz
     bool jamApplyingRemoteTransport { false };    // guards the transport feedback loop
+    bool jamApplyingRemoteCallEnd { false };      // guards against re-broadcasting a host's end-call
     bool jamLastSentPlaying { false };            // last play state we broadcast
     int  jamReconnectCounter { 0 };               // throttles guest reconnect attempts (~2s)
     bool jamWasConnected { true };                // tracks the socket state for status messaging

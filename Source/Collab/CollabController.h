@@ -51,6 +51,7 @@ public:
         session->onRemoteApplied = [this] { if (onProjectChanged) onProjectChanged(); };
         session->onRemoteTransport = [this](bool playing, double beat) { if (onRemoteTransport) onRemoteTransport(playing, beat); };
         session->onChat = [this](const juce::String& name, const juce::String& text) { if (onRemoteChat) onRemoteChat(name, text); };
+        session->onCallEnded = [this] { if (onRemoteCallEnded) onRemoteCallEnded(); };
         session->onVoice = [this](const juce::String& actor, int rate, const juce::MemoryBlock& pcm) { if (onVoiceReceived) onVoiceReceived(actor, rate, pcm); };
         session->assignInitialIds();
     }
@@ -144,10 +145,10 @@ public:
 
     // ---- Live presence (Figma-style cursors) ----
     void publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
-                         double beat, double contentY, bool overTimeline)
+                         double beat, double contentY, bool overTimeline, bool inCall)
     {
         if (session != nullptr)
-            session->publishPresence(displayName, colourArgb, beat, contentY, overTimeline);
+            session->publishPresence(displayName, colourArgb, beat, contentY, overTimeline, inCall);
     }
 
     std::vector<PeerPresence> peers() const
@@ -227,6 +228,16 @@ public:
         if (session != nullptr)
             broadcast(collab::ops::chat(name, text));
     }
+
+    // Host-only: end the video call for every participant.
+    void endCallForEveryone()
+    {
+        if (session != nullptr)
+            broadcast(collab::ops::endCallForAll());
+    }
+
+    // The host ended the call for everyone — our local Jam panel drops its own call.
+    std::function<void()> onRemoteCallEnded;
 
     // One-line health summary for the Jam panel. A stalled session is otherwise invisible: this
     // says whether the socket is up, how many clients the server sees, and whether ops are

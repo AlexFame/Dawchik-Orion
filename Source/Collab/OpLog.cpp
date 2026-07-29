@@ -394,6 +394,7 @@ namespace oplog
             case OpType::removeSlide:
             case OpType::editSlide:
             case OpType::setTransport:
+            case OpType::endCallForAll:   // control message — routed in CollabSession, never a ProjectState edit
             case OpType::unknown:
             default:
                 // Not yet wired (pitch slides / shared transport land in later phases).
@@ -422,6 +423,12 @@ namespace ops
     {
         Op op; op.type = OpType::chatMessage;
         op.payload = makePayload({ { "name", fromName }, { "text", text } });
+        return op;
+    }
+
+    Op endCallForAll()
+    {
+        Op op; op.type = OpType::endCallForAll;
         return op;
     }
 

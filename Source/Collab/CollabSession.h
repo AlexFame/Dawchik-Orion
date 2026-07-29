@@ -55,7 +55,7 @@ public:
 
     // Tell the others where we are (Figma-style live cursor). Cheap and frequent; never logged.
     void publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
-                         double beat, double contentY, bool overTimeline);
+                         double beat, double contentY, bool overTimeline, bool inCall);
 
     // Peers seen recently, stalest entries dropped. Safe to call every frame.
     std::vector<PeerPresence> peers() const;
@@ -71,6 +71,9 @@ public:
 
     // A chat line arrived (peer message live, or session history replayed on join).
     std::function<void(const juce::String& name, const juce::String& text)> onChat;
+
+    // The host ended the video call for everyone — drop our own call locally.
+    std::function<void()> onCallEnded;
 
     // A requested audio asset finished downloading into the cache (hash -> local file).
     std::function<void(const juce::String& hash, const juce::File& file)> onAssetReady;

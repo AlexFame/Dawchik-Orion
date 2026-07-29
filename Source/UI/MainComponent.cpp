@@ -901,6 +901,12 @@ MainComponent::MainComponent()
     jamSession.onCreateSessionRequested = [this]() { startJamHosting(); };
     jamSession.onJoinSessionRequested   = [this]() { joinJamSession(); };
     jamSession.onLeaveSessionRequested  = [this]() { leaveJamSession(); };
+    jamSession.onLocalCallEnded = [this]()
+    {
+        // Only the host ends the call for everyone; a guest hanging up affects only itself.
+        if (! jamApplyingRemoteCallEnd && collabController.isHosting())
+            collabController.endCallForEveryone();
+    };
     jamSession.onSendChat = [this](const juce::String& text) { sendJamChat(text); };
     jamSession.onMicEnabledChanged = [this](bool enabled)
     {
@@ -3371,6 +3377,12 @@ void MainComponent::toggleJamSessionFromUi()
 {
     jamSessionOpen = ! jamSessionOpen;
     jamSession.setVisible(jamSessionOpen);
+
+    // Closing the Jam view turns the A/V call off (no hidden camera), but KEEPS the collab session
+    // so a misclick doesn't drop you — reopen and you're still jamming.
+    if (! jamSessionOpen && collabController.isActive())
+        jamSession.endCall();
+
     updateTransportLabels();
     resized();
     repaint();

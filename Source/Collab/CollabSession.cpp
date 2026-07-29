@@ -83,7 +83,7 @@ void CollabSession::requestBacklog()
 }
 
 void CollabSession::publishPresence(const juce::String& displayName, juce::uint32 colourArgb,
-                                   double beat, double contentY, bool overTimeline)
+                                   double beat, double contentY, bool overTimeline, bool inCall)
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty("actor", transport.localActor());
@@ -92,6 +92,7 @@ void CollabSession::publishPresence(const juce::String& displayName, juce::uint3
     obj->setProperty("beat", beat);
     obj->setProperty("y", contentY);
     obj->setProperty("over", overTimeline);
+    obj->setProperty("call", inCall);
     ++presenceSent;
     transport.sendPresence(juce::var(obj));
 }
@@ -108,6 +109,7 @@ void CollabSession::handlePresence(const juce::var& presence)
     p.beat = static_cast<double>(presence.getProperty("beat", 0.0));
     p.contentY = static_cast<double>(presence.getProperty("y", 0.0));
     p.overTimeline = static_cast<bool>(presence.getProperty("over", false));
+    p.inCall = static_cast<bool>(presence.getProperty("call", false));
     p.lastSeenMs = juce::Time::currentTimeMillis();
     ++presenceReceived;
     presenceByActor[p.actor] = p;
@@ -189,6 +191,13 @@ void CollabSession::handleIncoming(const Op& op)
         if (onChat)
             onChat(op.payload.getProperty("name", juce::String()).toString(),
                    op.payload.getProperty("text", juce::String()).toString());
+        return;
+    }
+
+    if (op.type == OpType::endCallForAll)
+    {
+        if (onCallEnded)
+            onCallEnded();
         return;
     }
 

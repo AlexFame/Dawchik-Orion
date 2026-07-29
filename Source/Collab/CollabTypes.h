@@ -44,6 +44,9 @@ struct PeerPresence
     // the cursor to one height and lose all vertical movement between/below tracks.
     double       contentY { 0.0 };
     bool         overTimeline { false };
+    // Whether this peer is currently in the A/V call (Zoom-style): drives whether their video tile
+    // shows. Leaving the call (red hang-up) flips this off while they stay in the jam.
+    bool         inCall { false };
     juce::int64  lastSeenMs { 0 };
 };
 
@@ -110,6 +113,7 @@ enum class OpType
     setTempo,
     setTransport,       // play / stop / position — keeps everyone phase-locked
     chatMessage,        // routed to the chat handler (not ProjectState); logged so joiners see history
+    endCallForAll,      // host ends the video call for every participant (routed, not ProjectState)
 
     // Bring-up escape hatch: replace one clip's whole note vector in a single op. Coarser than
     // per-note ops (loses fine-grained merging) but trivially correct — used before per-note
@@ -286,6 +290,7 @@ inline juce::String toString(OpType t)
         case OpType::setTempo:         return "setTempo";
         case OpType::setTransport:     return "setTransport";
         case OpType::chatMessage:      return "chatMessage";
+        case OpType::endCallForAll:    return "endCallForAll";
         case OpType::replaceClipNotes: return "replaceClipNotes";
         case OpType::unknown:          break;
     }

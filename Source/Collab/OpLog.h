@@ -51,6 +51,9 @@ namespace ops
     // A chat line. Routed to the chat handler; logged by the server so a late joiner sees history.
     Op chat(const juce::String& fromName, const juce::String& text);
 
+    // Host-only: end the video call for everyone. Routed to a handler, never applied to ProjectState.
+    Op endCallForAll();
+
     // Whole-mixer sync (buses + master inserts) from ProjectSerializer data.
     Op replaceBuses(const juce::var& busesData);
     Op replaceMasterInserts(const juce::var& insertsData);

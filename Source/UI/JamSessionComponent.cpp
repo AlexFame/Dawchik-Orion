@@ -253,6 +253,23 @@ JamSessionComponent::JamSessionComponent()
     styleButton(settingsButton, "utility");
     styleButton(sendButton, "primary");
 
+    // Shown centred in the video strip once you've hung up, so there's an obvious way back into the call.
+    rejoinButton.addListener(this);
+    rejoinButton.setWantsKeyboardFocus(false);
+    styleButton(rejoinButton, "primary");
+    rejoinButton.setTooltip("Rejoin the video call");
+    addChildComponent(rejoinButton);   // visibility toggled in refreshControls
+
+    // Tooltips — the call-control icons aren't self-explanatory (esp. the red "leave" one).
+    micButton.setTooltip("Microphone - talk to everyone in the jam");
+    cameraButton.setTooltip("Camera - share your video");
+    shareButton.setTooltip("Share your screen");
+    exitButton.setTooltip("Leave the call - your video tile disappears for everyone (you stay in the jam)");
+    createButton.setTooltip("Host a session others can join");
+    joinButton.setTooltip("Join / leave a session");
+    tipButton.setTooltip("Attach a file or sample to the chat");
+    emoteButton.setTooltip("Send a reaction");
+
     tipButton.setButtonText("+");
     emoteButton.setButtonText("Emoji");
     settingsButton.setButtonText("");
@@ -345,7 +362,10 @@ juce::Rectangle<int> JamSessionComponent::embeddedVideoBounds() const
 
 juce::Rectangle<int> JamSessionComponent::localCameraPreviewBounds() const
 {
-    return localParticipantTileBounds().withTrimmedBottom(28);
+    // The camera preview is a NATIVE video layer that draws on top of any JUCE component, so the
+    // mic/camera controls and name can't overlay it — they'd be hidden. Reserve a strip at the
+    // bottom for them and let the video fill everything above it, edge to edge.
+    return localParticipantTileBounds().reduced(1).withTrimmedBottom(40);
 }
 
 juce::Rectangle<int> JamSessionComponent::localParticipantTileBounds() const
@@ -379,8 +399,8 @@ void JamSessionComponent::attachCallControlsTo(juce::Component& parent)
 
 void JamSessionComponent::layoutCallControls(juce::Rectangle<int> bounds)
 {
-    auto callControls = bounds.withSizeKeepingCentre(juce::jmin(bounds.getWidth() - 18, 244), 34);
-    callControls.setY(bounds.getBottom() - 42);
+    auto callControls = bounds.withSizeKeepingCentre(juce::jmin(bounds.getWidth() - 12, 244), 30);
+    callControls.setY(bounds.getBottom() - 36);
     micButton.setBounds(callControls.removeFromLeft(50));
     callControls.removeFromLeft(8);
     cameraButton.setBounds(callControls.removeFromLeft(50));
@@ -398,10 +418,9 @@ void JamSessionComponent::timerCallback()
 void JamSessionComponent::updateCallControlsVisibility()
 {
     auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().roundToInt();
-    const auto hoverArea = cameraPreview != nullptr && cameraEnabled
-                               ? cameraPreview->getScreenBounds()
-                               : localAreaToGlobal(localParticipantTileBounds());
-    const auto shouldShow = hoverArea.contains(mouse);
+    const auto hoverArea = localAreaToGlobal(localParticipantTileBounds());
+    // No local tile when we've left the call, so there's nothing to hover controls over.
+    const auto shouldShow = callActive && hoverArea.contains(mouse);
 
     if (callControlsVisible == shouldShow)
         return;
@@ -409,6 +428,45 @@ void JamSessionComponent::updateCallControlsVisibility()
     callControlsVisible = shouldShow;
     for (auto* button : { &micButton, &cameraButton, &shareButton, &exitButton })
         button->setVisible(callControlsVisible);
+}
+
+void JamSessionComponent::positionRejoinButton(juce::Rectangle<int> stripInner, int tileW, int tileGap)
+{
+    if (callActive)
+        return;   // in the call — button hidden (refreshControls also toggles visibility)
+
+    const int joinSlot = static_cast<int>(visibleTileIndices().size());
+    if (joinSlot >= 4)
+        return;   // strip full of peer tiles, no room — the caption overlay isn't shown either
+
+    auto slot = stripInner;
+    for (int s = 0; s < joinSlot; ++s)
+    {
+        slot.removeFromLeft(tileW);
+        slot.removeFromLeft(tileGap);
+    }
+    auto joinTile = slot.removeFromLeft(tileW);
+
+    // Lower half of the join tile, matching the placeholder caption drawn on top.
+    auto lower = joinTile.removeFromBottom(joinTile.getHeight() / 2).reduced(10, 0);
+    rejoinButton.setBounds(juce::Rectangle<int>(0, 0, juce::jmin(120, lower.getWidth()), 30)
+                               .withCentre({ lower.getCentreX(), lower.getCentreY() }));
+    rejoinButton.toFront(false);
+}
+
+std::vector<int> JamSessionComponent::visibleTileIndices() const
+{
+    // Peers who are in the call always get a tile — even if WE'VE left — so a rejoin is visible to
+    // everyone (otherwise a host who ended the call would never see a guest come back). Our own tile
+    // (index 0) shows only while we're in the call.
+    std::vector<int> idx;
+    for (int i = 0; i < static_cast<int>(participants.size()); ++i)
+    {
+        const bool isLocal = (i == 0);
+        if (isLocal ? callActive : participants[static_cast<std::size_t>(i)].inCall)
+            idx.push_back(i);
+    }
+    return idx;
 }
 
 void JamSessionComponent::mouseDown(const juce::MouseEvent& event)
@@ -557,12 +615,23 @@ void JamSessionComponent::paint(juce::Graphics& g)
         auto tiles = videoStrip.reduced(12.0f);
         const auto tileGap = 10.0f;
         const auto tileW = (tiles.getWidth() - tileGap * 3.0f) / 4.0f;
-        for (int i = 0; i < 4; ++i)
+        const auto vis = visibleTileIndices();
+        const int joinSlot = callActive ? -1 : static_cast<int>(vis.size());
+        for (int slot = 0; slot < 4; ++slot)
         {
             auto tile = tiles.removeFromLeft(tileW);
-            if (i != 3) tiles.removeFromLeft(tileGap);
-            if (i < static_cast<int>(participants.size()))
-                drawParticipantTile(g, tile, participants[static_cast<std::size_t>(i)], false);
+            if (slot != 3) tiles.removeFromLeft(tileGap);
+            if (slot < static_cast<int>(vis.size()))
+            {
+                const int pi = vis[static_cast<std::size_t>(slot)];
+                drawParticipantTile(g, tile, participants[static_cast<std::size_t>(pi)], false);
+                if (pi == 0 && cameraEnabled)
+                    drawLocalCameraFrame(g, tile);
+            }
+            else if (slot == joinSlot)
+            {
+                drawCallEndedPlaceholder(g, tile);   // "You left" + the Join-call button lives here
+            }
             else
             {
                 g.setColour(theme::surface::primary.withAlpha(0.35f));
@@ -640,12 +709,23 @@ void JamSessionComponent::paint(juce::Graphics& g)
     auto videoStrip = stage.reduced(16.0f).removeFromTop(188.0f);
     const auto tileGap = 10.0f;
     const auto tileW = (videoStrip.getWidth() - tileGap * 3.0f) / 4.0f;
-    for (int i = 0; i < 4; ++i)
+    const auto vis = visibleTileIndices();
+    const int joinSlot = callActive ? -1 : static_cast<int>(vis.size());
+    for (int slot = 0; slot < 4; ++slot)
     {
         auto tile = videoStrip.removeFromLeft(tileW);
-        if (i != 3) videoStrip.removeFromLeft(tileGap);
-        if (i < static_cast<int>(participants.size()))
-            drawParticipantTile(g, tile, participants[static_cast<std::size_t>(i)], false);
+        if (slot != 3) videoStrip.removeFromLeft(tileGap);
+        if (slot < static_cast<int>(vis.size()))
+        {
+            const int pi = vis[static_cast<std::size_t>(slot)];
+            drawParticipantTile(g, tile, participants[static_cast<std::size_t>(pi)], false);
+            if (pi == 0 && cameraEnabled)
+                drawLocalCameraFrame(g, tile);
+        }
+        else if (slot == joinSlot)
+        {
+            drawCallEndedPlaceholder(g, tile);
+        }
         else
         {
             g.setColour(theme::surface::primary.withAlpha(0.35f));
@@ -729,16 +809,11 @@ void JamSessionComponent::resized()
         const auto tileGap = 10;
         const auto tileW = (tiles.getWidth() - tileGap * 3) / 4;
         auto localTile = tiles.removeFromLeft(tileW);
-        if (cameraPreview != nullptr && cameraEnabled)
-        {
-            attachCallControlsTo(*cameraPreview);
-            layoutCallControls(cameraPreview->getLocalBounds());
-        }
-        else
-        {
-            attachCallControlsTo(*this);
-            layoutCallControls(localTile.withTrimmedBottom(28));
-        }
+        attachCallControlsTo(*this);
+        layoutCallControls(localTile);
+
+        // "Join call" button, in the lower half of the join-slot tile (after any peer tiles).
+        positionRejoinButton(embeddedVideoBounds().reduced(12), tileW, tileGap);
 
         auto panelBody = chat;
         auto compose = panelBody.removeFromBottom(92);
@@ -762,15 +837,10 @@ void JamSessionComponent::resized()
         setup.removeFromTop(8);
         latencyBox.setBounds(setup.removeFromTop(comboH).toNearestInt());
         refreshControls();
-        if (cameraPreview != nullptr)
+        if (cameraEnabled)
         {
-            cameraPreview->setBounds(localCameraPreviewBounds());
-            cameraPreview->setVisible(cameraEnabled);
-            if (cameraEnabled)
-            {
-                attachCallControlsTo(*cameraPreview);
-                layoutCallControls(cameraPreview->getLocalBounds());
-            }
+            attachCallControlsTo(*this);
+            layoutCallControls(localParticipantTileBounds());
         }
         return;
     }
@@ -811,12 +881,15 @@ void JamSessionComponent::resized()
     main.removeFromRight(318);
     main.removeFromRight(18);
     auto stage = main;
-    auto tiles = stage.reduced(16).removeFromTop(188);
+    auto videoStrip = stage.reduced(16).removeFromTop(188);
+    auto tiles = videoStrip;
     const auto tileGap = 10;
     const auto tileW = (tiles.getWidth() - tileGap * 3) / 4;
     auto localTile = tiles.removeFromLeft(tileW);
     attachCallControlsTo(*this);
     layoutCallControls(localTile.withTrimmedBottom(28));
+
+    positionRejoinButton(videoStrip, tileW, tileGap);
 
     auto setup = panelBody.reduced(0, 0);
     const auto comboH = 32;
@@ -828,8 +901,63 @@ void JamSessionComponent::resized()
     setup.removeFromTop(10);
     latencyBox.setBounds(setup.removeFromTop(comboH).toNearestInt());
     refreshControls();
-    if (cameraPreview != nullptr)
-        cameraPreview->setVisible(false);
+}
+
+void JamSessionComponent::endCall()
+{
+    // "Hang up" (Zoom Leave-call): drop out of the video call entirely — your tile disappears for you
+    // AND for peers (via presence) — but STAY in the jam. A misclick here never drops the collab session.
+    const bool wasInCall = callActive;
+    if (cameraEnabled)
+        stopCamera();
+    if (micEnabled)
+    {
+        micEnabled = false;
+        if (! participants.empty())
+            participants[0].muted = true;
+        if (onMicEnabledChanged)
+            onMicEnabledChanged(false);
+    }
+    sharingEnabled = false;
+    callActive = false;
+    if (! participants.empty())
+        participants[0].inCall = false;
+    // Always give visible feedback so the press never feels dead, even if you'd already left the call.
+    addChatMessage("SYS", wasInCall ? "You left the call - your video is off for everyone (still in the jam)."
+                                    : "You're not in the call - still in the jam.");
+    refreshControls();
+    resized();      // re-place the "Join call" button now that the tile is gone
+    repaint();
+
+    // Let the host broadcast "end call for everyone"; a guest hang-up affects only itself (the host
+    // gates on whether it's actually hosting).
+    if (onLocalCallEnded)
+        onLocalCallEnded();
+}
+
+void JamSessionComponent::joinCall()
+{
+    if (callActive)
+        return;
+    callActive = true;
+    if (! participants.empty())
+        participants[0].inCall = true;
+    addChatMessage("SYS", "You joined the call.");
+    refreshControls();
+    resized();
+    repaint();
+}
+
+void JamSessionComponent::leaveSession()
+{
+    // Deliberately leave the whole session: end the call, then disconnect the collab connection.
+    endCall();
+    connectionState = ConnectionState::ready;
+    networkStatus = {};
+    if (onLeaveSessionRequested)
+        onLeaveSessionRequested();
+    refreshControls();
+    repaint();
 }
 
 void JamSessionComponent::buttonClicked(juce::Button* button)
@@ -849,22 +977,20 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
     else if (button == &joinButton)
     {
         if (connectionState == ConnectionState::live)
-        {
-            if (onLeaveSessionRequested)
-                onLeaveSessionRequested();
-        }
+            leaveSession();             // header "Leave" = deliberately disconnect the session
         else if (onJoinSessionRequested)
-        {
             onJoinSessionRequested();
-        }
 
         refreshControls();
         repaint();
     }
     else if (button == &exitButton)
     {
-        if (onClose)
-            onClose();
+        endCall();                      // red hang-up = leave the call (tile gone); stay in the jam
+    }
+    else if (button == &rejoinButton)
+    {
+        joinCall();                     // "Join call" in the empty strip = re-enter the video call
     }
     else if (button == &chatTab)
     {
@@ -887,6 +1013,8 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
     else if (button == &micButton)
     {
         const auto requestedState = ! micEnabled;
+        if (requestedState && ! callActive)
+            joinCall();                 // turning the mic on re-enters the call (Zoom-style)
         if (onMicEnabledChanged && ! onMicEnabledChanged(requestedState))
             return;
         micEnabled = requestedState;
@@ -898,7 +1026,11 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
     {
         const auto requestedState = ! cameraEnabled;
         if (requestedState)
+        {
+            if (! callActive)
+                joinCall();             // turning the camera on re-enters the call
             startCamera();
+        }
         else
             stopCamera();
     }
@@ -989,6 +1121,7 @@ void JamSessionComponent::setRoster(const std::vector<RosterMember>& members)
             p.muted = ! micEnabled;
             p.cameraOff = ! cameraEnabled;
             p.sharing = sharingEnabled;
+            p.inCall = callActive;
         }
         else
         {
@@ -996,16 +1129,21 @@ void JamSessionComponent::setRoster(const std::vector<RosterMember>& members)
             p.muted = false;
             p.cameraOff = true;
             p.sharing = false;
+            p.inCall = m.inCall;   // only peers actually in the call get a tile
         }
         next.push_back(std::move(p));
     }
 
     if (next.empty())   // never leave the local row absent; other code indexes participants[0]
-        next.push_back(Participant { "You", juce::Colour(0xffd9785f), ! micEnabled, ! cameraEnabled, sharingEnabled });
+        next.push_back(Participant { "You", juce::Colour(0xffd9785f), ! micEnabled, ! cameraEnabled, sharingEnabled, callActive });
 
     if (next != participants)
     {
         participants = std::move(next);
+        // When we're out of the call the "Join call" slot sits after the peer tiles, so a peer
+        // joining/leaving the call must re-place the button.
+        if (! callActive)
+            resized();
         repaint();
     }
 }
@@ -1021,8 +1159,17 @@ void JamSessionComponent::setDiagnostics(const juce::String& text)
 
 void JamSessionComponent::setSessionStatus(bool live, const juce::String& detail)
 {
+    const bool wasLive = connectionState == ConnectionState::live;
     connectionState = live ? ConnectionState::live : ConnectionState::ready;
     networkStatus = detail;
+
+    // Freshly connecting (or reconnecting) puts you in the call by default, like joining a meeting.
+    if (live && ! wasLive)
+    {
+        callActive = true;
+        if (! participants.empty())
+            participants[0].inCall = true;
+    }
 
     // Echo it into the chat too: it's the one place in this panel that's always on screen, so
     // connection results and errors can't go unnoticed.
@@ -1055,6 +1202,9 @@ void JamSessionComponent::refreshControls()
     const auto setupVisible = panelMode == PanelMode::setup;
     for (auto* box : { &audioInputBox, &audioOutputBox, &cameraDeviceBox, &latencyBox })
         box->setVisible(setupVisible);
+    // "Join call" only when we've actually left the call, so the empty strip has a way back.
+    rejoinButton.setVisible(! callActive);
+
     chatEditor.setVisible(panelMode == PanelMode::chat);
     tipButton.setVisible(panelMode == PanelMode::chat);
     emoteButton.setVisible(panelMode == PanelMode::chat);
@@ -1102,14 +1252,11 @@ void JamSessionComponent::startCamera()
                 return;
             }
 
-            safeThis->cameraPreview.reset(safeThis->cameraDevice->createViewerComponent());
-            if (safeThis->cameraPreview != nullptr)
-            {
-                safeThis->addAndMakeVisible(*safeThis->cameraPreview);
-                safeThis->cameraPreview->setBounds(safeThis->localCameraPreviewBounds());
-                safeThis->attachCallControlsTo(*safeThis->cameraPreview);
-                safeThis->layoutCallControls(safeThis->cameraPreview->getLocalBounds());
-            }
+            // Take the frames ourselves and paint them (cover-scaled) instead of embedding the
+            // native viewer, so the video fills the tile exactly and controls can sit on top.
+            safeThis->cameraDevice->addListener(safeThis);
+            safeThis->attachCallControlsTo(*safeThis);
+            safeThis->layoutCallControls(safeThis->localParticipantTileBounds());
 
             safeThis->cameraEnabled = true;
             safeThis->participants[0].cameraOff = false;
@@ -1121,12 +1268,71 @@ void JamSessionComponent::startCamera()
         640, 360, 1920, 1080, true);
 }
 
+void JamSessionComponent::imageReceived(const juce::Image& image)
+{
+    // Called on the camera's background thread. Stash a copy and repaint on the message thread.
+    {
+        const juce::ScopedLock sl(frameLock);
+        latestFrame = image.createCopy();
+    }
+    // Repaint only the local tile, not the whole panel — a full-panel repaint 30x/s would be a
+    // needless software-render load (chat, timeline strip, etc.).
+    juce::Component::SafePointer<JamSessionComponent> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->repaint(safeThis->localParticipantTileBounds().expanded(2));
+    });
+}
+
+void JamSessionComponent::drawLocalCameraFrame(juce::Graphics& g, juce::Rectangle<float> tile)
+{
+    juce::Image frame;
+    { const juce::ScopedLock sl(frameLock); frame = latestFrame; }
+    if (! frame.isValid())
+        return;
+
+    const auto iw = static_cast<float>(frame.getWidth());
+    const auto ih = static_cast<float>(frame.getHeight());
+    if (iw <= 0.0f || ih <= 0.0f)
+        return;
+
+    juce::Graphics::ScopedSaveState state(g);
+    juce::Path clip;
+    clip.addRoundedRectangle(tile, 8.0f);
+    g.reduceClipRegion(clip);
+
+    // COVER: scale so the frame fills the tile on both axes, centre, crop the overflow.
+    const auto scale = juce::jmax(tile.getWidth() / iw, tile.getHeight() / ih);
+    const auto transform = juce::AffineTransform::scale(scale)
+                               .translated(tile.getCentreX() - iw * scale * 0.5f,
+                                           tile.getCentreY() - ih * scale * 0.5f);
+    g.drawImageTransformed(frame, transform);
+
+    // Name chip, top-left, over the video (like a video call). Only the local tile draws the frame,
+    // so participants[0] is us.
+    if (! participants.empty())
+    {
+        const auto name = participants[0].name;
+        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+        const auto textW = juce::jmin(tile.getWidth() - 12.0f,
+                                      static_cast<float>(g.getCurrentFont().getStringWidth(name)) + 16.0f);
+        juce::Rectangle<float> chip(tile.getX() + 6.0f, tile.getY() + 6.0f, textW, 20.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.55f));
+        g.fillRoundedRectangle(chip, 5.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.95f));
+        g.drawText(name, chip.reduced(8.0f, 0.0f), juce::Justification::centredLeft, true);
+    }
+}
+
 void JamSessionComponent::stopCamera()
 {
     cameraOpening = false;
     attachCallControlsTo(*this);
-    cameraPreview.reset();
+    if (cameraDevice != nullptr)
+        cameraDevice->removeListener(this);
     cameraDevice.reset();
+    { const juce::ScopedLock sl(frameLock); latestFrame = {}; }
     cameraEnabled = false;
     participants[0].cameraOff = true;
     cameraDeviceBox.setSelectedId(2, juce::dontSendNotification);
@@ -1260,6 +1466,25 @@ void JamSessionComponent::drawParticipantTile(juce::Graphics& g, juce::Rectangle
              participant.muted ? coral.withAlpha(0.14f) : theme::status::success.withAlpha(0.12f),
              participant.muted ? coral.withAlpha(0.55f) : theme::status::success.withAlpha(0.45f),
              participant.muted ? coral : theme::status::success);
+}
+
+void JamSessionComponent::drawCallEndedPlaceholder(juce::Graphics& g, juce::Rectangle<float> tile) const
+{
+    // A dashed placeholder tile with a caption on top; the rejoinButton (a real child) sits over its
+    // lower half (positioned in resized()).
+    g.setColour(theme::surface::primary.withAlpha(0.35f));
+    g.fillRoundedRectangle(tile, 8.0f);
+    g.setColour(theme::line::subtle.withAlpha(0.85f));
+    g.drawRoundedRectangle(tile.reduced(0.5f), 8.0f, 1.0f);
+
+    auto top = tile.reduced(6.0f);
+    top.removeFromBottom(tile.getHeight() * 0.48f);   // leave the lower half for the button
+    g.setColour(theme::text::secondary);
+    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.drawText("You left the call", top.removeFromTop(18.0f), juce::Justification::centred);
+    g.setColour(theme::text::muted);
+    g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
+    g.drawText("still in the jam", top.removeFromTop(14.0f), juce::Justification::centred, true);
 }
 
 void JamSessionComponent::drawAvatar(juce::Graphics& g, juce::Rectangle<float> area,
