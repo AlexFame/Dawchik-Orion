@@ -18,7 +18,13 @@ void MainComponent::triggerMpcPad(int padIndex, int velocity)
     padIndex = juce::jlimit(0, 15, padIndex);
     if (velocity > 0)
     {
-        mpc.selectedPad = padIndex;
+        // Mirror the panel's chop-aware focus (MpcSamplePanelComponent::setPadActivity): in chop mode
+        // the LCD stays on the SOURCE sample (the pressed pad just lights its slice), and we never move
+        // focus onto an EMPTY pad. Jumping to an unloaded pad dropped the LCD to the "no sample"
+        // hardware screen and hid the chop waveform + slice markers + active-slice highlight.
+        const bool keepChopFocus = mpc.chopMode && mpcSamplePanel.isPadLoaded(mpc.selectedPad);
+        if (! keepChopFocus && mpcSamplePanel.isPadLoaded(padIndex))
+            mpc.selectedPad = padIndex;
         updateMpcPerformanceState();
     }
 
