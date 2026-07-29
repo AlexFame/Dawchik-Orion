@@ -335,8 +335,8 @@ void MainComponent::buildLabelsAndInspector()
         else if (const auto selectedTrack = arrangementTimeline.getSelectedTrackIndex(); selectedTrack.has_value())
             trackIndex = *selectedTrack;
 
-        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackPeakHoldDb.size()))
-            ? juce::jlimit(0.0f, 1.0f, juce::Decibels::decibelsToGain(trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]))
+        return (trackIndex >= 0 && trackIndex < static_cast<int>(meters.trackPeakHoldDb.size()))
+            ? juce::jlimit(0.0f, 1.0f, juce::Decibels::decibelsToGain(meters.trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]))
             : 0.0f;
     };
     selectionInspector.onRequestLiveLevelDb = [this]() -> float
@@ -347,8 +347,8 @@ void MainComponent::buildLabelsAndInspector()
         else if (const auto selectedTrack = arrangementTimeline.getSelectedTrackIndex(); selectedTrack.has_value())
             trackIndex = *selectedTrack;
 
-        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackPeakHoldDb.size()))
-            ? trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
+        return (trackIndex >= 0 && trackIndex < static_cast<int>(meters.trackPeakHoldDb.size()))
+            ? meters.trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
             : -100.0f;
     };
     addAndMakeVisible(selectionInspector);

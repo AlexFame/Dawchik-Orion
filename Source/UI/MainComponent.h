@@ -13,6 +13,7 @@
 
 #include "../Audio/ExportService.h"
 #include "../Audio/IndependentAudioInput.h"
+#include "../Audio/MeterState.h"
 #include "../Audio/WarpEngine.h"
 #include "../Audio/TransportController.h"
 #include "../Audio/TransportEngine.h"
@@ -462,31 +463,11 @@ private:
     std::atomic<bool> audioInputConfiguring { false };   // background device start in flight
     bool audioInputUnavailable { false };                // last input start failed; keep output alive
     double masterGainDb { 0.0 };
-    // Decayed per-track output levels (0..1) for the timeline + mixer meters.
-    // MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks
-    // so the two meter views never steal peaks from each other.
-    std::vector<float> trackMeterLevels;   // fast bar level (linear), responsive
-    std::vector<float> trackMeterLevelsL;  // per-channel fast bar level (linear) — left
-    std::vector<float> trackMeterLevelsR;  // per-channel fast bar level (linear) — right
-    std::vector<float> trackPeakHoldDb;    // numeric readout in dB (Logic-style peak hold)
-    std::vector<float> trackPeakRecentDb;  // loudest dB seen since the last discrete update
-    std::vector<int>   trackPeakHoldFrames;// remaining peak-hold frames before the number snaps
-    // Master output metering — single consumer (this component) fetches the audio-thread
-    // peaks once per tick; the mixer and the bottom bar both read these stored values.
-    float masterRawPeakL { 0.0f };         // raw peak this tick (left), for the mixer
-    float masterRawPeakR { 0.0f };         // raw peak this tick (right), for the mixer
-    float masterMeterLevel { 0.0f };       // decayed 0..1 level for the bottom MASTER OUT bar
-    float masterMeterLevelL { 0.0f };      // per-channel decayed linear level for the mixer master bar
-    float masterMeterLevelR { 0.0f };
-    float masterMeterDb { -100.0f };       // numeric dB readout for the bottom MASTER OUT text
-    float masterMeterRecentDb { -100.0f }; // loudest dB since the last discrete update
-    int   masterMeterDbHoldFrames { 0 };   // remaining peak-hold frames before it snaps
-    // Aux-bus meters (mirror the track meter machinery).
-    std::vector<float> busMeterLevelsL;
-    std::vector<float> busMeterLevelsR;
-    std::vector<float> busPeakHoldDb;
-    std::vector<float> busPeakRecentDb;
-    std::vector<int>   busPeakHoldFrames;
+    // All meter display state (track / aux-bus / master levels + peak-hold) lives in one owned
+    // object. MainComponent's 60 Hz timer is the single consumer of the audio-thread peaks, so the
+    // timeline header meters, the mixer, and the bottom MASTER OUT bar never steal peaks from each
+    // other. See Audio/MeterState.h.
+    MeterState meters;
     void updateTrackMeterLevels();
     std::unique_ptr<juce::FileChooser> saveFileChooser;
     std::unique_ptr<juce::FileChooser> openFileChooser;

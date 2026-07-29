@@ -1102,18 +1102,18 @@ MainComponent::MainComponent()
     // bottom bar never steal peaks from each other.
     mixerPanel.onRequestMasterPeak = [this]() -> float
     {
-        return juce::jmax(masterRawPeakL, masterRawPeakR);
+        return juce::jmax(meters.masterRawPeakL, meters.masterRawPeakR);
     };
     mixerPanel.onRequestMasterPeakStereo = [this]() -> std::pair<float, float>
     {
-        return { masterRawPeakL, masterRawPeakR };
+        return { meters.masterRawPeakL, meters.masterRawPeakR };
     };
     // Unified (host-owned) master readouts so the mixer master matches the track meters.
     mixerPanel.onRequestMasterLevelStereo = [this]() -> std::pair<float, float>
     {
-        return { masterMeterLevelL, masterMeterLevelR };
+        return { meters.masterMeterLevelL, meters.masterMeterLevelR };
     };
-    mixerPanel.onRequestMasterLevelDb = [this]() -> float { return masterMeterDb; };
+    mixerPanel.onRequestMasterLevelDb = [this]() -> float { return meters.masterMeterDb; };
     mixerPanel.onInsertClicked = [this](int trackIndex, int insertIndex)
     {
         if (trackIndex >= 0)
@@ -1156,12 +1156,12 @@ MainComponent::MainComponent()
             const auto db = lin > 0.0f ? juce::Decibels::gainToDecibels(lin, -60.0f) : -60.0f;
             return juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 0.0f, 0.0f, 1.0f));
         };
-        if (b < 0 || b >= static_cast<int>(busMeterLevelsL.size())) return { 0.0f, 0.0f };
-        return { toBar(busMeterLevelsL[static_cast<std::size_t>(b)]), toBar(busMeterLevelsR[static_cast<std::size_t>(b)]) };
+        if (b < 0 || b >= static_cast<int>(meters.busMeterLevelsL.size())) return { 0.0f, 0.0f };
+        return { toBar(meters.busMeterLevelsL[static_cast<std::size_t>(b)]), toBar(meters.busMeterLevelsR[static_cast<std::size_t>(b)]) };
     };
     mixerPanel.onRequestBusLevelDb = [this](int b) -> float
     {
-        return (b >= 0 && b < static_cast<int>(busPeakHoldDb.size())) ? busPeakHoldDb[static_cast<std::size_t>(b)] : -100.0f;
+        return (b >= 0 && b < static_cast<int>(meters.busPeakHoldDb.size())) ? meters.busPeakHoldDb[static_cast<std::size_t>(b)] : -100.0f;
     };
 
     clipEditorPanel.onGainChanged = [this](double gainDb)
@@ -1356,8 +1356,8 @@ MainComponent::MainComponent()
     // that this component maintains (single owner — see updateTrackMeterLevels()).
     const auto linearLevelForTrack = [this](int trackIndex) -> float
     {
-        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackMeterLevels.size()))
-                   ? trackMeterLevels[static_cast<std::size_t>(trackIndex)]
+        return (trackIndex >= 0 && trackIndex < static_cast<int>(meters.trackMeterLevels.size()))
+                   ? meters.trackMeterLevels[static_cast<std::size_t>(trackIndex)]
                    : 0.0f;
     };
     // 0..1 bar height (mapped over -60..0 dB).
@@ -1370,8 +1370,8 @@ MainComponent::MainComponent()
     // Held peak level in dB (Logic-style hold; returns -100 when silent → "-inf").
     const auto requestTrackLevelDb = [this](int trackIndex) -> float
     {
-        return (trackIndex >= 0 && trackIndex < static_cast<int>(trackPeakHoldDb.size()))
-                   ? trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
+        return (trackIndex >= 0 && trackIndex < static_cast<int>(meters.trackPeakHoldDb.size()))
+                   ? meters.trackPeakHoldDb[static_cast<std::size_t>(trackIndex)]
                    : -100.0f;
     };
     // Stereo levels for the timeline header meters (each channel mapped over -60..0 dB).
@@ -1382,10 +1382,10 @@ MainComponent::MainComponent()
             const auto db = lin > 0.0f ? juce::Decibels::gainToDecibels(lin, -60.0f) : -60.0f;
             return juce::jlimit(0.0f, 1.0f, juce::jmap(db, -60.0f, 0.0f, 0.0f, 1.0f));
         };
-        if (trackIndex < 0 || trackIndex >= static_cast<int>(trackMeterLevelsL.size()))
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(meters.trackMeterLevelsL.size()))
             return { 0.0f, 0.0f };
-        return { toBar(trackMeterLevelsL[static_cast<std::size_t>(trackIndex)]),
-                 toBar(trackMeterLevelsR[static_cast<std::size_t>(trackIndex)]) };
+        return { toBar(meters.trackMeterLevelsL[static_cast<std::size_t>(trackIndex)]),
+                 toBar(meters.trackMeterLevelsR[static_cast<std::size_t>(trackIndex)]) };
     };
     mixerPanel.onRequestTrackLevel = requestTrackLevel;
     mixerPanel.onRequestTrackLevelStereo = requestTrackLevelStereo;
@@ -2251,14 +2251,14 @@ void MainComponent::updateTrackMeterLevels()
 {
     const auto trackCount = static_cast<int>(projectState.getTracks().size());
     const auto sized = static_cast<std::size_t>(juce::jmax(0, trackCount));
-    if (static_cast<int>(trackMeterLevels.size()) != trackCount)
+    if (static_cast<int>(meters.trackMeterLevels.size()) != trackCount)
     {
-        trackMeterLevels.assign(sized, 0.0f);
-        trackMeterLevelsL.assign(sized, 0.0f);
-        trackMeterLevelsR.assign(sized, 0.0f);
-        trackPeakHoldDb.assign(sized, -100.0f);
-        trackPeakRecentDb.assign(sized, -100.0f);
-        trackPeakHoldFrames.assign(sized, 0);
+        meters.trackMeterLevels.assign(sized, 0.0f);
+        meters.trackMeterLevelsL.assign(sized, 0.0f);
+        meters.trackMeterLevelsR.assign(sized, 0.0f);
+        meters.trackPeakHoldDb.assign(sized, -100.0f);
+        meters.trackPeakRecentDb.assign(sized, -100.0f);
+        meters.trackPeakHoldFrames.assign(sized, 0);
     }
 
     // Keep input monitoring in sync with the armed/recording state, then work out which
@@ -2308,18 +2308,18 @@ void MainComponent::updateTrackMeterLevels()
 
         // Fast bar level (linear): instant rise, smooth fall. Kept per-channel for the
         // stereo header meter, plus a combined value for the mixer/legacy consumers.
-        auto& level  = trackMeterLevels[static_cast<std::size_t>(i)];
-        auto& levelL = trackMeterLevelsL[static_cast<std::size_t>(i)];
-        auto& levelR = trackMeterLevelsR[static_cast<std::size_t>(i)];
+        auto& level  = meters.trackMeterLevels[static_cast<std::size_t>(i)];
+        auto& levelL = meters.trackMeterLevelsL[static_cast<std::size_t>(i)];
+        auto& levelR = meters.trackMeterLevelsR[static_cast<std::size_t>(i)];
         level  = juce::jmax(peak,  level  * 0.85f);
         levelL = juce::jmax(peakL, levelL * 0.85f);
         levelR = juce::jmax(peakR, levelR * 0.85f);
 
         // Peak-hold numeric readout (dB): jump up instantly, hold, then snap once.
         const auto peakDb = peak > 0.0001f ? juce::Decibels::gainToDecibels(peak) : -100.0f;
-        auto& holdDb     = trackPeakHoldDb[static_cast<std::size_t>(i)];
-        auto& recentDb   = trackPeakRecentDb[static_cast<std::size_t>(i)];
-        auto& holdFrames = trackPeakHoldFrames[static_cast<std::size_t>(i)];
+        auto& holdDb     = meters.trackPeakHoldDb[static_cast<std::size_t>(i)];
+        auto& recentDb   = meters.trackPeakRecentDb[static_cast<std::size_t>(i)];
+        auto& holdFrames = meters.trackPeakHoldFrames[static_cast<std::size_t>(i)];
         recentDb = juce::jmax(recentDb, peakDb);
         if (peakDb >= holdDb)
         {
@@ -2338,13 +2338,13 @@ void MainComponent::updateTrackMeterLevels()
     // Aux-bus meters (same ballistics + peak-hold as the track meters).
     const auto busCount = static_cast<int>(projectState.getBuses().size());
     const auto busSized = static_cast<std::size_t>(juce::jmax(0, busCount));
-    if (static_cast<int>(busMeterLevelsL.size()) != busCount)
+    if (static_cast<int>(meters.busMeterLevelsL.size()) != busCount)
     {
-        busMeterLevelsL.assign(busSized, 0.0f);
-        busMeterLevelsR.assign(busSized, 0.0f);
-        busPeakHoldDb.assign(busSized, -100.0f);
-        busPeakRecentDb.assign(busSized, -100.0f);
-        busPeakHoldFrames.assign(busSized, 0);
+        meters.busMeterLevelsL.assign(busSized, 0.0f);
+        meters.busMeterLevelsR.assign(busSized, 0.0f);
+        meters.busPeakHoldDb.assign(busSized, -100.0f);
+        meters.busPeakRecentDb.assign(busSized, -100.0f);
+        meters.busPeakHoldFrames.assign(busSized, 0);
     }
     for (int b = 0; b < busCount; ++b)
     {
@@ -2352,41 +2352,41 @@ void MainComponent::updateTrackMeterLevels()
         if (arrangementPlaybackSource != nullptr)
             arrangementPlaybackSource->fetchAndResetBusPeakStereo(b, pL, pR);
         const auto bi = static_cast<std::size_t>(b);
-        busMeterLevelsL[bi] = juce::jmax(pL, busMeterLevelsL[bi] * 0.85f);
-        busMeterLevelsR[bi] = juce::jmax(pR, busMeterLevelsR[bi] * 0.85f);
+        meters.busMeterLevelsL[bi] = juce::jmax(pL, meters.busMeterLevelsL[bi] * 0.85f);
+        meters.busMeterLevelsR[bi] = juce::jmax(pR, meters.busMeterLevelsR[bi] * 0.85f);
         const auto peak = juce::jmax(pL, pR);
         const auto peakDb = peak > 0.0001f ? juce::Decibels::gainToDecibels(peak) : -100.0f;
-        busPeakRecentDb[bi] = juce::jmax(busPeakRecentDb[bi], peakDb);
-        if (peakDb >= busPeakHoldDb[bi]) { busPeakHoldDb[bi] = peakDb; busPeakRecentDb[bi] = peakDb; busPeakHoldFrames[bi] = peakHoldFrames; }
-        else if (--busPeakHoldFrames[bi] <= 0) { busPeakHoldDb[bi] = busPeakRecentDb[bi]; busPeakRecentDb[bi] = -100.0f; busPeakHoldFrames[bi] = peakHoldFrames; }
+        meters.busPeakRecentDb[bi] = juce::jmax(meters.busPeakRecentDb[bi], peakDb);
+        if (peakDb >= meters.busPeakHoldDb[bi]) { meters.busPeakHoldDb[bi] = peakDb; meters.busPeakRecentDb[bi] = peakDb; meters.busPeakHoldFrames[bi] = peakHoldFrames; }
+        else if (--meters.busPeakHoldFrames[bi] <= 0) { meters.busPeakHoldDb[bi] = meters.busPeakRecentDb[bi]; meters.busPeakRecentDb[bi] = -100.0f; meters.busPeakHoldFrames[bi] = peakHoldFrames; }
     }
 
     // Master output level — fetched once here (single consumer) so the mixer and the
     // bottom MASTER OUT bar both read consistent values without stealing peaks.
-    masterRawPeakL = masterRawPeakR = 0.0f;
+    meters.masterRawPeakL = meters.masterRawPeakR = 0.0f;
     if (masterStripSource != nullptr)
-        masterStripSource->fetchAndResetPeakStereo(masterRawPeakL, masterRawPeakR);
-    const auto masterPeak = juce::jmax(masterRawPeakL, masterRawPeakR);
+        masterStripSource->fetchAndResetPeakStereo(meters.masterRawPeakL, meters.masterRawPeakR);
+    const auto masterPeak = juce::jmax(meters.masterRawPeakL, meters.masterRawPeakR);
     const auto masterDb = masterPeak > 0.0f ? juce::Decibels::gainToDecibels(masterPeak, -60.0f) : -60.0f;
     const auto masterTarget = juce::jlimit(0.0f, 1.0f, juce::jmap(masterDb, -60.0f, 0.0f, 0.0f, 1.0f));
-    masterMeterLevel = juce::jmax(masterTarget, masterMeterLevel * 0.85f);
+    meters.masterMeterLevel = juce::jmax(masterTarget, meters.masterMeterLevel * 0.85f);
     // Per-channel decayed levels (same ballistics as the tracks) for the mixer master bar.
-    masterMeterLevelL = juce::jmax(masterRawPeakL, masterMeterLevelL * 0.85f);
-    masterMeterLevelR = juce::jmax(masterRawPeakR, masterMeterLevelR * 0.85f);
+    meters.masterMeterLevelL = juce::jmax(meters.masterRawPeakL, meters.masterMeterLevelL * 0.85f);
+    meters.masterMeterLevelR = juce::jmax(meters.masterRawPeakR, meters.masterMeterLevelR * 0.85f);
 
     const auto masterDisplayDb = masterPeak > 0.0001f ? juce::Decibels::gainToDecibels(masterPeak) : -100.0f;
-    masterMeterRecentDb = juce::jmax(masterMeterRecentDb, masterDisplayDb);
-    if (masterDisplayDb >= masterMeterDb)
+    meters.masterMeterRecentDb = juce::jmax(meters.masterMeterRecentDb, masterDisplayDb);
+    if (masterDisplayDb >= meters.masterMeterDb)
     {
-        masterMeterDb = masterDisplayDb;
-        masterMeterRecentDb = masterDisplayDb;
-        masterMeterDbHoldFrames = peakHoldFrames;
+        meters.masterMeterDb = masterDisplayDb;
+        meters.masterMeterRecentDb = masterDisplayDb;
+        meters.masterMeterDbHoldFrames = peakHoldFrames;
     }
-    else if (--masterMeterDbHoldFrames <= 0)
+    else if (--meters.masterMeterDbHoldFrames <= 0)
     {
-        masterMeterDb = masterMeterRecentDb;
-        masterMeterRecentDb = -100.0f;
-        masterMeterDbHoldFrames = peakHoldFrames;
+        meters.masterMeterDb = meters.masterMeterRecentDb;
+        meters.masterMeterRecentDb = -100.0f;
+        meters.masterMeterDbHoldFrames = peakHoldFrames;
     }
 
     // While the transport rolls, the timeline repaints itself (playhead), so the header meters
@@ -2869,8 +2869,8 @@ void MainComponent::updateTransportLabels()
     transportState.scanName = pluginScanNameLabel.getText();
     transportState.engineLoad = static_cast<float>(juce::jlimit(0.0, 1.0, audioDeviceManager.getCpuUsage()));
     transportState.masterGainDb = masterGainDb;
-    transportState.masterLevel = juce::jlimit(0.0f, 1.0f, masterMeterLevel);
-    transportState.masterLevelDb = masterMeterDb;
+    transportState.masterLevel = juce::jlimit(0.0f, 1.0f, meters.masterMeterLevel);
+    transportState.masterLevelDb = meters.masterMeterDb;
     transportState.mixerOpen = mixerPanel.isVisible();
     transportState.clipEditorOpen = clipEditorPanel.isVisible();
     transportState.stepSequencerOpen = stepSequencer.isVisible();
