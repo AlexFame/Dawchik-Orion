@@ -49,6 +49,13 @@ struct MpcState
     std::map<int, double>           hardwareNoteReleaseTimes; // delayed re-arm times
     std::map<int, int>              hardwareNotePads;         // channel/note → Orion pad index for delayed note-off
 
+    // MPC-local tonality for pad highlighting. Independent of the project key: lets you pick a key
+    // right on the MPC (even when the project tonality is off) and light the in-key pads among the
+    // full chromatic pad layout. When inactive, the highlight falls back to the project key.
+    bool highlightKeyActive { false };
+    int  highlightKeyRoot { 0 };      // 0 = C … 11 = B
+    bool highlightKeyMinor { true };
+
     // MPC hardware connection status.
     bool inputConnected { false };
     juce::String inputName;

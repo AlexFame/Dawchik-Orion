@@ -940,6 +940,15 @@ MainComponent::MainComponent()
     {
         beginMpcCommandLearn(command);
     };
+    mpcSamplePanel.onKeyMenuRequested = [this](juce::Rectangle<int> screenArea) { showMpcHighlightKeyMenu(screenArea); };
+    mpcSamplePanel.onInstrumentMenuRequested = [this](juce::Point<int>)
+    {
+        // Host the MPC's melodic VST on the MPC track; the shared track-instrument menu handles
+        // load / replace / open editor / remove, and the plugin saves with the project for free.
+        const int track = mpcKitTrackIndex();
+        if (track >= 0)
+            showTrackInstrumentMenu(track);
+    };
     stepSequencer.onOpenPianoRoll = [this](int trackIndex, int clipIndex)
     {
         auto& tracks = projectState.getTracks();
@@ -2390,10 +2399,14 @@ void MainComponent::updateTrackMeterLevels()
     }
 
     // While the transport rolls, the timeline repaints itself (playhead), so the header meters
-    // animate for free. Stopped, it doesn't repaint at all — so a live input signal sat frozen
-    // until some other event (a mouse move) forced a redraw. Nudge just the header column when
-    // input monitoring is active so mic/line levels are visible before you hit record.
-    if (audioRecorderCallbackAttached && ! transportEngine.isPlaying())
+    // animate for free. Stopped, it doesn't repaint at all — so a live signal sat frozen until some
+    // other event (a mouse move) forced a redraw. Nudge just the header column whenever there's live
+    // sound — input monitoring OR any track/master meter still moving (live MIDI, VST, sampler) — so
+    // meters animate and decay on their own while stopped.
+    const bool meterActive = meters.masterMeterLevel > 0.001f
+        || std::any_of(meters.trackMeterLevels.begin(), meters.trackMeterLevels.end(),
+                       [](float l) { return l > 0.001f; });
+    if (! transportEngine.isPlaying() && (audioRecorderCallbackAttached || meterActive))
         arrangementTimeline.repaintTrackMeters();
 }
 
@@ -2524,6 +2537,59 @@ void MainComponent::timerCallback()
     updateTransportLabels();
     updateTrackMeterLevels();
     maybeStartBackgroundAnalysis();
+
+    // Sweep the MPC LCD playhead from the sampler's live voice position, and show the 16 Levels
+    // note/chord on the LCD (only while the panel shows).
+    if (mpcSamplePanel.isVisible())
+    {
+        if (arrangementPlaybackSource != nullptr)
+            mpcSamplePanel.setPlayheadPosition(arrangementPlaybackSource->liveSamplerPosition());
+        // Melodic VST hosted on the MPC track → its name drives the LCD instrument view.
+        const int mpcTrack = findMpcKitTrack();
+        const bool hasMpcInstrument = mpcTrack >= 0
+            && projectState.getTracks()[static_cast<std::size_t>(mpcTrack)].instrumentPluginId.isNotEmpty();
+        mpcSamplePanel.setInstrumentName(
+            mpcTrack >= 0 ? projectState.getTracks()[static_cast<std::size_t>(mpcTrack)].instrumentPluginName
+                          : juce::String());
+
+        // LCD note/chord readout: the ACTUAL sounding pitches (mpc.chordVoicing holds each held pad's
+        // sounded pitches, chord-expanded or not), so a single note reads as a note and a held chord
+        // reads as its chord name — never both. Union across all held pads. Shown whenever we're in a
+        // melodic context — 16 Levels OR a hosted VST (which plays melodically even without 16 Levels).
+        std::set<int> soundingNotes;
+        for (const auto& [padNote, pitches] : mpc.chordVoicing)
+            for (const int p : pitches)
+                soundingNotes.insert(p);
+        const bool melodicContext = mpc.sixteenLevels || hasMpcInstrument;
+        mpcSamplePanel.setLiveNoteText(melodicContext && ! soundingNotes.empty()
+                                           ? liveMidiDisplayText(soundingNotes)
+                                           : juce::String());
+        // KEY chip: shown in any melodic context (16 Levels or a hosted VST) as a clickable entry to
+        // the MPC key picker. Shows the effective highlight key (MPC-local or project), "off" if none.
+        bool keyActive = false; int keyRoot = 0; bool keyMinor = true;
+        effectiveMpcKey(keyActive, keyRoot, keyMinor);
+        mpcSamplePanel.setKeyText(! melodicContext ? juce::String()
+                                  : keyActive ? formatKeyName(keyRoot, keyMinor)
+                                              : juce::String("off"));
+        // Light the pads that belong to the project key ("In Key").
+        mpcSamplePanel.setPadKeyHighlights(computeMpcKeyPadHighlights());
+
+        // Label each pad with the note it plays (melodic context only), so the colours are unambiguous.
+        // Spell notes with the accidental that matches the key signature: flats for flat keys (Cm →
+        // Eb/Ab/Bb, not D#/G#/A#), sharps otherwise.
+        std::array<juce::String, 16> padNotes;
+        if (melodicContext)
+        {
+            const int majorRoot = ((((keyActive && keyMinor) ? keyRoot + 3 : keyRoot) % 12) + 12) % 12;
+            // Major keys spelled with flats: F, Bb, Eb, Ab, Db, Gb.
+            static const std::set<int> flatMajors { 5, 10, 3, 8, 1, 6 };
+            const bool useSharps = flatMajors.find(majorRoot) == flatMajors.end();
+            for (int i = 0; i < 16; ++i)
+                padNotes[static_cast<std::size_t>(i)] =
+                    juce::MidiMessage::getMidiNoteName(mpcTuneMidiNoteForPad(i), useSharps, true, 3);
+        }
+        mpcSamplePanel.setPadNoteLabels(padNotes);
+    }
 
     // Keep the sampler's live audition gain in sync with the armed track's volume so the
     // Gain knob (and track fader) are heard during playback, not only after a re-trigger.
@@ -4157,7 +4223,7 @@ void MainComponent::endTempoEditing(bool applyChanges)
     repaint();
 }
 
-void MainComponent::showKeySelectionMenu()
+void MainComponent::showKeySelectionMenu(juce::Rectangle<int> targetScreenArea)
 {
     juce::PopupMenu menu;
     static const char* noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -4193,8 +4259,9 @@ void MainComponent::showKeySelectionMenu()
     menu.addSubMenu("Chord type", chordSub, projectState.isChordModeEnabled());
 
     const auto keyBounds = transportBar.getKeyBounds().translated(transportBar.getX(), transportBar.getY());
-    menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this).withTargetScreenArea(
-        localAreaToGlobal(keyBounds.isEmpty() ? cachedKeyCardBounds : keyBounds)),
+    const auto screenArea = ! targetScreenArea.isEmpty() ? targetScreenArea
+                          : localAreaToGlobal(keyBounds.isEmpty() ? cachedKeyCardBounds : keyBounds);
+    menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this).withTargetScreenArea(screenArea),
         [this](int result)
         {
             if (result <= 0) return;

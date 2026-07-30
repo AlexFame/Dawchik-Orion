@@ -98,6 +98,14 @@ private:
     void handleMpcCommand(MpcSamplePanelComponent::Command command);
     void beginMpcCommandLearn(MpcSamplePanelComponent::Command command);
     int  mpcTuneMidiNoteForPad(int padIndex) const;
+    // Per-pad "In Key" highlight (0 off / 1 scale tone / 2 tonic) for the current project key,
+    // in a melodic context (16 Levels or a hosted VST). Used to light the MPC pads.
+    std::array<int, 16> computeMpcKeyPadHighlights();
+    // Popup to set the MPC-local highlight key (independent of the project key). Opens from the MPC LCD.
+    void showMpcHighlightKeyMenu(juce::Rectangle<int> targetScreenArea);
+    // The key currently driving MPC pad highlighting: the MPC-local one if set, else the project key.
+    // Returns false in `active` when neither is set.
+    void effectiveMpcKey(bool& active, int& root, bool& minor) const;
     void updateMpcPerformanceState();
     void mpcTapTempo();
     void liveMidiNoteOn(int trackIndex, int midiNote, int velocity);
@@ -262,7 +270,7 @@ private:
     void applyTempoFromTransportText();
     void beginTempoEditing();
     void endTempoEditing(bool applyChanges);
-    void showKeySelectionMenu();
+    void showKeySelectionMenu(juce::Rectangle<int> targetScreenArea = {});
     TimelineClip* getSelectedTimelineClip() noexcept;
     const TimelineClip* getSelectedTimelineClip() const noexcept;
     juce::Rectangle<int> getBrowserResizeHandleBounds() const noexcept;

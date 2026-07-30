@@ -51,6 +51,11 @@ public:
     // Fired when a sample is loaded onto a pad — the host mirrors it into the MPC kit track
     // so recorded MIDI plays the pad samples back through the engine.
     std::function<void(int padIndex, const juce::String& sourcePath)> onPadSampleAssigned;
+    // Right-click on the LCD: load / replace / open / remove the MPC's melodic instrument (VST).
+    std::function<void(juce::Point<int> screenPos)> onInstrumentMenuRequested;
+    // Click the KEY chip on the LCD: open the project-key picker right from the MPC. Passes the chip's
+    // on-screen bounds so the menu pops up next to it.
+    std::function<void(juce::Rectangle<int> screenArea)> onKeyMenuRequested;
 
     // Sample Mode (Stage 1): each pad can hold a sample. onPadPlay drives Orion's engine
     // (velocity>0 = note on, 0 = note off); the panel owns the sample data + LCD waveform.
@@ -64,6 +69,21 @@ public:
     void setPerformanceState(bool fullLevelEnabled, bool sixteenLevelsEnabled, bool chopEnabled, int bankIndex, int selectedPadIndex);
     void handlePadEvent(int padIndex, int velocity);
     void setPadActivity(int padIndex, int velocity);
+    // Live playback position (0..1) of the sounding sample, drawn as a sweeping line on the LCD
+    // waveform. -1 hides it. Repaints only when the value actually moves.
+    void setPlayheadPosition(float normalisedPosition);
+    // Note/chord currently being played in 16 Levels (Tune) mode, shown on the LCD. Empty = none.
+    void setLiveNoteText(const juce::String& noteText);
+    // Per-pad key highlight: 0 = out of key / off, 1 = in the scale, 2 = the tonic (root). Lights the
+    // pads that belong to the project key, like Ableton Push's "In Key" mode.
+    void setPadKeyHighlights(const std::array<int, 16>& states);
+    // The note each pad plays (e.g. "C3"), drawn on the pad in a melodic context. Empty = no label.
+    void setPadNoteLabels(const std::array<juce::String, 16>& labels);
+    // Project key/tonality (e.g. "Cm"), shown permanently on the LCD in 16 Levels mode. Empty = none.
+    void setKeyText(const juce::String& keyText);
+    // Name of the melodic VST hosted in the MPC (empty = none). When set, 16 Levels shows an
+    // instrument screen on the LCD instead of a sample waveform.
+    void setInstrumentName(const juce::String& instrumentName);
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -109,6 +129,8 @@ private:
     juce::AudioFormatManager audioFormatManager;
     static std::vector<float> buildPeaks(const juce::File&, juce::AudioFormatManager&, int buckets);
     void drawScreen(juce::Graphics&);   // live LCD overlay (waveform + name) for the selected pad
+    void drawInstrumentScreen(juce::Graphics&);   // LCD view when a melodic VST is hosted (no waveform)
+    void drawKeyAndNoteChips(juce::Graphics&, juce::Rectangle<float> area, float fontHeight);  // KEY + played-note chips
 
     juce::Image panelImage;
     std::array<juce::Rectangle<float>, 16> padBounds {};
@@ -125,6 +147,13 @@ private:
     bool sixteenLevels { false };
     bool chopMode { false };
     int activeChopSlice { -1 };
+    float playheadPosition { -1.0f };   // 0..1 live position on the LCD waveform; -1 = hidden
+    std::array<int, 16> padKeyHighlights {};   // per-pad key highlight (0 off / 1 scale / 2 root)
+    std::array<juce::String, 16> padNoteLabels {};   // note each pad plays, drawn on the pad
+    juce::Rectangle<float> keyChipBounds;      // clickable KEY chip on the LCD (opens the key picker)
+    juce::String liveNoteText;          // note/chord played in 16 Levels, shown on the LCD
+    juce::String keyTonalityText;       // project key, shown permanently on the LCD in 16 Levels
+    juce::String instrumentName;        // melodic VST hosted in the MPC; drives the instrument LCD view
     int padBank { 0 };
     int selectedPad { 0 };
     int pressedPad { -1 };

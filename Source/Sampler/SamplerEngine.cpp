@@ -964,6 +964,22 @@ void SamplerEngine::renderLiveNotes(juce::AudioBuffer<float>& targetBuffer, int 
             || (note.releaseSamplesTotal > 0 && note.releaseSamplesRemaining <= 0);
     });
 
+    // Publish the newest voice's normalised read position for the MPC LCD playhead (lock-free read
+    // on the UI thread). -1 when idle. Normalised over the whole source buffer, so for a chop slice
+    // the playhead sweeps within that slice's region of the displayed waveform.
+    float newestPos = -1.0f;
+    std::uint64_t newestId = 0;
+    for (const auto& note : liveNotes)
+    {
+        const auto len = note.sample != nullptr ? note.sample->buffer.getNumSamples() : 0;
+        if (len > 0 && note.voiceId >= newestId)
+        {
+            newestId = note.voiceId;
+            newestPos = juce::jlimit(0.0f, 1.0f, static_cast<float>(note.sourcePosition / static_cast<double>(len)));
+        }
+    }
+    liveNormalisedPos.store(newestPos, std::memory_order_relaxed);
+
     // Soft-clip the summed live mix, then add it to the output — no hard-clip crackle on overload.
     for (int ch = 0; ch < numCh; ++ch)
     {

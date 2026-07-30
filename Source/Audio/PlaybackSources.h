@@ -800,6 +800,13 @@ public:
         samplerEngine.allNotesOff();
     }
 
+    // Normalised read position (0..1) of the newest live sampler voice, for the MPC LCD playhead;
+    // -1 when nothing is playing.
+    float liveSamplerPosition() const noexcept
+    {
+        return samplerEngine.getLiveNormalisedPosition();
+    }
+
     // Live portamento for the internal sampler. (VST glide is handled separately.)
     void setSamplerGlide(bool enabled, double glideTimeSeconds)
     {
@@ -1157,6 +1164,14 @@ public:
         const juce::ScopedLock sl(instrumentLock);
         if (const auto it = instruments.find(trackIndex); it != instruments.end() && it->second != nullptr)
             it->second->pendingLiveMidi.addEvent(message, 0);
+    }
+
+    // Is a live plugin instance actually hosted on this track (vs just a saved plugin id in state)?
+    bool isInstrumentLoaded(int trackIndex) const
+    {
+        const juce::ScopedLock sl(instrumentLock);
+        const auto it = instruments.find(trackIndex);
+        return it != instruments.end() && it->second != nullptr && it->second->instance != nullptr;
     }
 
     void allInstrumentNotesOff()

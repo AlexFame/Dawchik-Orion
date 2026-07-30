@@ -7,6 +7,7 @@
 
 #include "../Audio/PlaybackSources.h"
 #include "../Sampler/SamplerEngine.h"
+#include "MainComponentInternal.h"   // liveMidiDisplayText()
 #include "OrionTheme.h"
 
 #include <vector>
@@ -26,6 +27,21 @@ void MainComponent::triggerMpcPad(int padIndex, int velocity)
         if (! keepChopFocus && mpcSamplePanel.isPadLoaded(padIndex))
             mpc.selectedPad = padIndex;
         updateMpcPerformanceState();
+    }
+
+    // Show played notes in the MIDI monitor for 16 Levels / Tune. The hardware path already feeds
+    // liveMidiDisplayNotes itself (routeLiveMidiMessage); this covers the mouse / panel path, which
+    // reaches us here instead — so pad-playing 16 Levels with the mouse shows the notes too. Same
+    // display note formula as the hardware path so both agree.
+    if (mpc.sixteenLevels && mpc.tuneSourcePath.isNotEmpty())
+    {
+        const int rootPad = juce::jlimit(0, 15, mpc.tuneRootNote - 36);
+        const int displayNote = mpc.tuneRootNote + (padIndex - rootPad);
+        if (velocity > 0)
+            liveMidiDisplayNotes.insert(displayNote);
+        else
+            liveMidiDisplayNotes.erase(displayNote);
+        lastLiveMidiSignalText = liveMidiDisplayText(liveMidiDisplayNotes);
     }
 
     // Play the pad's own sample through the shared sampler engine (+ record).
@@ -54,57 +70,77 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
     const bool trackChop = kit >= 0
                         && projectState.getTracks()[static_cast<std::size_t>(kit)].isMpcChopMode
                         && projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample.isNotEmpty();
-    const bool tune = mpc.sixteenLevels && (mpc.tuneSourcePath.isNotEmpty() || trackTune);
-    const bool chop = ! tune && mpc.chopMode && (mpc.chopSourcePath.isNotEmpty() || trackChop);
+    // Melodic VST: a plugin hosted on the MPC track. Once loaded, the pads PLAY it (this is "load a
+    // synth into the MPC") — no extra mode needed. 16 Levels just switches the note layout to
+    // scale-locked + chords + KEY; without it the pads are a plain chromatic keyboard (36 + pad).
+    const bool hasMelodicVst = kit >= 0
+                            && projectState.getTracks()[static_cast<std::size_t>(kit)].instrumentPluginId.isNotEmpty();
+    const bool tune = mpc.sixteenLevels && (mpc.tuneSourcePath.isNotEmpty() || trackTune || hasMelodicVst);
+    const bool chop = ! tune && ! hasMelodicVst && mpc.chopMode && (mpc.chopSourcePath.isNotEmpty() || trackChop);
+    const bool useMelodicVst = hasMelodicVst;
+    // A hosted VST is inherently melodic: lay the pads out by the project key (scale-locked when key
+    // + scale-lock are on, chromatic otherwise) and allow chord-mode expansion — same layout as the
+    // sample 16 Levels, so it plays in key and shows KEY/chords without needing 16 Levels toggled.
+    const bool melodicLayout = tune || useMelodicVst;
+
     const int note = (velocity > 0 || mpc.padActiveNotes.count(padIndex) == 0)
-        ? (tune ? mpcTuneMidiNoteForPad(padIndex) : 36 + padIndex)
+        ? (melodicLayout ? mpcTuneMidiNoteForPad(padIndex) : 36 + padIndex)
         : mpc.padActiveNotes[padIndex];
 
     juce::String sourcePath;
     int rootNote = tune ? (mpc.tuneRootNote + mpc.tuneOctaveOffset * 12) : note;
-    if (chop)
+    // A melodic VST needs no sample source — skip source resolution (and its empty-pad early return)
+    // and play the plugin directly. Without 16 Levels the note is chromatic (36 + pad); with it,
+    // scale-locked (see `note` above).
+    if (! useMelodicVst)
     {
-        if (mpc.chopSourcePath.isNotEmpty())
-            sourcePath = mpc.chopSourcePath;
-        else
-            sourcePath = projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample;
-        rootNote = 36;
-    }
-    else if (tune)
-    {
-        if (mpc.tuneSourcePath.isNotEmpty())
+        if (chop)
         {
-            sourcePath = mpc.tuneSourcePath;
-            rootNote = mpc.tuneRootNote;
+            if (mpc.chopSourcePath.isNotEmpty())
+                sourcePath = mpc.chopSourcePath;
+            else
+                sourcePath = projectState.getTracks()[static_cast<std::size_t>(kit)].mpcChopSample;
+            rootNote = 36;
+        }
+        else if (tune)
+        {
+            if (mpc.tuneSourcePath.isNotEmpty())
+            {
+                sourcePath = mpc.tuneSourcePath;
+                rootNote = mpc.tuneRootNote;
+            }
+            else
+            {
+                const auto& t = projectState.getTracks()[static_cast<std::size_t>(kit)];
+                sourcePath = t.mpcTuneSample;
+                rootNote = t.mpcTuneRoot;
+            }
         }
         else
         {
-            const auto& t = projectState.getTracks()[static_cast<std::size_t>(kit)];
-            sourcePath = t.mpcTuneSample;
-            rootNote = t.mpcTuneRoot;
+            if (! mpcSamplePanel.isPadLoaded(padIndex))
+                return;   // empty pad — nothing to sound
+            sourcePath = mpcSamplePanel.getPadSourcePath(padIndex);
         }
-    }
-    else
-    {
-        if (! mpcSamplePanel.isPadLoaded(padIndex))
-            return;   // empty pad — nothing to sound
-        sourcePath = mpcSamplePanel.getPadSourcePath(padIndex);
     }
 
     if (velocity > 0)
     {
         // Kit mode is drum-style: each pad is one sound. Tune/16 Levels is melodic, so let
         // Orion's shared Chord Mode expand a pad into a chord just like the sampler keyboard.
-        const auto pitches = tune ? chordPitchesForNote(note) : std::vector<int>{ note };
+        const auto pitches = melodicLayout ? chordPitchesForNote(note) : std::vector<int>{ note };
         mpc.padActiveNotes[padIndex] = note;
         mpc.chordVoicing[note] = pitches;
         for (const auto p : pitches)
         {
-            arrangementPlaybackSource->samplerNoteOn(sourcePath, p, velocity, rootNote, 0.0,
-                                                     chop ? SamplerPlaybackMode::slice : SamplerPlaybackMode::oneShot,
-                                                     chop ? padIndex : 0,
-                                                     chop ? 16 : 1,
-                                                     false, 0.0, true);
+            if (useMelodicVst)
+                arrangementPlaybackSource->instrumentLiveNoteOn(kit, p, velocity);
+            else
+                arrangementPlaybackSource->samplerNoteOn(sourcePath, p, velocity, rootNote, 0.0,
+                                                         chop ? SamplerPlaybackMode::slice : SamplerPlaybackMode::oneShot,
+                                                         chop ? padIndex : 0,
+                                                         chop ? 16 : 1,
+                                                         false, 0.0, true);
             recordNoteOn(p, velocity);
         }
     }
@@ -119,11 +155,97 @@ void MainComponent::playMpcPad(int padIndex, int velocity)
 
         for (const auto p : pitches)
         {
-            arrangementPlaybackSource->samplerNoteOff(p, SamplerPlaybackMode::oneShot, false);
+            if (useMelodicVst)
+                arrangementPlaybackSource->instrumentLiveNoteOff(kit, p);
+            else
+                arrangementPlaybackSource->samplerNoteOff(p, SamplerPlaybackMode::oneShot, false);
             recordNoteOff(p);
         }
         mpc.padActiveNotes.erase(padIndex);
     }
+}
+
+std::array<int, 16> MainComponent::computeMpcKeyPadHighlights()
+{
+    std::array<int, 16> hl {};   // all 0 (off)
+
+    // Only meaningful when the pads play melodically (16 Levels or a hosted VST); kit/drum pads
+    // aren't tied to a key.
+    const int mpcTrack = findMpcKitTrack();
+    const bool hasInstrument = mpcTrack >= 0
+        && projectState.getTracks()[static_cast<std::size_t>(mpcTrack)].instrumentPluginId.isNotEmpty();
+    if (! (mpc.sixteenLevels || hasInstrument))
+        return hl;
+
+    // Effective key: the MPC-local one if set, else the project key. None → nothing to highlight.
+    bool active = false; int root = 0; bool minor = true;
+    effectiveMpcKey(active, root, minor);
+    if (! active)
+        return hl;
+
+    const int keyRoot = ((root % 12) + 12) % 12;
+    static constexpr std::array<int, 7> majorScale { 0, 2, 4, 5, 7, 9, 11 };
+    static constexpr std::array<int, 7> minorScale { 0, 2, 3, 5, 7, 8, 10 };
+    const auto& scale = minor ? minorScale : majorScale;
+
+    // Every pad whose note is in the key lights up (one colour); out-of-key pads stay dark. With the
+    // pads laid out chromatically (project key off / no scale-lock) this shows exactly the tonality's
+    // notes among all keys.
+    for (int i = 0; i < 16; ++i)
+    {
+        const int rel = ((((mpcTuneMidiNoteForPad(i) - keyRoot) % 12) + 12) % 12);
+        if (std::find(scale.begin(), scale.end(), rel) != scale.end())
+            hl[static_cast<std::size_t>(i)] = 1;   // in key
+    }
+    return hl;
+}
+
+void MainComponent::effectiveMpcKey(bool& active, int& root, bool& minor) const
+{
+    if (mpc.highlightKeyActive)
+    {
+        active = true;
+        root = mpc.highlightKeyRoot;
+        minor = mpc.highlightKeyMinor;
+    }
+    else if (projectState.isKeyEnabled())
+    {
+        active = true;
+        root = projectState.getKeyRoot();
+        minor = projectState.isKeyMinor();
+    }
+    else
+    {
+        active = false;
+    }
+}
+
+void MainComponent::showMpcHighlightKeyMenu(juce::Rectangle<int> targetScreenArea)
+{
+    static const char* noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    juce::PopupMenu menu;
+    menu.addItem(1, "Off (follow project key)", true, ! mpc.highlightKeyActive);
+    menu.addSeparator();
+    juce::PopupMenu majorSub, minorSub;
+    for (int r = 0; r < 12; ++r)
+    {
+        majorSub.addItem(100 + r, juce::String(noteNames[r]) + " major", true,
+                         mpc.highlightKeyActive && mpc.highlightKeyRoot == r && ! mpc.highlightKeyMinor);
+        minorSub.addItem(200 + r, juce::String(noteNames[r]) + " minor", true,
+                         mpc.highlightKeyActive && mpc.highlightKeyRoot == r && mpc.highlightKeyMinor);
+    }
+    menu.addSubMenu("Major", majorSub);
+    menu.addSubMenu("Minor", minorSub);
+
+    menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this).withTargetScreenArea(targetScreenArea),
+        [this](int result)
+        {
+            if (result <= 0)
+                return;
+            if (result == 1)            { mpc.highlightKeyActive = false; }
+            else if (result < 200)      { mpc.highlightKeyActive = true; mpc.highlightKeyRoot = result - 100; mpc.highlightKeyMinor = false; }
+            else                        { mpc.highlightKeyActive = true; mpc.highlightKeyRoot = result - 200; mpc.highlightKeyMinor = true; }
+        });
 }
 
 int MainComponent::mpcTuneMidiNoteForPad(int padIndex) const

@@ -70,6 +70,57 @@ void MpcSamplePanelComponent::handlePadEvent(int padIndex, int velocity)
         onPadTriggered(padIndex, velocity);
 }
 
+void MpcSamplePanelComponent::setPadKeyHighlights(const std::array<int, 16>& states)
+{
+    if (states == padKeyHighlights)
+        return;
+    padKeyHighlights = states;
+    repaint();
+}
+
+void MpcSamplePanelComponent::setPadNoteLabels(const std::array<juce::String, 16>& labels)
+{
+    if (labels == padNoteLabels)
+        return;
+    padNoteLabels = labels;
+    repaint();
+}
+
+void MpcSamplePanelComponent::setPlayheadPosition(float normalisedPosition)
+{
+    const float clamped = normalisedPosition < 0.0f ? -1.0f : juce::jlimit(0.0f, 1.0f, normalisedPosition);
+    if (clamped < 0.0f && playheadPosition < 0.0f)
+        return;                                   // still idle — nothing to redraw
+    if (std::abs(clamped - playheadPosition) < 0.003f)
+        return;                                   // negligible move (also covers exactly equal)
+    playheadPosition = clamped;
+    repaint(mapNorm(0.332f, 0.168f, 0.305f, 0.094f).getSmallestIntegerContainer());
+}
+
+void MpcSamplePanelComponent::setLiveNoteText(const juce::String& noteText)
+{
+    if (noteText == liveNoteText)
+        return;
+    liveNoteText = noteText;
+    repaint(mapNorm(0.332f, 0.168f, 0.305f, 0.060f).getSmallestIntegerContainer());   // waveform top strip
+}
+
+void MpcSamplePanelComponent::setKeyText(const juce::String& keyText)
+{
+    if (keyText == keyTonalityText)
+        return;
+    keyTonalityText = keyText;
+    repaint(mapNorm(0.332f, 0.168f, 0.305f, 0.060f).getSmallestIntegerContainer());   // waveform top strip
+}
+
+void MpcSamplePanelComponent::setInstrumentName(const juce::String& name)
+{
+    if (name == instrumentName)
+        return;
+    instrumentName = name;
+    repaint(mapNorm(0.315f, 0.110f, 0.350f, 0.400f).getSmallestIntegerContainer());   // LCD screen
+}
+
 void MpcSamplePanelComponent::setPadActivity(int padIndex, int velocity)
 {
     if (padIndex < 0 || padIndex >= static_cast<int>(padVelocity.size()))
@@ -211,18 +262,53 @@ void MpcSamplePanelComponent::paint(juce::Graphics& g)
         g.drawImage(panelImage, imageArea, juce::RectanglePlacement::stretchToFit);
     }
 
-    // Live pad-hit glow over the baked pads.
+    // Key highlight: colour each pad by its role in the project key — tonic (amber), chord tone
+    // 3rd/5th (cyan), other scale tone (faint white). Out-of-key pads stay dark.
+    for (int i = 0; i < 16; ++i)
+    {
+        const auto state = padKeyHighlights[static_cast<std::size_t>(i)];
+        if (state <= 0)
+            continue;
+        if (i == 0)
+            continue;   // pad 1 already has a baked orange outline in the artwork — don't stack green on it
+        const auto pad = padBounds[static_cast<std::size_t>(i)];
+        const auto colour = juce::Colour(0xff57d98a);   // every in-key note → one green
+        g.setColour(colour.withAlpha(0.30f));
+        g.fillRoundedRectangle(pad, 6.0f);
+        g.setColour(colour.withAlpha(0.95f));
+        g.drawRoundedRectangle(pad.reduced(0.5f), 6.0f, 1.8f);
+    }
+
+    // Note name on each pad (melodic context), so it's clear exactly what each pad plays.
+    for (int i = 0; i < 16; ++i)
+    {
+        if (padNoteLabels[static_cast<std::size_t>(i)].isEmpty())
+            continue;
+        const auto pad = padBounds[static_cast<std::size_t>(i)];
+        const bool root = padKeyHighlights[static_cast<std::size_t>(i)] == 3;
+        g.setColour(root ? juce::Colour(0xffe9b64a) : juce::Colours::white.withAlpha(0.92f));
+        g.setFont(juce::FontOptions(juce::jmax(10.0f, pad.getHeight() * 0.24f), juce::Font::bold));
+        g.drawText(padNoteLabels[static_cast<std::size_t>(i)],
+                   pad.reduced(4.0f).removeFromTop(pad.getHeight() * 0.4f),
+                   juce::Justification::topLeft, false);
+    }
+
+    // Live pad-hit glow over the baked pads. Only actual hits glow — the "selected pad" no longer gets
+    // its own ring (it stacked a second outline over the in-key highlight, and the LCD already shows
+    // which pad is selected).
     for (int i = 0; i < 16; ++i)
     {
         const auto v = padVelocity[static_cast<std::size_t>(i)];
-        if (v <= 0 && i != selectedPad)
+        if (v <= 0)
             continue;
         const auto pad = padBounds[static_cast<std::size_t>(i)];
         const auto a = v > 0 ? 0.25f + static_cast<float>(v) / 127.0f * 0.55f : 0.22f;
+        // Inset so the glow sits fully INSIDE the baked pad (the hotspot rect is a hair larger than the
+        // artwork, so a border on the very edge pokes out) — pixel-clean on every pad.
         g.setColour(coral.withAlpha(a * 0.5f));
-        g.fillRoundedRectangle(pad, 6.0f);
+        g.fillRoundedRectangle(pad.reduced(1.5f), 5.0f);
         g.setColour(coral.withAlpha(a));
-        g.drawRoundedRectangle(pad.reduced(0.5f), 6.0f, 2.0f);
+        g.drawRoundedRectangle(pad.reduced(2.0f), 5.0f, 1.8f);
     }
 
     const auto drawCommandLight = [&](Command command, juce::Colour colour, bool active)
@@ -352,29 +438,25 @@ void MpcSamplePanelComponent::paint(juce::Graphics& g)
         g.drawRoundedRectangle(pad.reduced(0.5f), 6.0f, 2.0f);
     }
 
-    // LCD: live waveform of the selected pad if it holds a sample, else the hardware status.
-    if (padSamples[static_cast<std::size_t>(selectedPad)].loaded)
+    // LCD: a hosted melodic VST shows the instrument screen (the pads play it); else the selected
+    // pad's waveform if it holds a sample; else the empty-pad hint.
+    if (instrumentName.isNotEmpty())
+    {
+        drawInstrumentScreen(g);
+    }
+    else if (padSamples[static_cast<std::size_t>(selectedPad)].loaded)
     {
         drawScreen(g);
     }
     else
     {
+        // Empty pad: just a clean hint, no hardware IN/OUT diagnostics (that "OUT not found" line read
+        // as an error during normal sample work). Hardware status still lives in the status bar/tooltip.
         auto screen = mapNorm(0.330f, 0.190f, 0.310f, 0.205f).reduced(imageArea.getWidth() * 0.018f,
                                                                      imageArea.getHeight() * 0.018f);
-        g.setColour(juce::Colours::black.withAlpha(0.18f));
-        g.fillRoundedRectangle(screen, 4.0f);
-        g.setColour(theme::text::primary.withAlpha(0.86f));
-        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-        g.drawFittedText("MPC HARDWARE", screen.removeFromTop(16.0f).toNearestInt(),
-                         juce::Justification::centredLeft, 1);
-        g.setFont(juce::FontOptions(10.5f));
-        g.setColour(theme::cool::cyan.withAlpha(0.90f));
-        g.drawFittedText("IN  " + (midiInputName.isNotEmpty() ? midiInputName : "listening"),
-                         screen.removeFromTop(14.0f).toNearestInt(), juce::Justification::centredLeft, 1);
-        g.drawFittedText("OUT " + (midiOutputName.isNotEmpty() ? midiOutputName : "not found"),
-                         screen.removeFromTop(14.0f).toNearestInt(), juce::Justification::centredLeft, 1);
-        g.setColour(theme::text::secondary.withAlpha(0.95f));
-        g.drawFittedText("Drop a sample on a pad", screen.toNearestInt(), juce::Justification::topLeft, 2);
+        g.setColour(theme::text::secondary.withAlpha(0.80f));
+        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+        g.drawFittedText("Drop a sample on a pad", screen.toNearestInt(), juce::Justification::centred, 2);
     }
 }
 
@@ -384,6 +466,22 @@ void MpcSamplePanelComponent::mouseDown(const juce::MouseEvent& event)
     if (closeBounds.contains(p))
     {
         if (onClose) onClose();
+        return;
+    }
+
+    // Left-click the KEY chip → open the project-key picker from the MPC, popped up next to the chip.
+    if (! event.mods.isPopupMenu() && ! keyChipBounds.isEmpty() && keyChipBounds.contains(p))
+    {
+        if (onKeyMenuRequested)
+            onKeyMenuRequested(localAreaToGlobal(keyChipBounds.getSmallestIntegerContainer()));
+        return;
+    }
+
+    // Right-click / ctrl-click the LCD → the MPC instrument menu (load/replace/open/remove a VST).
+    if (event.mods.isPopupMenu() && mapNorm(0.315f, 0.110f, 0.350f, 0.520f).contains(p))
+    {
+        if (onInstrumentMenuRequested)
+            onInstrumentMenuRequested(event.getScreenPosition());
         return;
     }
     if (isPadPoint(p))
@@ -608,7 +706,79 @@ void MpcSamplePanelComponent::drawScreen(juce::Graphics& g)
                        wave.withTrimmedTop(wave.getHeight() - 11.0f).toNearestInt(),
                        juce::Justification::centredRight, false);
         }
+
+        // Sweeping playhead over the sounding sample (position comes from the sampler engine).
+        if (playheadPosition >= 0.0f)
+        {
+            const float x = wave.getX() + wave.getWidth() * juce::jlimit(0.0f, 1.0f, playheadPosition);
+            g.setColour(juce::Colours::white.withAlpha(0.92f));
+            g.drawLine(x, wave.getY(), x, wave.getBottom(), 1.2f);
+        }
     }
+
+    // 16 Levels: key (top-left, amber, permanent) + played note/chord (top-right, cyan) over the wave.
+    drawKeyAndNoteChips(g, wave, juce::jmax(10.0f, wave.getHeight() * 0.26f));
+}
+
+void MpcSamplePanelComponent::drawKeyAndNoteChips(juce::Graphics& g, juce::Rectangle<float> area, float fontHeight)
+{
+    // Draw whatever the host pushed: the KEY chip only appears in 16 Levels (host sends it then),
+    // the played note/chord appears whenever it's sounding (16 Levels or a melodic VST).
+    if (keyTonalityText.isEmpty() && liveNoteText.isEmpty())
+        return;
+
+    g.setFont(juce::FontOptions(fontHeight, juce::Font::bold));
+    const float chipH = juce::jmin(area.getHeight(), fontHeight + 8.0f);
+
+    if (keyTonalityText.isNotEmpty())
+    {
+        const auto label = "KEY " + keyTonalityText;
+        const auto w = juce::jmin(area.getWidth() * 0.5f, g.getCurrentFont().getStringWidthFloat(label) + 12.0f);
+        juce::Rectangle<float> chip(area.getX() + 4.0f, area.getY() + 4.0f, w, chipH);
+        keyChipBounds = chip;                     // remember it so a click opens the key picker
+        g.setColour(juce::Colours::black.withAlpha(0.55f));
+        g.fillRoundedRectangle(chip, 3.0f);
+        g.setColour(juce::Colour(0xffe9b64a));   // MPC amber
+        g.drawText(label, chip.reduced(6.0f, 0.0f), juce::Justification::centred, true);
+    }
+    else
+    {
+        keyChipBounds = {};
+    }
+
+    if (liveNoteText.isNotEmpty())
+    {
+        const auto w = juce::jmin(area.getWidth() * 0.5f, g.getCurrentFont().getStringWidthFloat(liveNoteText) + 12.0f);
+        juce::Rectangle<float> chip(area.getRight() - w - 4.0f, area.getY() + 4.0f, w, chipH);
+        g.setColour(juce::Colours::black.withAlpha(0.55f));
+        g.fillRoundedRectangle(chip, 3.0f);
+        g.setColour(theme::cool::cyan);
+        g.drawText(liveNoteText, chip.reduced(6.0f, 0.0f), juce::Justification::centred, true);
+    }
+}
+
+void MpcSamplePanelComponent::drawInstrumentScreen(juce::Graphics& g)
+{
+    // No sample waveform for a VST — show the plugin name centred, with the KEY + played-note chips.
+    auto nameArea = mapNorm(0.335f, 0.133f, 0.300f, 0.030f);
+    g.setColour(juce::Colour(0xff0b0f14));
+    g.fillRect(nameArea);
+    g.setColour(juce::Colour(0xffe9b64a));   // MPC amber
+    g.setFont(juce::FontOptions(juce::jmax(9.0f, nameArea.getHeight() * 0.82f), juce::Font::bold));
+    g.drawText("INST", nameArea, juce::Justification::centredLeft, true);
+
+    auto body = mapNorm(0.332f, 0.170f, 0.305f, 0.088f);
+    g.setColour(juce::Colour(0xff0b0f14));
+    g.fillRect(body);
+
+    // Top strip holds the KEY (left) and played-note (right) chips on one line; the plugin name sits
+    // centred below them, so nothing overlaps and the two chips share the exact same height.
+    auto chipRow = body.removeFromTop(body.getHeight() * 0.48f);
+    g.setColour(theme::cool::cyan);
+    g.setFont(juce::FontOptions(juce::jmax(12.0f, body.getHeight() * 0.5f), juce::Font::bold));
+    g.drawFittedText(instrumentName, body.reduced(6.0f, 2.0f).toNearestInt(), juce::Justification::centred, 2);
+
+    drawKeyAndNoteChips(g, chipRow, juce::jmax(15.0f, chipRow.getHeight() * 0.62f));
 }
 
 // ---- Drag-and-drop targets ----------------------------------------------------------------

@@ -94,6 +94,14 @@ public:
         liveSlicePoints = points;
     }
 
+    // Normalised read position (0..1) of the newest live voice within its source buffer, for the MPC
+    // LCD playhead. -1 when nothing is playing. Written lock-free on the audio thread (renderLiveNotes),
+    // read on the message thread — a cheap relaxed atomic, safe for the audio path.
+    float getLiveNormalisedPosition() const noexcept
+    {
+        return liveNormalisedPos.load(std::memory_order_relaxed);
+    }
+
 private:
     struct SampleData
     {
@@ -159,6 +167,7 @@ private:
     // render) so they are atomic; lastLivePitch is touched only under liveNotesMutex.
     std::atomic<bool>   glideEnabled { false };
     std::atomic<double> glideTimeSeconds { 0.08 };
+    std::atomic<float>  liveNormalisedPos { -1.0f };   // newest live voice position (0..1), -1 = idle
     int    lastLivePitch { -1 };
     // One-Shot/Slice choke: notes struck within this window of each other count as ONE chord and
     // don't choke each other; a later hit (a new chord/key) chokes the previous. Touched only under
