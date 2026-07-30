@@ -128,6 +128,13 @@ juce::var trackStateToVar(const orion::TrackState& track)
     object->setProperty("volumeDb", track.volumeDb);
     object->setProperty("trackGainDb", track.trackGainDb);
     object->setProperty("pan", track.pan);
+    {
+        juce::Array<juce::var> lanes;
+        for (const auto& lane : track.automation)
+            lanes.add(lane.toVar());
+        if (! lanes.isEmpty())
+            object->setProperty("automation", lanes);
+    }
     object->setProperty("samplerSourcePath", track.samplerSourcePath);
     object->setProperty("isMpcKit", track.isMpcKit);
     {
@@ -365,6 +372,10 @@ orion::TrackState trackStateFromVar(const juce::var& value)
     track.volumeDb                    = getDouble(*obj, "volumeDb", track.volumeDb);
     track.trackGainDb                 = getDouble(*obj, "trackGainDb", track.trackGainDb);
     track.pan                         = juce::jlimit(-1.0, 1.0, getDouble(*obj, "pan", track.pan));
+    track.automation.clear();
+    if (const auto* lanes = obj->getProperty("automation").getArray())
+        for (const auto& lv : *lanes)
+            track.automation.push_back(orion::AutomationLane::fromVar(lv));
     track.samplerSourcePath           = getString(*obj, "samplerSourcePath");
     track.isMpcKit                    = getBool(*obj, "isMpcKit", track.isMpcKit);
     if (const auto* kit = obj->getProperty("mpcKitSamples").getArray())

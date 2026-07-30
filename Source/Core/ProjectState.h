@@ -4,6 +4,7 @@
 #include <juce_graphics/juce_graphics.h>
 
 #include "ChordTheory.h"
+#include "../Automation/AutomationLane.h"
 
 #include <algorithm>
 #include <array>
@@ -285,6 +286,39 @@ struct TrackState
     double trackGainDb { 0.0 };
     // Stereo pan in [-1, 1]: -1 = hard left, 0 = centre, +1 = hard right.
     double pan { 0.0 };
+    // Automation envelopes attached to this track (volume, pan, …). Empty = static, exactly as before.
+    std::vector<AutomationLane> automation;
+    // The lane for a parameter, or nullptr if none. Edit under ProjectState::getAudioEditLock() since
+    // the audio thread reads the points; adding/removing a lane reallocates this vector.
+    const AutomationLane* findAutomation(AutomationParam p) const noexcept
+    {
+        for (const auto& lane : automation)
+            if (lane.param == p)
+                return &lane;
+        return nullptr;
+    }
+    AutomationLane& laneFor(AutomationParam p)
+    {
+        for (auto& lane : automation)
+            if (lane.param == p)
+                return lane;
+        automation.push_back(AutomationLane { p });
+        return automation.back();
+    }
+    // Effective volume/pan at a musical position — the single place playback AND the UI resolve
+    // automation, so there's one source of truth. Falls back to the static fader when not automated.
+    double automatedVolumeDb(double beat) const noexcept
+    {
+        if (const auto* lane = findAutomation(AutomationParam::trackVolume); lane != nullptr && lane->active())
+            return lane->valueAt(beat, static_cast<float>(volumeDb));
+        return volumeDb;
+    }
+    double automatedPan(double beat) const noexcept
+    {
+        if (const auto* lane = findAutomation(AutomationParam::trackPan); lane != nullptr && lane->active())
+            return juce::jlimit(-1.0f, 1.0f, lane->valueAt(beat, static_cast<float>(pan)));
+        return pan;
+    }
     std::vector<TimelineClip> clips;
     juce::String samplerSourcePath;
     // --- MPC Sample kit --------------------------------------------------------------

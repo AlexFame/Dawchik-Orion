@@ -1879,9 +1879,9 @@ private:
             if (track.muted)
                 continue;
 
-            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb + track.trackGainDb));
+            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.automatedVolumeDb(blockStartBeat) + track.trackGainDb));
             float panLeftGain = 1.0f, panRightGain = 1.0f;
-            panToGains(track.pan, panLeftGain, panRightGain);
+            panToGains(track.automatedPan(blockStartBeat), panLeftGain, panRightGain);
             // Per-output-channel gain (left=0, right=1; mono/others unaffected).
             const auto panForChannel = [panLeftGain, panRightGain](int ch) -> float
             {
@@ -2915,9 +2915,9 @@ private:
             slot->scratch.setSize(chans, numSamples, false, false, true);
             slot->scratch.clear();
 
-            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.volumeDb + track.trackGainDb));
+            const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.automatedVolumeDb(blockStartBeat) + track.trackGainDb));
             float panL = 1.0f, panR = 1.0f;
-            panToGains(track.pan, panL, panR);
+            panToGains(track.automatedPan(blockStartBeat), panL, panR);
 
             instrumentJobs.push_back({ slot.get(), trackIndex, trackAudible, panicActive,
                                        panL * trackGain, panR * trackGain, trackGain });
