@@ -65,6 +65,9 @@ public:
     // Arrangement chord lane (Fender-style). Host wires audition to a preview instrument.
     bool isChordLaneShown() const noexcept;
     void setChordLaneShown(bool shown);
+    // The chord under `beat`, expressed as a key (root pitch class + minor/major) so the scale/pad
+    // highlighting can follow the progression. Returns false when no chord covers that beat.
+    bool chordKeyAtBeat(double beat, int& rootPc, bool& minor) const noexcept;
     bool duplicateSelectedChords();   // Cmd+D on selected chord blocks
     std::function<void(const std::vector<int>&)> onChordAudition;
     std::function<void()> onChordAuditionStop;
@@ -145,6 +148,15 @@ public:
     // Removes the most recent undo checkpoint (used when a take is discarded/cancelled
     // so it doesn't leave a no-op entry in the undo history).
     void dropLastUndoSnapshot();
+
+    // ---- Automation editing ----
+    // When on, each track lane shows an editable envelope for `automationParam` (Volume/Pan): click
+    // to add a point, drag to move, double/right-click a point to delete. Clip editing is suspended.
+    void setAutomationMode(bool shouldEdit);
+    bool isAutomationMode() const noexcept { return automationMode; }
+    void setAutomationParam(AutomationParam p);
+    AutomationParam getAutomationParam() const noexcept { return automationParam; }
+    std::function<void(bool)> onAutomationModeChanged;
     bool canUndo() const noexcept;
     bool canRedo() const noexcept;
     bool undo();
@@ -591,6 +603,23 @@ private:
     double pendingMagnifyDelta { 0.0 };
     double ignoreWheelUntilMs { 0.0 };
     int trackHeaderWidth { 214 };
+
+    // ---- Automation editing state ----
+    bool automationMode { false };
+    AutomationParam automationParam { AutomationParam::trackVolume };
+    int automationDragTrack { -1 };   // track whose point is being dragged (-1 = none)
+    int automationDragPoint { -1 };   // index of the dragged point
+    // The strip within a track lane used to draw/edit the envelope (grid area, a little inset).
+    juce::Rectangle<int> automationLaneGrid(int trackIndex) const noexcept;
+    juce::Rectangle<int> automationParamChipBounds(int trackIndex) const noexcept;   // param selector in the header
+    float automationValueToY(float value, juce::Rectangle<int> grid) const noexcept;
+    float automationYToValue(float y, juce::Rectangle<int> grid) const noexcept;
+    void drawAutomationOverlay(juce::Graphics&);
+    int  automationPointAt(int trackIndex, juce::Point<int> pos) const;   // -1 = none
+    bool handleAutomationMouseDown(const juce::MouseEvent& event);
+    bool handleAutomationMouseDrag(const juce::MouseEvent& event);
+    bool handleAutomationMouseUp();
+
     std::vector<RemoteCursor> remoteCursors;
     void drawRemoteCursors(juce::Graphics& g);
     bool fitTrackLanesToVisibleArea { false };

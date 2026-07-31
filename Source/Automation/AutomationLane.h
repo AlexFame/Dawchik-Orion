@@ -19,17 +19,48 @@
 
 namespace orion
 {
+// The KIND of parameter a lane drives. The model covers everything up-front so nothing needs a
+// reshape later — any track type (MIDI / audio / VST) and any parameter is addressable:
+//   trackVolume / trackPan   → the track fader / pan (no indices)
+//   trackSend                → send slot `targetIndex`
+//   instrumentParam          → hosted VST instrument, plugin parameter `paramIndex`
+//   insertParam              → insert FX at `targetIndex`, plugin parameter `paramIndex`
+// Playback currently applies volume/pan; plugin-param + send application land in the next phase, but
+// the data model, serialization and UI target model are already shaped for them.
 enum class AutomationParam
 {
-    trackVolume,   // dB
-    trackPan       // -1..+1
-    // (sends / plugin params are addressed via AutomationLane::targetIndex in a later phase)
+    trackVolume,       // dB
+    trackPan,          // -1..+1
+    trackSend,         // 0..1 (send level), targetIndex = send slot
+    instrumentParam,   // 0..1 normalised, paramIndex = plugin param
+    insertParam        // 0..1 normalised, targetIndex = insert index, paramIndex = plugin param
 };
 
-inline float automationParamMin(AutomationParam p) noexcept     { return p == AutomationParam::trackVolume ? -60.0f : -1.0f; }
-inline float automationParamMax(AutomationParam p) noexcept     { return p == AutomationParam::trackVolume ?   6.0f :  1.0f; }
-inline float automationParamDefault(AutomationParam p) noexcept { return p == AutomationParam::trackVolume ?  0.0f :  0.0f; }
-inline juce::String automationParamName(AutomationParam p)      { return p == AutomationParam::trackVolume ? "Volume" : "Pan"; }
+// Volume/pan use natural units; everything else is a normalised 0..1 parameter value.
+inline float automationParamMin(AutomationParam p) noexcept
+{
+    return p == AutomationParam::trackVolume ? -60.0f : (p == AutomationParam::trackPan ? -1.0f : 0.0f);
+}
+inline float automationParamMax(AutomationParam p) noexcept
+{
+    return p == AutomationParam::trackVolume ?   6.0f : 1.0f;
+}
+inline float automationParamDefault(AutomationParam p) noexcept
+{
+    return p == AutomationParam::trackVolume ? 0.0f : (p == AutomationParam::trackSend ? 0.0f : (p == AutomationParam::trackPan ? 0.0f : 0.5f));
+}
+inline juce::String automationParamName(AutomationParam p)
+{
+    switch (p)
+    {
+        case AutomationParam::trackVolume:     return "Volume";
+        case AutomationParam::trackPan:        return "Pan";
+        case AutomationParam::trackSend:       return "Send";
+        case AutomationParam::instrumentParam: return "Instrument";
+        case AutomationParam::insertParam:     return "Insert";
+    }
+    return "Param";
+}
 
 struct AutomationPoint
 {
@@ -41,9 +72,10 @@ struct AutomationPoint
 struct AutomationLane
 {
     AutomationParam param { AutomationParam::trackVolume };
-    // Sub-target for params that need one (a send slot, a hosted-plugin parameter index). -1 = none.
-    // Keeps the model ready for send/plugin-param automation without changing the lane shape.
+    // Which slot the param lives on: send slot / insert index (-1 = the track itself / not applicable).
     int targetIndex { -1 };
+    // Which parameter inside a hosted plugin (for instrumentParam / insertParam); -1 = not applicable.
+    int paramIndex { -1 };
     bool enabled { true };
     std::vector<AutomationPoint> points;   // kept sorted by beat
 
@@ -111,6 +143,7 @@ struct AutomationLane
         auto* obj = new juce::DynamicObject();
         obj->setProperty("param", static_cast<int>(param));
         obj->setProperty("targetIndex", targetIndex);
+        obj->setProperty("paramIndex", paramIndex);
         obj->setProperty("enabled", enabled);
         juce::Array<juce::var> pts;
         for (const auto& pt : points)
@@ -130,6 +163,7 @@ struct AutomationLane
         AutomationLane lane;
         lane.param = static_cast<AutomationParam>(static_cast<int>(v.getProperty("param", 0)));
         lane.targetIndex = static_cast<int>(v.getProperty("targetIndex", -1));
+        lane.paramIndex = static_cast<int>(v.getProperty("paramIndex", -1));
         lane.enabled = static_cast<bool>(v.getProperty("enabled", true));
         if (const auto* arr = v.getProperty("points", juce::var()).getArray())
             for (const auto& pv : *arr)

@@ -202,6 +202,20 @@ std::array<int, 16> MainComponent::computeMpcKeyPadHighlights()
 
 void MainComponent::effectiveMpcKey(bool& active, int& root, bool& minor) const
 {
+    // Highest priority: follow the arrangement chord lane under the playhead, so the pad highlighting
+    // tracks the progression (Cm → Ab → Eb…) live as the song plays. Only when the lane is shown.
+    if (arrangementTimeline.isChordLaneShown())
+    {
+        int r = 0; bool m = false;
+        if (arrangementTimeline.chordKeyAtBeat(transportEngine.getPlayheadBeat(), r, m))
+        {
+            active = true;
+            root = r;
+            minor = m;
+            return;
+        }
+    }
+
     if (mpc.highlightKeyActive)
     {
         active = true;
