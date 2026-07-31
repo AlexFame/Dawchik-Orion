@@ -290,19 +290,26 @@ struct TrackState
     std::vector<AutomationLane> automation;
     // The lane for a parameter, or nullptr if none. Edit under ProjectState::getAudioEditLock() since
     // the audio thread reads the points; adding/removing a lane reallocates this vector.
-    const AutomationLane* findAutomation(AutomationParam p) const noexcept
+    // A lane is identified by (param, targetIndex, paramIndex): trackVolume/trackPan use the
+    // -1/-1 defaults; a send uses targetIndex; a plugin param uses paramIndex (and, for inserts,
+    // targetIndex = the insert slot). Existing volume/pan lanes carry -1/-1, so old projects match.
+    const AutomationLane* findAutomation(AutomationParam p, int targetIndex = -1, int paramIndex = -1) const noexcept
     {
         for (const auto& lane : automation)
-            if (lane.param == p)
+            if (lane.param == p && lane.targetIndex == targetIndex && lane.paramIndex == paramIndex)
                 return &lane;
         return nullptr;
     }
-    AutomationLane& laneFor(AutomationParam p)
+    AutomationLane& laneFor(AutomationParam p, int targetIndex = -1, int paramIndex = -1)
     {
         for (auto& lane : automation)
-            if (lane.param == p)
+            if (lane.param == p && lane.targetIndex == targetIndex && lane.paramIndex == paramIndex)
                 return lane;
-        automation.push_back(AutomationLane { p });
+        AutomationLane lane;
+        lane.param = p;
+        lane.targetIndex = targetIndex;
+        lane.paramIndex = paramIndex;
+        automation.push_back(lane);
         return automation.back();
     }
     // Effective volume/pan at a musical position — the single place playback AND the UI resolve

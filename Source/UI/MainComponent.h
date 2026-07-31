@@ -37,6 +37,7 @@
 #include "MpcSamplePanelComponent.h"
 #include "MpcState.h"
 #include "PluginPickerComponent.h"
+#include "PluginTouchListener.h"
 #include "SelectionInspectorComponent.h"
 #include "StepSequencerComponent.h"
 #include "SidebarNavComponent.h"
@@ -311,6 +312,9 @@ private:
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
     std::map<std::pair<int, int>, std::unique_ptr<PluginEditorWindow>> insertEditorWindows;
+    // Gesture watchers for open instrument editors: touching a knob auto-maps the automation lane to it.
+    std::map<int, std::unique_ptr<PluginTouchListener>> instrumentTouchListeners;
+    void onInstrumentParamTouched(int trackIndex, int paramIndex);
     std::map<std::string, std::shared_ptr<const ClipEditorWaveform>> clipEditorWaveformCache;
     // Cache of fully-prepared (trimmed + pitch-shifted) clip-editor preview buffers,
     // keyed by source|startSample|numSamples|semitones|backend, so re-triggering or

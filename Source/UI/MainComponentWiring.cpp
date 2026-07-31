@@ -1112,5 +1112,30 @@ void MainComponent::wireEditors()
         else
             showInstrumentPicker(trackIndex);
     };
+
+    // Automation param picker needs the live plugins' parameter names. They live on the engine, so
+    // the host answers these queries; the timeline only knows param indices.
+    auto pluginParamNames = [](juce::AudioPluginInstance* inst) -> juce::StringArray
+    {
+        juce::StringArray names;
+        if (inst != nullptr)
+            for (auto* p : inst->getParameters())
+                names.add(p->getName(48));
+        return names;
+    };
+
+    arrangementTimeline.onRequestInstrumentParamNames = [this, pluginParamNames](int trackIndex)
+    {
+        if (arrangementPlaybackSource == nullptr)
+            return juce::StringArray{};
+        return pluginParamNames(arrangementPlaybackSource->getTrackInstrument(trackIndex));
+    };
+
+    arrangementTimeline.onRequestInsertParamNames = [this, pluginParamNames](int trackIndex, int insertIndex)
+    {
+        if (arrangementPlaybackSource == nullptr)
+            return juce::StringArray{};
+        return pluginParamNames(arrangementPlaybackSource->getInsertInstance(trackIndex, insertIndex));
+    };
 }
 } // namespace orion

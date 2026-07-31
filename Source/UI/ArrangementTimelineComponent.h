@@ -155,8 +155,16 @@ public:
     void setAutomationMode(bool shouldEdit);
     bool isAutomationMode() const noexcept { return automationMode; }
     void setAutomationParam(AutomationParam p);
+    // Point the editor at a specific lane target: Volume/Pan use the -1/-1 defaults; a hosted-plugin
+    // parameter passes its paramIndex (and, for an insert, targetIndex = the insert slot). `label` is
+    // what the header chip shows so the user always knows which parameter this envelope drives.
+    void setAutomationTarget(AutomationParam p, int targetIndex, int paramIndex, const juce::String& label);
     AutomationParam getAutomationParam() const noexcept { return automationParam; }
     std::function<void(bool)> onAutomationModeChanged;
+    // Names of a hosted instrument's / insert's automatable parameters, so the header chip can offer
+    // them. Returned by the host (which owns the live plugin instances); empty when none is loaded.
+    std::function<juce::StringArray(int trackIndex)> onRequestInstrumentParamNames;
+    std::function<juce::StringArray(int trackIndex, int insertIndex)> onRequestInsertParamNames;
     bool canUndo() const noexcept;
     bool canRedo() const noexcept;
     bool undo();
@@ -607,6 +615,9 @@ private:
     // ---- Automation editing state ----
     bool automationMode { false };
     AutomationParam automationParam { AutomationParam::trackVolume };
+    int automationTargetIndex { -1 };   // send slot / insert index (-1 = the track itself)
+    int automationParamIndex { -1 };    // hosted-plugin parameter index (-1 = not a plugin param)
+    juce::String automationParamLabel { "Volume" };   // what the header chip shows
     int automationDragTrack { -1 };   // track whose point is being dragged (-1 = none)
     int automationDragPoint { -1 };   // index of the dragged point
     // The strip within a track lane used to draw/edit the envelope (grid area, a little inset).
@@ -615,6 +626,7 @@ private:
     float automationValueToY(float value, juce::Rectangle<int> grid) const noexcept;
     float automationYToValue(float y, juce::Rectangle<int> grid) const noexcept;
     void drawAutomationOverlay(juce::Graphics&);
+    void drawAutomationHeaderChips(juce::Graphics&);   // param selector chips, drawn unclipped in the header
     int  automationPointAt(int trackIndex, juce::Point<int> pos) const;   // -1 = none
     bool handleAutomationMouseDown(const juce::MouseEvent& event);
     bool handleAutomationMouseDrag(const juce::MouseEvent& event);

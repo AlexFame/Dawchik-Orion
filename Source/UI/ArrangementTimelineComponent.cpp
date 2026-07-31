@@ -1710,6 +1710,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         g.restoreState();
     }
 
+    // The parameter selector chips live in the track HEADER, so they draw in a separate pass that is
+    // NOT clipped to the grid (the block above excludes the header).
+    if (automationMode)
+    {
+        g.saveState();
+        g.reduceClipRegion(getVisibleTrackAreaBounds(*this));
+        drawAutomationHeaderChips(g);
+        g.restoreState();
+    }
+
     // Draw Playhead with a top cap in the ruler
     g.saveState();
     g.reduceClipRegion(visibleGridArea);
@@ -6167,9 +6177,20 @@ void ArrangementTimelineComponent::setAutomationMode(bool shouldEdit)
 
 void ArrangementTimelineComponent::setAutomationParam(AutomationParam p)
 {
-    if (automationParam == p)
+    // The simple Volume/Pan case: track-level target, name straight from the param.
+    setAutomationTarget(p, -1, -1, automationParamName(p));
+}
+
+void ArrangementTimelineComponent::setAutomationTarget(AutomationParam p, int targetIndex,
+                                                       int paramIndex, const juce::String& label)
+{
+    if (automationParam == p && automationTargetIndex == targetIndex && automationParamIndex == paramIndex)
         return;
     automationParam = p;
+    automationTargetIndex = targetIndex;
+    automationParamIndex = paramIndex;
+    automationParamLabel = label.isNotEmpty() ? label : automationParamName(p);
+    automationDragTrack = automationDragPoint = -1;   // any in-flight drag targeted the old lane
     repaint();
 }
 
@@ -6195,8 +6216,13 @@ juce::Rectangle<int> ArrangementTimelineComponent::automationLaneGrid(int trackI
 
 juce::Rectangle<int> ArrangementTimelineComponent::automationParamChipBounds(int trackIndex) const noexcept
 {
+    // The parameter selector lives in the TRACK HEADER (like Ableton/Bitwig): a wide chip pinned to the
+    // header's bottom strip. Drawn in its own unclipped pass (drawAutomationHeaderChips) so the header
+    // doesn't hide it, and the whole clip lane stays free for the envelope.
     const auto lane = getTrackLaneBounds(trackIndex);
-    return juce::Rectangle<int>(lane.getX() + 6, lane.getBottom() - 20, 92, 15);
+    const int h = 17;
+    return juce::Rectangle<int>(lane.getX() + 8, lane.getBottom() - h - 4,
+                                juce::jmax(60, trackHeaderWidth - 16), h);
 }
 
 float ArrangementTimelineComponent::automationValueToY(float value, juce::Rectangle<int> grid) const noexcept
@@ -6220,7 +6246,8 @@ int ArrangementTimelineComponent::automationPointAt(int trackIndex, juce::Point<
     const auto& tracks = project.getTracks();
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
         return -1;
-    const auto* lane = tracks[static_cast<std::size_t>(trackIndex)].findAutomation(automationParam);
+    const auto* lane = tracks[static_cast<std::size_t>(trackIndex)]
+                           .findAutomation(automationParam, automationTargetIndex, automationParamIndex);
     if (lane == nullptr)
         return -1;
     const auto grid = automationLaneGrid(trackIndex);
@@ -6250,24 +6277,18 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
         if (grid.getHeight() <= 2 || ! grid.intersects(visible))
             continue;
 
-        const auto& track = tracks[static_cast<std::size_t>(i)];
-        const auto* lane = track.findAutomation(automationParam);
-        const float staticVal = automationParam == AutomationParam::trackVolume
-                                    ? static_cast<float>(track.volumeDb) : static_cast<float>(track.pan);
+        // Dim the clip content in this lane while editing automation, so the amber envelope reads
+        // clearly instead of fighting the bright clip underneath (Ableton dims the clip the same way).
+        g.setColour(juce::Colours::black.withAlpha(0.6f));
+        g.fillRect(grid.getIntersection(visible));
 
-        // Parameter selector in the header (like Bitwig/Ableton's lane parameter chooser), so it's clear
-        // which parameter this envelope is — click it to switch Volume / Pan.
-        const auto chip = automationParamChipBounds(i);
-        if (chip.intersects(visible))
-        {
-            g.setColour(juce::Colours::black.withAlpha(0.62f));
-            g.fillRoundedRectangle(chip.toFloat(), 3.0f);
-            g.setColour(col);
-            g.drawRoundedRectangle(chip.toFloat().reduced(0.5f), 3.0f, 1.0f);
-            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-            g.drawText("AUTO  " + automationParamName(automationParam) + "  ▾",
-                       chip.reduced(6, 0), juce::Justification::centredLeft, true);
-        }
+        const auto& track = tracks[static_cast<std::size_t>(i)];
+        const auto* lane = track.findAutomation(automationParam, automationTargetIndex, automationParamIndex);
+        const float staticVal = automationParam == AutomationParam::trackVolume
+                                    ? static_cast<float>(track.volumeDb)
+                                    : (automationParam == AutomationParam::trackPan
+                                           ? static_cast<float>(track.pan)
+                                           : automationParamDefault(automationParam));
 
         g.setColour(col);
         if (lane == nullptr || lane->points.empty())
@@ -6289,8 +6310,18 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
             path.lineTo(beatToX(pt.beat, grid), automationValueToY(pt.value, grid));
         const auto lastY = automationValueToY(lane->points.back().value, grid);
         path.lineTo(static_cast<float>(grid.getRight()), lastY);
-        g.setColour(col.withAlpha(0.9f));
-        g.strokePath(path, juce::PathStrokeType(1.6f));
+
+        // A soft amber fill from the line down to the lane floor gives the automation a visible "band"
+        // so it doesn't read as a single thin thread — you can see the shape at a glance.
+        juce::Path fill = path;
+        fill.lineTo(static_cast<float>(grid.getRight()), static_cast<float>(grid.getBottom()));
+        fill.lineTo(static_cast<float>(grid.getX()),     static_cast<float>(grid.getBottom()));
+        fill.closeSubPath();
+        g.setColour(col.withAlpha(0.16f));
+        g.fillPath(fill);
+
+        g.setColour(col.withAlpha(0.95f));
+        g.strokePath(path, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
         for (const auto& pt : lane->points)
         {
@@ -6301,6 +6332,33 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
             g.setColour(col);
             g.fillEllipse(px - 3.0f, py - 3.0f, 6.0f, 6.0f);
         }
+    }
+}
+
+void ArrangementTimelineComponent::drawAutomationHeaderChips(juce::Graphics& g)
+{
+    const auto& tracks = project.getTracks();
+    const auto visible = getVisibleTrackAreaBounds(*this);
+    const juce::Colour col(0xffffb454);
+
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+    {
+        const auto lane = getTrackLaneBounds(i);
+        if (! lane.intersects(visible))
+            continue;
+
+        const auto chip = automationParamChipBounds(i);
+        if (! chip.intersects(visible))
+            continue;
+
+        g.setColour(juce::Colours::black.withAlpha(0.82f));
+        g.fillRoundedRectangle(chip.toFloat(), 4.0f);
+        g.setColour(col.withAlpha(0.9f));
+        g.drawRoundedRectangle(chip.toFloat().reduced(0.5f), 4.0f, 1.0f);
+        g.setColour(col);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.drawText("AUTO  " + automationParamLabel + "  ▾",
+                   chip.reduced(7, 0), juce::Justification::centredLeft, true);
     }
 }
 
@@ -6316,18 +6374,69 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
         if (event.y < lane.getY() || event.y >= lane.getBottom())
             continue;
 
-        // The parameter selector chip (in the header): open a menu to switch Volume / Pan.
+        // The parameter selector chip (in the header): a menu to switch what this lane automates —
+        // Volume / Pan, or any parameter of the track's hosted instrument or insert effects. IDs:
+        // 1=Volume, 2=Pan, 1000+p = instrument param p, 10000 + slot*1000 + p = insert slot's param p.
         if (automationParamChipBounds(i).contains(event.getPosition()))
         {
             juce::PopupMenu menu;
             menu.addItem(1, "Volume", true, automationParam == AutomationParam::trackVolume);
             menu.addItem(2, "Pan",    true, automationParam == AutomationParam::trackPan);
+
+            juce::StringArray instNames;
+            if (onRequestInstrumentParamNames)
+                instNames = onRequestInstrumentParamNames(i);
+            if (! instNames.isEmpty())
+            {
+                juce::PopupMenu sub;
+                for (int p = 0; p < instNames.size(); ++p)
+                    sub.addItem(1000 + p, instNames[p], true,
+                                automationParam == AutomationParam::instrumentParam
+                                    && automationTargetIndex == -1 && automationParamIndex == p);
+                menu.addSubMenu("Instrument", sub);
+            }
+
+            const auto& inserts = project.getTracks()[static_cast<std::size_t>(i)].inserts;
+            for (int s = 0; s < static_cast<int>(inserts.size()); ++s)
+            {
+                juce::StringArray insNames;
+                if (onRequestInsertParamNames)
+                    insNames = onRequestInsertParamNames(i, s);
+                if (insNames.isEmpty())
+                    continue;
+                juce::PopupMenu sub;
+                for (int p = 0; p < insNames.size(); ++p)
+                    sub.addItem(10000 + s * 1000 + p, insNames[p], true,
+                                automationParam == AutomationParam::insertParam
+                                    && automationTargetIndex == s && automationParamIndex == p);
+                const auto nm = inserts[static_cast<std::size_t>(s)].pluginName;
+                menu.addSubMenu(nm.isNotEmpty() ? nm : ("Insert " + juce::String(s + 1)), sub);
+            }
+
             menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this)
                                    .withTargetScreenArea(localAreaToGlobal(automationParamChipBounds(i))),
-                [this](int r)
+                [this, i, instNames](int r)
                 {
-                    if (r == 1) setAutomationParam(AutomationParam::trackVolume);
-                    else if (r == 2) setAutomationParam(AutomationParam::trackPan);
+                    if (r == 1) { setAutomationParam(AutomationParam::trackVolume); }
+                    else if (r == 2) { setAutomationParam(AutomationParam::trackPan); }
+                    else if (r >= 1000 && r < 10000)
+                    {
+                        const int p = r - 1000;
+                        setAutomationTarget(AutomationParam::instrumentParam, -1, p,
+                            juce::isPositiveAndBelow(p, instNames.size()) ? instNames[p]
+                                                                          : ("Param " + juce::String(p + 1)));
+                    }
+                    else if (r >= 10000)
+                    {
+                        const int s = (r - 10000) / 1000;
+                        const int p = (r - 10000) % 1000;
+                        juce::StringArray insNames;
+                        if (onRequestInsertParamNames)
+                            insNames = onRequestInsertParamNames(i, s);
+                        setAutomationTarget(AutomationParam::insertParam, s, p,
+                            juce::isPositiveAndBelow(p, insNames.size()) ? insNames[p]
+                                                                        : ("Param " + juce::String(p + 1)));
+                    }
                 });
             return true;
         }
@@ -6344,7 +6453,8 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
             captureUndoSnapshot();
             {
                 const juce::ScopedLock sl(project.getAudioEditLock());
-                auto& pts = tracks[static_cast<std::size_t>(i)].laneFor(automationParam).points;
+                auto& pts = tracks[static_cast<std::size_t>(i)]
+                                .laneFor(automationParam, automationTargetIndex, automationParamIndex).points;
                 pts.erase(pts.begin() + hit);
             }
             repaint();
@@ -6359,7 +6469,8 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
             const double beat = juce::jmax(0.0, xToBeatPosition(event.x));
             const float value = automationYToValue(static_cast<float>(event.y), grid);
             const juce::ScopedLock sl(project.getAudioEditLock());
-            pointIndex = tracks[static_cast<std::size_t>(i)].laneFor(automationParam).addPoint(beat, value);
+            pointIndex = tracks[static_cast<std::size_t>(i)]
+                             .laneFor(automationParam, automationTargetIndex, automationParamIndex).addPoint(beat, value);
         }
         automationDragTrack = i;
         automationDragPoint = pointIndex;
@@ -6380,7 +6491,8 @@ bool ArrangementTimelineComponent::handleAutomationMouseDrag(const juce::MouseEv
     const auto grid = automationLaneGrid(automationDragTrack);
 
     const juce::ScopedLock sl(project.getAudioEditLock());
-    auto& pts = tracks[static_cast<std::size_t>(automationDragTrack)].laneFor(automationParam).points;
+    auto& pts = tracks[static_cast<std::size_t>(automationDragTrack)]
+                    .laneFor(automationParam, automationTargetIndex, automationParamIndex).points;
     if (automationDragPoint >= static_cast<int>(pts.size()))
         return false;
 

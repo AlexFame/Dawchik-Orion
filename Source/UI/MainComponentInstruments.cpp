@@ -161,10 +161,36 @@ void MainComponent::openInstrumentEditor(int trackIndex)
         [this, trackIndex]() { closeInstrumentEditor(trackIndex); },
         [this](const juce::KeyPress& key) { return keyPressed(key); },
         [this](bool isKeyDown) { return keyStateChanged(isKeyDown); });
+
+    // While the editor is open, grabbing any knob auto-maps the automation lane to that parameter.
+    auto listener = std::make_unique<PluginTouchListener>(
+        [this, trackIndex](int paramIndex) { onInstrumentParamTouched(trackIndex, paramIndex); });
+    listener->attachTo(instance);
+    instrumentTouchListeners[trackIndex] = std::move(listener);
+}
+
+void MainComponent::onInstrumentParamTouched(int trackIndex, int paramIndex)
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+    auto* instance = arrangementPlaybackSource->getTrackInstrument(trackIndex);
+    if (instance == nullptr)
+        return;
+    const auto& params = instance->getParameters();
+    if (! juce::isPositiveAndBelow(paramIndex, params.size()))
+        return;
+
+    // Point the automation editor at this track + parameter, exactly as picking it from the chip menu
+    // would. Stored even when automation mode is off, so pressing A reveals the last-touched control.
+    arrangementTimeline.selectTrack(trackIndex);
+    arrangementTimeline.setAutomationTarget(orion::AutomationParam::instrumentParam, -1, paramIndex,
+                                            params[paramIndex]->getName(48));
+    arrangementTimeline.repaint();
 }
 
 void MainComponent::closeInstrumentEditor(int trackIndex)
 {
+    instrumentTouchListeners.erase(trackIndex);
     instrumentEditorWindows.erase(trackIndex);
 }
 

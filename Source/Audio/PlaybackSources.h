@@ -1122,8 +1122,34 @@ public:
         outR = busPeaksR[static_cast<std::size_t>(busIndex)].exchange(0.0f, std::memory_order_relaxed);
     }
 
-    // Audio thread: run a track's buffer through its (non-bypassed) inserts in order.
-    void processTrackInserts(int trackIndex, juce::AudioBuffer<float>& buf)
+    // Audio thread: block-rate application of a plugin-parameter automation lane onto a live
+    // instance. Values are stored normalised (0..1) and pushed straight to the hosted parameter
+    // before its processBlock. `kind` selects instrumentParam / insertParam; `targetIndex` matches
+    // the lane's slot (-1 for the instrument, the insert index for an insert). Cheap: a plain scan
+    // of the (usually tiny) automation vector, no allocation, safe on the audio thread.
+    static void applyPluginParamAutomation(juce::AudioPluginInstance* inst, const TrackState& track,
+                                           AutomationParam kind, int targetIndex, double beat)
+    {
+        if (inst == nullptr)
+            return;
+        const auto& params = inst->getParameters();
+        for (const auto& lane : track.automation)
+        {
+            if (lane.param != kind || lane.targetIndex != targetIndex || ! lane.active())
+                continue;
+            const int pi = lane.paramIndex;
+            if (juce::isPositiveAndBelow(pi, params.size()))
+            {
+                const float target = juce::jlimit(0.0f, 1.0f, lane.valueAt(beat, params[pi]->getValue()));
+                params[pi]->setValue(target);
+            }
+        }
+    }
+
+    // Audio thread: run a track's buffer through its (non-bypassed) inserts in order. When a
+    // TrackState/beat are supplied, per-insert parameter automation is applied first (block-rate).
+    void processTrackInserts(int trackIndex, juce::AudioBuffer<float>& buf,
+                             const TrackState* track = nullptr, double beat = 0.0)
     {
         const juce::ScopedTryLock stl(insertLock);
         if (! stl.isLocked())
@@ -1132,9 +1158,16 @@ public:
         if (it == trackInserts.end())
             return;
         juce::MidiBuffer noMidi;
-        for (auto& slot : it->second)
-            if (slot != nullptr && slot->instance != nullptr && ! slot->bypassed.load(std::memory_order_relaxed))
-                slot->instance->processBlock(buf, noMidi);
+        for (int slotIndex = 0; slotIndex < static_cast<int>(it->second.size()); ++slotIndex)
+        {
+            auto& slot = it->second[static_cast<std::size_t>(slotIndex)];
+            if (slot == nullptr || slot->instance == nullptr || slot->bypassed.load(std::memory_order_relaxed))
+                continue;
+            if (track != nullptr)
+                applyPluginParamAutomation(slot->instance.get(), *track,
+                                           AutomationParam::insertParam, slotIndex, beat);
+            slot->instance->processBlock(buf, noMidi);
+        }
     }
 
     // Live monitoring: queue a note from the keyboard for the instrument on a
@@ -2197,7 +2230,7 @@ private:
                 }
 
                 if (hasInserts)
-                    processTrackInserts(trackIndex, trackFxScratch);
+                    processTrackInserts(trackIndex, trackFxScratch, &track, blockStartBeat);
 
                 // Aux sends (post-insert): post-fader adds the processed signal as-is;
                 // pre-fader undoes the channel fader (so the send is independent of volume).
@@ -2914,6 +2947,10 @@ private:
             const auto chans    = juce::jmax(2, juce::jmax(numInCh, numOutCh));
             slot->scratch.setSize(chans, numSamples, false, false, true);
             slot->scratch.clear();
+
+            // Push any hosted-instrument parameter automation to the plugin before it renders
+            // (block-rate). Serial Pass 1, so this completes before the parallel processBlock.
+            applyPluginParamAutomation(inst, track, AutomationParam::instrumentParam, -1, blockStartBeat);
 
             const auto trackGain = juce::Decibels::decibelsToGain(static_cast<float>(track.automatedVolumeDb(blockStartBeat) + track.trackGainDb));
             float panL = 1.0f, panR = 1.0f;
