@@ -25,13 +25,21 @@ on it, not each other). Values stored in natural units (dB / -1..+1 / 0..1). Per
     on `openInstrumentEditor`, detached on close. Handler `onInstrumentParamTouched`.
   - AUTO chip menu also offers Volume / Pan / Instrument ▸ <params> / <InsertName> ▸ <params> (manual path).
 
+## Done (cont.)
+- **Automation UI — Bitwig/Ableton overlay** (commit 19e0a1a, user-approved "Отлично"): overlays the clip
+  with a track-coloured fill + bright white thick line (no track darkening — Bitwig doesn't darken); param
+  selector is an opaque header chip replacing the fader row; value readout on drag/hover; click adds a point
+  ON the curve and only grabs when on the line; double-click deletes; Clear-automation menu item; fader-like
+  volume taper (0 dB ~80% up). See [[midi-loop-note-ordering]] for the loop-mute fix found alongside.
+
 ## Pending polish (this session)
-- **AUTO chip in header overlaps the fader/dB** — user: "отвратное, перекрывает другие функции". Give it
-  its own space in the header (Ableton has tall headers with dedicated dropdown rows). NOT yet fixed.
 - **Clip drag badge** — the JUCE DnD "MIDI Clip / N clips" badge (ArrangementTimeline ~3621) shows during
   a plain move; user wants the clip to move in place with no badge (in-place move at ~3844 already exists).
+  User chose to do this AFTER automation — now unblocked.
 - **Insert touch-to-map** — same as instrument, but insert editor windows are erased in several places;
   wire listener lifetime carefully to avoid a dangling listener on a destroyed instance.
+- **Colours**: user loves Bitwig's palette. Possible follow-ups: tune Orion's default track-colour palette,
+  or PNG-palette import like Bitwig (manual §3.2.5 — colours are swappable palettes, not fixed hex).
 
 ## Next (endorsed order)
 1. **Sends** — apply `trackSend` envelopes.
