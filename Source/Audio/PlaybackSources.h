@@ -2832,6 +2832,20 @@ private:
                         midi.addEvent(juce::MidiMessage::controllerEvent(ch, 38, 0), offset);
                     };
 
+                    // Emit note-OFFs FIRST, then note-ONs. On a loop-boundary block a note ending
+                    // exactly at the loop end and the same note restarting at the loop start land on
+                    // the same sample; MidiBuffer keeps equal-timestamp events in insertion order, so
+                    // offs-before-ons guarantees the plugin sees release→retrigger, not on→off. Sample
+                    // players (Analog Lab, LABS) otherwise net to silence — and pile up stuck voices —
+                    // while a forgiving synth (Serum) happened to survive it.
+                    for (int ni = 0; ni < noteCount; ++ni)
+                    {
+                        const auto& note = clip.midiNotes[static_cast<std::size_t>(ni)];
+                        const auto ch = noteChannel[static_cast<std::size_t>(ni)];
+                        const auto offBeat = clip.startBeat + note.startBeat + juce::jmax(0.01, note.lengthInBeats);
+                        if (const auto offOffset = offsetForBeat(offBeat); offOffset >= 0)
+                            midi.addEvent(juce::MidiMessage::noteOff(ch, note.pitch), offOffset);
+                    }
                     for (int ni = 0; ni < noteCount; ++ni)
                     {
                         const auto& note = clip.midiNotes[static_cast<std::size_t>(ni)];
@@ -2852,8 +2866,6 @@ private:
                             midi.addEvent(juce::MidiMessage::noteOn(ch, note.pitch,
                                 static_cast<juce::uint8>(juce::jlimit(1, 127, note.velocity))), offset);
                         }
-                        if (const auto offOffset = offsetForBeat(offBeat); offOffset >= 0)
-                            midi.addEvent(juce::MidiMessage::noteOff(ch, note.pitch), offOffset);
                     }
 
                     for (std::size_t si = 0; si < clip.pitchSlides.size(); ++si)

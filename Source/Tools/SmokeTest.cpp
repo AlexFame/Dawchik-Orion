@@ -175,6 +175,27 @@ void testKitClipMakesSound()
     check(out.getMagnitude(0, out.getNumSamples()) > 0.01f,
           "MPC kit clip renders audible audio for a note on pad 0");
 
+    // ---- Loop retrigger: a note at the loop start must re-fire on EVERY repeat, not just once.
+    // Guards the "plays once, then silent on every loop repeat" class of bug. We render the block that
+    // straddles the loop boundary (playhead past loopEnd, wrapping back to loopStart) and assert the
+    // pad's audio comes through again — i.e. the note-on was re-emitted for the second pass.
+    {
+        const double loopEnd = 2.0;
+        const double bps = 2.0;
+        // Block sitting right on the wrap: starts just before loopEnd and spills past it, so the
+        // wrapped beats cover the note at loop-start (beat 0).
+        const double blockStart = loopEnd - (128.0 / 44100.0) * bps;   // ~128 samples before the boundary
+        juce::AudioBuffer<float> pass2(2, 512);
+        pass2.clear();
+        engine.renderMpcKitClip(pass2, 0, pass2.getNumSamples(),
+                                blockStart, /*renderSampleRate*/ 44100.0, bps,
+                                /*loopStartBeat*/ 0.0, /*loopEndBeat*/ loopEnd, /*repeatEndBeat*/ loopEnd,
+                                /*wrapToLoop*/ true, /*wrapToProjectEnd*/ false,
+                                track, clip);
+        check(pass2.getMagnitude(0, pass2.getNumSamples()) > 0.01f,
+              "MPC kit clip re-triggers the loop-start note on a loop repeat (not silent after pass 1)");
+    }
+
     wav.deleteFile();
 }
 }   // namespace
