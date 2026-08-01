@@ -620,6 +620,9 @@ private:
     juce::String automationParamLabel { "Volume" };   // what the header chip shows
     int automationDragTrack { -1 };   // track whose point is being dragged (-1 = none)
     int automationDragPoint { -1 };   // index of the dragged point
+    int automationHoverTrack { -1 };  // track whose point the cursor is over (for the value readout)
+    int automationHoverPoint { -1 };
+    juce::String automationValueLabel(float value) const;   // "-10.0 dB" / "R45" / "72%" per param
     // The strip within a track lane used to draw/edit the envelope (grid area, a little inset).
     juce::Rectangle<int> automationLaneGrid(int trackIndex) const noexcept;
     juce::Rectangle<int> automationParamChipBounds(int trackIndex) const noexcept;   // param selector in the header

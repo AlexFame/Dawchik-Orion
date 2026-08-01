@@ -4055,6 +4055,31 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 {
+    // Track which automation point the cursor is over, so its value readout can show (Bitwig-style).
+    if (automationMode)
+    {
+        int hoverTrack = -1, hoverPoint = -1;
+        const auto& tracks = project.getTracks();
+        for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        {
+            const auto lane = getTrackLaneBounds(i);
+            if (event.y < lane.getY() || event.y >= lane.getBottom())
+                continue;
+            if (const int p = automationPointAt(i, event.getPosition()); p >= 0)
+            {
+                hoverTrack = i;
+                hoverPoint = p;
+            }
+            break;
+        }
+        if (hoverTrack != automationHoverTrack || hoverPoint != automationHoverPoint)
+        {
+            automationHoverTrack = hoverTrack;
+            automationHoverPoint = hoverPoint;
+            repaint();
+        }
+    }
+
     if (getEditToolbarBounds().contains(event.getPosition()))
     {
         bool overButton = getSplitSnapButtonBounds().contains(event.getPosition());
@@ -4240,6 +4265,36 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 
 void ArrangementTimelineComponent::mouseDoubleClick(const juce::MouseEvent& event)
 {
+    // Automation: double-click a point to delete it, like Ableton — the curve returns to the shape it
+    // had before that point ("возвращение точки назад").
+    if (automationMode)
+    {
+        auto& tracks = project.getTracks();
+        for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        {
+            const auto lane = getTrackLaneBounds(i);
+            if (event.y < lane.getY() || event.y >= lane.getBottom())
+                continue;
+            const int hit = automationPointAt(i, event.getPosition());
+            if (hit >= 0)
+            {
+                captureUndoSnapshot();
+                {
+                    const juce::ScopedLock sl(project.getAudioEditLock());
+                    auto& pts = tracks[static_cast<std::size_t>(i)]
+                                    .laneFor(automationParam, automationTargetIndex, automationParamIndex).points;
+                    if (hit < static_cast<int>(pts.size()))
+                        pts.erase(pts.begin() + hit);
+                }
+                automationDragTrack = automationDragPoint = -1;
+                automationHoverTrack = automationHoverPoint = -1;
+                repaint();
+                return;
+            }
+            break;   // in this lane but not on a point — let normal clip double-click handling run
+        }
+    }
+
     auto bounds = getTimelineContentBounds(*this);
     bounds.removeFromTop(editToolbarHeight);
     auto rulerArea = bounds.removeFromTop(timelineRulerHeight);
@@ -6216,20 +6271,41 @@ juce::Rectangle<int> ArrangementTimelineComponent::automationLaneGrid(int trackI
 
 juce::Rectangle<int> ArrangementTimelineComponent::automationParamChipBounds(int trackIndex) const noexcept
 {
-    // The parameter selector lives in the TRACK HEADER (like Ableton/Bitwig): a wide chip pinned to the
-    // header's bottom strip. Drawn in its own unclipped pass (drawAutomationHeaderChips) so the header
-    // doesn't hide it, and the whole clip lane stays free for the envelope.
-    const auto lane = getTrackLaneBounds(trackIndex);
-    const int h = 17;
-    return juce::Rectangle<int>(lane.getX() + 8, lane.getBottom() - h - 4,
-                                juce::jmax(60, trackHeaderWidth - 16), h);
+    // The parameter selector sits in the TRACK HEADER over the volume-fader row and REPLACES it while
+    // automation mode is on (Bitwig swaps the mixer controls for the automation param/section choosers).
+    // Drawn opaque in drawAutomationHeaderChips so the fader/dB underneath are hidden — a clean swap,
+    // not a translucent overlay. Spans the fader + dB span of the header.
+    const auto layout = computeHeaderLayout(trackIndex);
+    auto strip = layout.slider.getUnion(layout.volumeValue);
+    return juce::Rectangle<int>(strip.getX() - 2, strip.getCentreY() - 9,
+                                strip.getWidth() + 4, 18);
+}
+
+juce::String ArrangementTimelineComponent::automationValueLabel(float value) const
+{
+    switch (automationParam)
+    {
+        case AutomationParam::trackVolume:
+            return (value > -59.9f ? juce::String(value, 1) : juce::String("-inf")) + " dB";
+        case AutomationParam::trackPan:
+        {
+            const int pct = juce::roundToInt(std::abs(value) * 100.0f);
+            return pct == 0 ? juce::String("C") : (value < 0 ? "L" : "R") + juce::String(pct);
+        }
+        default:   // send / instrument / insert params are normalised 0..1
+            return juce::String(juce::roundToInt(value * 100.0f)) + "%";
+    }
 }
 
 float ArrangementTimelineComponent::automationValueToY(float value, juce::Rectangle<int> grid) const noexcept
 {
     const float mn = automationParamMin(automationParam);
     const float mx = automationParamMax(automationParam);
-    const float t = juce::jlimit(0.0f, 1.0f, (value - mn) / juce::jmax(0.0001f, mx - mn));
+    float t = juce::jlimit(0.0f, 1.0f, (value - mn) / juce::jmax(0.0001f, mx - mn));
+    // Volume uses a fader-like taper (Ableton feel): 0 dB sits ~80% up with fine control near unity,
+    // and the quiet end compresses toward the floor — instead of a linear scale pinning 0 dB at the top.
+    if (automationParam == AutomationParam::trackVolume)
+        t = std::pow(t, 2.3f);
     return static_cast<float>(grid.getBottom()) - t * static_cast<float>(grid.getHeight());
 }
 
@@ -6237,7 +6313,9 @@ float ArrangementTimelineComponent::automationYToValue(float y, juce::Rectangle<
 {
     const float mn = automationParamMin(automationParam);
     const float mx = automationParamMax(automationParam);
-    const float t = juce::jlimit(0.0f, 1.0f, (static_cast<float>(grid.getBottom()) - y) / juce::jmax(1.0f, static_cast<float>(grid.getHeight())));
+    float t = juce::jlimit(0.0f, 1.0f, (static_cast<float>(grid.getBottom()) - y) / juce::jmax(1.0f, static_cast<float>(grid.getHeight())));
+    if (automationParam == AutomationParam::trackVolume)
+        t = std::pow(t, 1.0f / 2.3f);
     return mn + t * (mx - mn);
 }
 
@@ -6269,7 +6347,6 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
 
     const auto& tracks = project.getTracks();
     const auto visible = getVisibleTrackAreaBounds(*this);
-    const juce::Colour col(0xffffb454);   // automation = warm amber, distinct from clips
 
     for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
     {
@@ -6277,12 +6354,16 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
         if (grid.getHeight() <= 2 || ! grid.intersects(visible))
             continue;
 
-        // Dim the clip content in this lane while editing automation, so the amber envelope reads
-        // clearly instead of fighting the bright clip underneath (Ableton dims the clip the same way).
-        g.setColour(juce::Colours::black.withAlpha(0.6f));
-        g.fillRect(grid.getIntersection(visible));
-
+        // Bitwig does NOT darken the clip in automation mode — the clip stays fully colourful and the
+        // automation (track-coloured fill + bright line) simply overlays it. So: no veil here.
         const auto& track = tracks[static_cast<std::size_t>(i)];
+        // Track-coloured FILL for identity (Bitwig), but a bright near-WHITE line so the curve always
+        // contrasts — a track-coloured line would vanish over a clip of the same colour. Ableton keeps
+        // the line a bold, high-contrast colour for exactly this reason.
+        const auto trackColour = track.colour;
+        const juce::Colour line(0xfff7faff);   // bright, high-contrast curve
+        const juce::Colour dot (0xffffffff);
+
         const auto* lane = track.findAutomation(automationParam, automationTargetIndex, automationParamIndex);
         const float staticVal = automationParam == AutomationParam::trackVolume
                                     ? static_cast<float>(track.volumeDb)
@@ -6290,12 +6371,20 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
                                            ? static_cast<float>(track.pan)
                                            : automationParamDefault(automationParam));
 
-        g.setColour(col);
         if (lane == nullptr || lane->points.empty())
         {
             const auto y = automationValueToY(staticVal, grid);
-            g.setColour(col.withAlpha(0.55f));
-            g.drawHorizontalLine(static_cast<int>(y), static_cast<float>(grid.getX()), static_cast<float>(grid.getRight()));
+            const juce::Rectangle<float> row(static_cast<float>(grid.getX()), y,
+                                             static_cast<float>(grid.getWidth()),
+                                             static_cast<float>(grid.getBottom()) - y);
+            // Track-coloured fill under the flat line + a clear, thick line (shadowed) so the default
+            // automation level is obviously visible, exactly like Ableton's line across the clip.
+            g.setColour(trackColour.withAlpha(0.3f));
+            g.fillRect(row);
+            g.setColour(juce::Colours::black.withAlpha(0.45f));
+            g.fillRect(row.getX(), y - 2.4f, row.getWidth(), 4.8f);
+            g.setColour(line);
+            g.fillRect(row.getX(), y - 1.4f, row.getWidth(), 2.8f);
             continue;
         }
 
@@ -6311,26 +6400,50 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
         const auto lastY = automationValueToY(lane->points.back().value, grid);
         path.lineTo(static_cast<float>(grid.getRight()), lastY);
 
-        // A soft amber fill from the line down to the lane floor gives the automation a visible "band"
-        // so it doesn't read as a single thin thread — you can see the shape at a glance.
+        // Track-coloured fill from the curve down to the lane floor (Bitwig look).
         juce::Path fill = path;
         fill.lineTo(static_cast<float>(grid.getRight()), static_cast<float>(grid.getBottom()));
         fill.lineTo(static_cast<float>(grid.getX()),     static_cast<float>(grid.getBottom()));
         fill.closeSubPath();
-        g.setColour(col.withAlpha(0.16f));
+        g.setColour(trackColour.withAlpha(0.3f));
         g.fillPath(fill);
 
-        g.setColour(col.withAlpha(0.95f));
-        g.strokePath(path, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        // Dark shadow under the bright line so it reads boldly over any content.
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.strokePath(path, juce::PathStrokeType(4.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.setColour(line);
+        g.strokePath(path, juce::PathStrokeType(2.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
         for (const auto& pt : lane->points)
         {
             const auto px = beatToX(pt.beat, grid);
             const auto py = automationValueToY(pt.value, grid);
-            g.setColour(juce::Colours::black.withAlpha(0.6f));
-            g.fillEllipse(px - 4.0f, py - 4.0f, 8.0f, 8.0f);
-            g.setColour(col);
+            g.setColour(juce::Colours::black.withAlpha(0.55f));
+            g.fillEllipse(px - 4.5f, py - 4.5f, 9.0f, 9.0f);
+            g.setColour(dot);
             g.fillEllipse(px - 3.0f, py - 3.0f, 6.0f, 6.0f);
+        }
+
+        // Numeric value readout beside the point being dragged or hovered (Bitwig/Ableton style).
+        const int activePoint = (automationDragTrack == i && automationDragPoint >= 0) ? automationDragPoint
+                              : (automationHoverTrack == i ? automationHoverPoint : -1);
+        if (activePoint >= 0 && activePoint < static_cast<int>(lane->points.size()))
+        {
+            const auto& pt = lane->points[static_cast<std::size_t>(activePoint)];
+            const auto px = beatToX(pt.beat, grid);
+            const auto py = automationValueToY(pt.value, grid);
+            const auto label = automationValueLabel(pt.value);
+            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+            const int w = juce::jmax(34, g.getCurrentFont().getStringWidth(label) + 12);
+            juce::Rectangle<float> box(px + 9.0f, py - 20.0f, static_cast<float>(w), 16.0f);
+            if (box.getRight() > static_cast<float>(grid.getRight()))
+                box.setX(px - 9.0f - static_cast<float>(w));   // flip to the left near the edge
+            box.setY(juce::jlimit(static_cast<float>(grid.getY()),
+                                  static_cast<float>(grid.getBottom() - 16), box.getY()));
+            g.setColour(juce::Colours::black.withAlpha(0.82f));
+            g.fillRoundedRectangle(box, 3.0f);
+            g.setColour(line);
+            g.drawText(label, box, juce::Justification::centred, false);
         }
     }
 }
@@ -6351,14 +6464,20 @@ void ArrangementTimelineComponent::drawAutomationHeaderChips(juce::Graphics& g)
         if (! chip.intersects(visible))
             continue;
 
-        g.setColour(juce::Colours::black.withAlpha(0.82f));
+        // Opaque: covers the fader/dB it replaces, so it reads as a clean parameter chooser in the
+        // header (Bitwig swaps the mixer row for the automation selector), not a chip floating on top.
+        g.setColour(juce::Colour(0xff1b2130));
         g.fillRoundedRectangle(chip.toFloat(), 4.0f);
-        g.setColour(col.withAlpha(0.9f));
+        g.setColour(col.withAlpha(0.85f));
         g.drawRoundedRectangle(chip.toFloat().reduced(0.5f), 4.0f, 1.0f);
+
+        // A small down-caret on the right marks it as a dropdown.
+        auto text = chip.reduced(8, 0);
+        const auto caret = text.removeFromRight(12);
         g.setColour(col);
         g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-        g.drawText("AUTO  " + automationParamLabel + "  ▾",
-                   chip.reduced(7, 0), juce::Justification::centredLeft, true);
+        g.drawText(automationParamLabel, text, juce::Justification::centredLeft, true);
+        g.drawText(juce::String::fromUTF8("▾"), caret, juce::Justification::centred, false);
     }
 }
 
@@ -6413,10 +6532,33 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
                 menu.addSubMenu(nm.isNotEmpty() ? nm : ("Insert " + juce::String(s + 1)), sub);
             }
 
+            // Clear the current parameter's envelope → it returns to the static fader/default value
+            // (the "get back to 0" exit). Only offered when there's actually something to clear.
+            const auto* curLane = project.getTracks()[static_cast<std::size_t>(i)]
+                                      .findAutomation(automationParam, automationTargetIndex, automationParamIndex);
+            if (curLane != nullptr && ! curLane->points.empty())
+            {
+                menu.addSeparator();
+                menu.addItem(9999, "Clear " + automationParamLabel + " automation");
+            }
+
             menu.showMenuAsync(juce::PopupMenu::Options{}.withTargetComponent(this)
                                    .withTargetScreenArea(localAreaToGlobal(automationParamChipBounds(i))),
                 [this, i, instNames](int r)
                 {
+                    if (r == 9999)
+                    {
+                        captureUndoSnapshot();
+                        {
+                            const juce::ScopedLock sl(project.getAudioEditLock());
+                            project.getTracks()[static_cast<std::size_t>(i)]
+                                .laneFor(automationParam, automationTargetIndex, automationParamIndex).points.clear();
+                        }
+                        automationDragTrack = automationDragPoint = -1;
+                        automationHoverTrack = automationHoverPoint = -1;
+                        repaint();
+                        return;
+                    }
                     if (r == 1) { setAutomationParam(AutomationParam::trackVolume); }
                     else if (r == 2) { setAutomationParam(AutomationParam::trackPan); }
                     else if (r >= 1000 && r < 10000)
@@ -6461,16 +6603,35 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
             return true;
         }
 
-        captureUndoSnapshot();
         int pointIndex = hit;
         if (pointIndex < 0)
         {
-            // Add a new point where clicked.
+            // Add a new point ON the current curve (its value at this beat), like Ableton — a click just
+            // inserts a point without jumping its height; you set the value by dragging afterwards.
             const double beat = juce::jmax(0.0, xToBeatPosition(event.x));
-            const float value = automationYToValue(static_cast<float>(event.y), grid);
-            const juce::ScopedLock sl(project.getAudioEditLock());
-            pointIndex = tracks[static_cast<std::size_t>(i)]
-                             .laneFor(automationParam, automationTargetIndex, automationParamIndex).addPoint(beat, value);
+            auto& track = tracks[static_cast<std::size_t>(i)];
+            const float fallback = automationParam == AutomationParam::trackVolume
+                                       ? static_cast<float>(track.volumeDb)
+                                       : (automationParam == AutomationParam::trackPan
+                                              ? static_cast<float>(track.pan)
+                                              : automationParamDefault(automationParam));
+            const auto* existing = track.findAutomation(automationParam, automationTargetIndex, automationParamIndex);
+            const float lineVal = existing != nullptr ? existing->valueAt(beat, fallback) : fallback;
+
+            // Only grab the line when the click is actually ON it (within a few px). A click elsewhere in
+            // the lane does nothing — so you can't nudge the level by clicking near, but not on, the line
+            // (Ableton behaviour). Consume the event so it also doesn't start a clip drag.
+            if (std::abs(static_cast<float>(event.y) - automationValueToY(lineVal, grid)) > 6.0f)
+                return true;
+
+            captureUndoSnapshot();
+            const juce::ScopedLock sl(project.getAudioEditLock());   // laneFor may reallocate the lane vector
+            auto& laneRef = track.laneFor(automationParam, automationTargetIndex, automationParamIndex);
+            pointIndex = laneRef.addPoint(beat, lineVal);
+        }
+        else
+        {
+            captureUndoSnapshot();   // grabbing an existing point
         }
         automationDragTrack = i;
         automationDragPoint = pointIndex;
