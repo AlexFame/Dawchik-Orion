@@ -738,7 +738,8 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
     const int maxBeat = juce::jmax(lastVisibleBeat, static_cast<int>(std::ceil(totalBeats)));
 
     const auto beatsPerBarInt = juce::jmax(1, static_cast<int>(beatsPerBar));
-    const auto subdivisionStepBeats = choosePlaylistSubdivisionStep(pixelsPerBeat, beatsPerBarInt);
+    // Draw the SAME grid that snapping uses, so you always snap to the lines you see (Ableton).
+    const auto subdivisionStepBeats = currentGridBeats();
     const auto labelStepBeats = chooseGridStepBeats(pixelsPerBeat, beatsPerBarInt, 58.0);
 
     // Adaptive hierarchical grid: keep the density readable and use opacity, not thick strokes,
@@ -781,9 +782,9 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
     auto drawSubdivisionGrid = [&](juce::Rectangle<int> verticalArea, float intensity)
     {
-        // Beat/sub-beat lines. At arrangement-fit zoom this becomes half-bar/beat guidance;
-        // closer zooms reveal half/quarter beats.
-        if (subdivisionStepBeats <= 0.0 || pixelsPerBeat * subdivisionStepBeats < 18.0)
+        // Beat/sub-beat lines — the snap grid itself. Hidden only when the lines would be too dense
+        // to read (a very fine fixed grid at low zoom); the adaptive grid keeps them comfortable.
+        if (subdivisionStepBeats <= 0.0 || pixelsPerBeat * subdivisionStepBeats < 5.0)
             return;
 
         const auto firstBeat = std::floor(static_cast<double>(firstVisibleBeat) / subdivisionStepBeats) * subdivisionStepBeats;
@@ -804,10 +805,12 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             const auto isWholeBeat = std::abs(beat - std::round(beat)) <= beatEpsilon;
             const auto isHalfBeat = std::abs((beat * 2.0) - std::round(beat * 2.0)) <= beatEpsilon;
             const auto isQuarterBeat = std::abs((beat * 4.0) - std::round(beat * 4.0)) <= beatEpsilon;
-            const auto alpha = (isWholeBeat ? 0.16f
-                                : isHalfBeat ? 0.10f
-                                : isQuarterBeat ? 0.07f
-                                : 0.05f) * intensity;
+            // Ableton-visible grid: clearly-readable subdivision lines (its Customization tab even
+            // exposes grid-line opacity). These are the snap lines, so they must actually be seen.
+            const auto alpha = (isWholeBeat ? 0.34f
+                                : isHalfBeat ? 0.24f
+                                : isQuarterBeat ? 0.18f
+                                : 0.14f) * intensity;
 
             g.setColour((isWholeBeat ? beatGridColour : subdivisionGridColour).withAlpha(alpha));
             g.drawLine(x, static_cast<float>(verticalArea.getY()), x, static_cast<float>(verticalArea.getBottom()), 1.0f);
@@ -861,6 +864,18 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         g.setColour(markerColour);
         g.setFont(juce::FontOptions("Avenir Next", 13.0f, juce::Font::bold));
         g.drawText(juce::String(barNumber), static_cast<int>(x) + 6, markerLane.getY(), 48, markerLane.getHeight(), juce::Justification::centredLeft);
+    }
+
+    // Grid-step readout, pinned to the right of the ruler (Ableton shows the current grid spacing here).
+    {
+        const auto label = "Grid " + gridStepName() + (gridAdaptive ? "" : juce::String("  (fixed)"));
+        g.setFont(juce::FontOptions("Avenir Next", 11.0f, juce::Font::bold));
+        const int w = juce::jmax(48, g.getCurrentFont().getStringWidth(label) + 16);
+        juce::Rectangle<int> pill(gridArea.getRight() - w - 8, markerLane.getY() + 3, w, markerLane.getHeight() - 6);
+        g.setColour(juce::Colours::black.withAlpha(0.6f));
+        g.fillRoundedRectangle(pill.toFloat(), 4.0f);
+        g.setColour(gridSnapEnabled ? markerColour : juce::Colours::grey.withAlpha(0.8f));
+        g.drawText(label, pill, juce::Justification::centred);
     }
     g.restoreState();
 
@@ -3602,11 +3617,18 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    // Hold Cmd during a drag to temporarily bypass snapping (free, fine movement) — Ableton behaviour.
+    snapBypass = event.mods.isCommandDown();
+
     if (handleAutomationMouseDrag(event))
         return;
 
+    // A plain move inside the arrangement is done IN PLACE (the clip follows the cursor, no floating
+    // badge — like Ableton). The JUCE drag-and-drop (with its badge) is only for EXPORTING clips to
+    // another component, so it starts only once the cursor has left the timeline's own bounds.
     if (! playlistBlocksDragStarted && dragState.has_value() && dragState->mode == DragMode::move
-        && event.getDistanceFromDragStart() > 8)
+        && event.getDistanceFromDragStart() > 8
+        && ! getLocalBounds().contains(event.getPosition()))
     {
         std::vector<SelectedClip> clips;
         clips.reserve(dragState->clipItems.size());
@@ -4168,6 +4190,7 @@ void ArrangementTimelineComponent::modifierKeysChanged(const juce::ModifierKeys&
 void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 {
     playlistBlocksDragStarted = false;
+    snapBypass = false;   // end of drag — restore snapping
 
     if (handleAutomationMouseUp())
         return;
@@ -4422,6 +4445,14 @@ bool ArrangementTimelineComponent::keyPressed(const juce::KeyPress& key)
         setAutomationMode(! automationMode);
         return true;
     }
+
+    // Editing-grid shortcuts (Ableton §6.10): Cmd+1 finer, Cmd+2 coarser, Cmd+3 triplets,
+    // Cmd+4 snap on/off, Cmd+5 adaptive/fixed.
+    if (key == juce::KeyPress('1', juce::ModifierKeys::commandModifier, 0)) { adjustGridDensity(+1); return true; }
+    if (key == juce::KeyPress('2', juce::ModifierKeys::commandModifier, 0)) { adjustGridDensity(-1); return true; }
+    if (key == juce::KeyPress('3', juce::ModifierKeys::commandModifier, 0)) { toggleGridTriplet(); return true; }
+    if (key == juce::KeyPress('4', juce::ModifierKeys::commandModifier, 0)) { toggleGridSnap(); return true; }
+    if (key == juce::KeyPress('5', juce::ModifierKeys::commandModifier, 0)) { toggleGridAdaptive(); return true; }
 
     if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0) && undo())
         return true;
@@ -6118,9 +6149,11 @@ double ArrangementTimelineComponent::minZoomPixelsPerBeat() const noexcept
     const auto viewportW = static_cast<double>(juce::jmax(1, rulerGridArea.getWidth()));
 
     // Max zoom-out fits the content with the same tail as auto-fit. Without this, the lower zoom
-    // bound clamps away the right-side breathing room on long clips.
+    // bound clamps away the right-side breathing room on long clips. The floor here is the widest
+    // view you can reach; keep generous headroom (128 bars) so short projects don't feel "stuck"
+    // against the limit while zooming out. (The default auto-fit view stays at 64 bars.)
     const auto beatsPerBar   = static_cast<double>(juce::jmax(1, project.getNumerator()));
-    const auto minVisible    = 64.0 * beatsPerBar;
+    const auto minVisible    = 128.0 * beatsPerBar;
     const auto targetBeats   = juce::jmax(minVisible, autoFitTimelineBeats());
     return juce::jmax(minPixelsPerBeat, viewportW / targetBeats);
 }
@@ -6737,9 +6770,66 @@ int ArrangementTimelineComponent::trackIndexFromY(int y) const noexcept
     return -1;
 }
 
+double ArrangementTimelineComponent::currentGridBeats() const noexcept
+{
+    const double beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+
+    // The base division. Adaptive: the finest musical division whose on-screen spacing is still at
+    // least a few pixels, so grid lines stay readable at any zoom (Ableton's zoom-adaptive grid).
+    // Fixed: a constant 1/16. The user's density offset (Cmd+1/2) then shifts it finer/coarser.
+    double base = snapSizeInBeats;   // fixed default = 1/16 (0.25 beat)
+    if (gridAdaptive && pixelsPerBeat > 0.0)
+    {
+        constexpr double minSpacingPx = 8.0;
+        const double ladder[] = { 0.125, 0.25, 0.5, 1.0, 2.0, beatsPerBar,
+                                  beatsPerBar * 2.0, beatsPerBar * 4.0 };
+        base = ladder[std::size(ladder) - 1];
+        for (const double d : ladder)
+            if (d * pixelsPerBeat >= minSpacingPx) { base = d; break; }
+    }
+
+    base *= std::pow(2.0, static_cast<double>(-gridDensityOffset));   // +offset = finer
+    if (gridTriplet)
+        base *= 2.0 / 3.0;
+    return juce::jmax(1.0e-4, base);
+}
+
+juce::String ArrangementTimelineComponent::gridStepName() const
+{
+    if (! gridSnapEnabled)
+        return "Off";
+    const double beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    // Name from the straight (non-triplet) division, then append "T" for triplets, like Ableton.
+    double straight = currentGridBeats();
+    if (gridTriplet)
+        straight *= 3.0 / 2.0;
+    const juce::String suffix = gridTriplet ? "T" : "";
+
+    if (straight >= beatsPerBar - 1.0e-6)
+    {
+        const int bars = juce::jmax(1, static_cast<int>(std::round(straight / beatsPerBar)));
+        return juce::String(bars) + (bars == 1 ? " Bar" : " Bars") + suffix;
+    }
+    const int denom = juce::jmax(1, static_cast<int>(std::round(4.0 / straight)));   // 0.25 beat → 1/16
+    return "1/" + juce::String(denom) + suffix;
+}
+
+void ArrangementTimelineComponent::adjustGridDensity(int steps)
+{
+    gridDensityOffset = juce::jlimit(-4, 6, gridDensityOffset + steps);
+    repaint();
+}
+
+void ArrangementTimelineComponent::toggleGridTriplet()  { gridTriplet = ! gridTriplet; repaint(); }
+void ArrangementTimelineComponent::toggleGridSnap()     { gridSnapEnabled = ! gridSnapEnabled; repaint(); }
+void ArrangementTimelineComponent::toggleGridAdaptive() { gridAdaptive = ! gridAdaptive; repaint(); }
+
 double ArrangementTimelineComponent::snapBeatValue(double beat) const noexcept
 {
-    return std::round(beat / snapSizeInBeats) * snapSizeInBeats;
+    if (snapBypass || ! gridSnapEnabled)
+        return beat;   // Cmd held (or snap off) → free movement
+    const double step = currentGridBeats();
+    return std::round(beat / step) * step;
 }
 
 double ArrangementTimelineComponent::snapClipCreationBeat(double beat) const noexcept

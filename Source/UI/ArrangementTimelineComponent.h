@@ -466,6 +466,24 @@ private:
     double xToBeatDelta(int xDelta) const noexcept;
     int trackIndexFromY(int y) const noexcept;
     double snapBeatValue(double beat) const noexcept;
+    // Set true while a modifier (Cmd) is held during a drag to temporarily bypass snapping (free move).
+    bool snapBypass { false };
+
+    // ---- Editing grid (Ableton model, §6.10) ----
+    // The grid is either zoom-adaptive (density stays readable, default) or fixed (constant division),
+    // shifted finer/coarser by the user (Cmd+1/Cmd+2), optionally triplets (Cmd+3), toggled on/off
+    // (Cmd+4), and switched adaptive/fixed (Cmd+5). currentGridBeats() is the single source of truth
+    // that both snapping AND the drawn subdivision grid use, so you always snap to the grid you see.
+    bool   gridSnapEnabled { true };
+    bool   gridAdaptive    { true };
+    int    gridDensityOffset { 0 };   // +1 = one step finer (Cmd+1), -1 = one step coarser (Cmd+2)
+    bool   gridTriplet     { false };
+    double currentGridBeats() const noexcept;
+    juce::String gridStepName() const;   // "1/16", "1/8T", "1 Bar" — for the ruler readout
+    void adjustGridDensity(int steps);   // Cmd+1 / Cmd+2
+    void toggleGridTriplet();            // Cmd+3
+    void toggleGridSnap();               // Cmd+4
+    void toggleGridAdaptive();           // Cmd+5
     double snapClipCreationBeat(double beat) const noexcept;
     bool canClipLiveOnTrack(const TimelineClip& clip, int trackIndex) const noexcept;
     void moveSelectedClipToTrack(int targetTrackIndex);
