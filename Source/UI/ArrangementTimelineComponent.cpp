@@ -3623,12 +3623,11 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     if (handleAutomationMouseDrag(event))
         return;
 
-    // A plain move inside the arrangement is done IN PLACE (the clip follows the cursor, no floating
-    // badge — like Ableton). The JUCE drag-and-drop (with its badge) is only for EXPORTING clips to
-    // another component, so it starts only once the cursor has left the timeline's own bounds.
-    if (! playlistBlocksDragStarted && dragState.has_value() && dragState->mode == DragMode::move
-        && event.getDistanceFromDragStart() > 8
-        && ! getLocalBounds().contains(event.getPosition()))
+    // Clip moves in the arrangement are ALWAYS in place (the clip follows the cursor, no floating
+    // badge). The old JUCE drag-and-drop badge is disabled outright — the bounds guard was flaky
+    // (a momentary cursor excursion latched the badge on for the whole drag), and drag-to-Jam via
+    // this payload is unreachable anyway (the Jam view replaces the arrangement area).
+    if (false)
     {
         std::vector<SelectedClip> clips;
         clips.reserve(dragState->clipItems.size());
