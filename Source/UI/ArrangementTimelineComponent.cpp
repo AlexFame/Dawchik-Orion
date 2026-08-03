@@ -96,9 +96,9 @@ private:
 };
 
 const auto timelineBackground = juce::Colour(0xff18212a); // lighter DAW canvas: enough midtone for a calm, readable grid
-const auto barGridColour = juce::Colour(0xff647180);
-const auto beatGridColour = juce::Colour(0xff4f5b68);
-const auto subdivisionGridColour = juce::Colour(0xff3e4954);
+const auto barGridColour = juce::Colour(0xff8794a3);        // brighter so grid lines are clearly noticeable
+const auto beatGridColour = juce::Colour(0xff6f7c8b);
+const auto subdivisionGridColour = juce::Colour(0xff586472);
 const auto markerColour = juce::Colours::white.withAlpha(0.64f);
 const auto textColour = juce::Colours::white.withAlpha(0.88f);
 const auto playheadColour = orion::theme::states::playhead;
@@ -6133,8 +6133,18 @@ void ArrangementTimelineComponent::applyTimelineAutoFit()
     rulerGridArea.removeFromLeft(trackHeaderWidth);
     const auto viewportW = static_cast<double>(juce::jmax(1, rulerGridArea.getWidth()));
 
-    pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat,
-                                 viewportW / autoFitTimelineBeats());
+    // Default view uses a FIXED grid density rather than a fixed bar count, so the cells look the same
+    // size regardless of window width. Tuned so ~45 bars show (matches Ableton's default bar count on
+    // the user's wider window; cells end up a touch larger than Ableton's, which reads well). Longer
+    // content still zooms out to fit (whichever needs the wider view wins).
+    constexpr double ableton_px_per_beat = 5.25;   // Ableton's measured grid-cell width (~20.7 px/bar)
+    const auto beatsPerBar   = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    const auto contentBeats  = project.getContentEndInBeats();
+    const auto marginBeats   = contentBeats > 0.0 ? juce::jmax(8.0 * beatsPerBar, contentBeats * 0.08) : 0.0;
+    const auto defaultBeats  = viewportW / ableton_px_per_beat;         // density-based default
+    const auto fitBeats      = juce::jmax(defaultBeats, contentBeats + marginBeats);
+
+    pixelsPerBeat = juce::jlimit(minZoomPixelsPerBeat(), maxPixelsPerBeat, viewportW / fitBeats);
     targetPixelsPerBeat = pixelsPerBeat;
     zoomAnimating = false;
     scrollX = 0.0;
@@ -6164,7 +6174,7 @@ double ArrangementTimelineComponent::autoFitTimelineBeats() const noexcept
     const auto marginBeats = contentBeats > 0.0 ? juce::jmax(8.0 * beatsPerBar, contentBeats * 0.08) : 0.0;
     // Live's max zoom-out does not resize the whole arrangement to the dropped sample; it
     // keeps the current density and only leaves a modest tail to the right of long content.
-    const auto defaultVisibleBeats = 64.0 * beatsPerBar;
+    const auto defaultVisibleBeats = 38.0 * beatsPerBar;   // wider grid cells by default (was 64 = tiny/dense)
     return juce::jmax(defaultVisibleBeats, contentBeats + marginBeats);
 }
 
@@ -6779,7 +6789,7 @@ double ArrangementTimelineComponent::currentGridBeats() const noexcept
     double base = snapSizeInBeats;   // fixed default = 1/16 (0.25 beat)
     if (gridAdaptive && pixelsPerBeat > 0.0)
     {
-        constexpr double minSpacingPx = 8.0;
+        constexpr double minSpacingPx = 16.0;   // wider grid step (≈ 1-bar cells at the default zoom, like Ableton)
         const double ladder[] = { 0.125, 0.25, 0.5, 1.0, 2.0, beatsPerBar,
                                   beatsPerBar * 2.0, beatsPerBar * 4.0 };
         base = ladder[std::size(ladder) - 1];
