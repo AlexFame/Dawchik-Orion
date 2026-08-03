@@ -4019,9 +4019,17 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     {
         case DragMode::resizeRight: // trim right edge — constant speed, reveal/hide source
         {
-            const auto maxLenTimeline = getTimelineEndBeats() - origStart;
-            const auto newLen = juce::jlimit(minLen, juce::jmax(minLen, maxLenTimeline),
-                                             snapBeatValue(origLen + beatDelta));
+            // The edge snaps to the NEAREST target — a grid line OR the sample's own end — so it lands
+            // cleanly on the grid first and only then reaches the sub-bar tail (both are snap points,
+            // exactly like Ableton). The sample end is also the hard maximum: a plain resize never drags
+            // past the end of the audio (no loop, no stretch — that's the Alt-drag gesture).
+            const auto sourceEndLen = juce::jmax(minLen, fullLen * (1.0 - trimStart0));
+            const auto rawLen  = juce::jlimit(minLen, sourceEndLen, origLen + xToBeatDelta(event.getDistanceFromDragStartX()));
+            const auto rawEnd  = origStart + rawLen;
+            const auto gridEnd = snapBeatValue(rawEnd);
+            const auto endBeat = origStart + sourceEndLen;                 // the sample's natural end
+            const auto snappedEnd = (std::abs(rawEnd - endBeat) <= std::abs(rawEnd - gridEnd)) ? endBeat : gridEnd;
+            const auto newLen  = juce::jlimit(minLen, sourceEndLen, snappedEnd - origStart);
             clip.lengthInBeats   = newLen;
             clip.sampleStartRatio = trimStart0;
             clip.sampleEndRatio   = juce::jlimit(trimStart0 + 0.001, 1.0, trimStart0 + newLen / fullLen);
@@ -4031,8 +4039,13 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
         case DragMode::resizeLeft: // trim left edge — constant speed
         {
             const auto maxLenLeft = fullLen * trimEnd0;          // can't reveal before source start
-            const auto minStart   = juce::jmax(0.0, origEnd - maxLenLeft);
-            const auto newStart   = juce::jlimit(minStart, origEnd - minLen, snapBeatValue(origStart + beatDelta));
+            const auto minStart   = juce::jmax(0.0, origEnd - maxLenLeft);   // the sample's natural start
+            // Same nearest-target snap as the right edge: grid line OR the sample's own start, so the
+            // edge lands on the grid first and only then reaches the sub-bar head (Ableton behaviour).
+            const auto rawStart   = juce::jlimit(minStart, origEnd - minLen, origStart + xToBeatDelta(event.getDistanceFromDragStartX()));
+            const auto gridStart  = snapBeatValue(rawStart);
+            const auto snappedStart = (std::abs(rawStart - minStart) <= std::abs(rawStart - gridStart)) ? minStart : gridStart;
+            const auto newStart   = juce::jlimit(minStart, origEnd - minLen, snappedStart);
             const auto newLen     = origEnd - newStart;
             clip.startBeat        = newStart;
             clip.lengthInBeats    = newLen;
@@ -6137,7 +6150,7 @@ void ArrangementTimelineComponent::applyTimelineAutoFit()
     // size regardless of window width. Tuned so ~45 bars show (matches Ableton's default bar count on
     // the user's wider window; cells end up a touch larger than Ableton's, which reads well). Longer
     // content still zooms out to fit (whichever needs the wider view wins).
-    constexpr double ableton_px_per_beat = 5.25;   // Ableton's measured grid-cell width (~20.7 px/bar)
+    constexpr double ableton_px_per_beat = 6.6;   // Ableton's measured grid-cell width (~27 px/bar)
     const auto beatsPerBar   = static_cast<double>(juce::jmax(1, project.getNumerator()));
     const auto contentBeats  = project.getContentEndInBeats();
     const auto marginBeats   = contentBeats > 0.0 ? juce::jmax(8.0 * beatsPerBar, contentBeats * 0.08) : 0.0;

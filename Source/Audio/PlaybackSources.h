@@ -2135,10 +2135,16 @@ private:
                     }
                     else if (needsPitchRender)
                     {
-                        // Warped buffer is pre-stretched to the clip length → map 1:1.
-                        const auto clipBeatOffset = timelineBeat - clipStartBeat;
-                        const auto clipProgress = clip.lengthInBeats > 0.0 ? juce::jlimit(0.0, 1.0, clipBeatOffset / clip.lengthInBeats) : 0.0;
-                        sourceRatio = trimStart + clipProgress * trimSpan;
+                        // Play the (warped) trimmed source at its NATURAL rate; past the end of the
+                        // sample there is SILENCE (no loop, no time-stretch — stretch is the Alt-drag
+                        // gesture). Mapping the source across the whole clip length instead dropped the
+                        // pitch once the clip was dragged past the end of the sample.
+                        const auto clipBeatOffset = juce::jmax(0.0, timelineBeat - clipStartBeat);
+                        const auto sourceRegionBeats = juce::jmax(1.0e-6, trimSpan * fullSourceLengthInBeats);
+                        if (clipBeatOffset >= sourceRegionBeats)
+                            continue;   // past the sample's end → silent tail
+                        const auto regionProgress = clipBeatOffset / sourceRegionBeats;   // 0..1 inside the source
+                        sourceRatio = trimStart + regionProgress * trimSpan;
                     }
                     else
                     {
