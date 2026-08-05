@@ -309,12 +309,17 @@ private:
     AddTrackDialogComponent addTrackDialog;
     PluginPickerComponent pluginPicker;
     int pluginPickerTargetTrack { 0 };
+    int pluginPickerTargetInsert { -1 };
+    bool pluginPickerReplacingInsert { false };
     PluginManager pluginManager;
     std::map<int, std::unique_ptr<PluginEditorWindow>> instrumentEditorWindows;
     std::map<std::pair<int, int>, std::unique_ptr<PluginEditorWindow>> insertEditorWindows;
     // Gesture watchers for open instrument editors: touching a knob auto-maps the automation lane to it.
     std::map<int, std::unique_ptr<PluginTouchListener>> instrumentTouchListeners;
     void onInstrumentParamTouched(int trackIndex, int paramIndex);
+    // Same gesture-watch for open insert-effect editors, keyed by (track, insert slot).
+    std::map<std::pair<int, int>, std::unique_ptr<PluginTouchListener>> insertTouchListeners;
+    void onInsertParamTouched(int trackIndex, int insertIndex, int paramIndex);
     std::map<std::string, std::shared_ptr<const ClipEditorWaveform>> clipEditorWaveformCache;
     // Cache of fully-prepared (trimmed + pitch-shifted) clip-editor preview buffers,
     // keyed by source|startSample|numSamples|semitones|backend, so re-triggering or

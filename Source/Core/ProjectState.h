@@ -326,6 +326,16 @@ struct TrackState
             return juce::jlimit(-1.0f, 1.0f, lane->valueAt(beat, static_cast<float>(pan)));
         return pan;
     }
+    // Effective aux-send level (linear 0..1) for send slot `sendSlot` at a musical position.
+    // Falls back to the static send level when that slot isn't automated.
+    double automatedSendLevel(int sendSlot, double beat) const noexcept
+    {
+        const double fallback = (sendSlot >= 0 && sendSlot < static_cast<int>(sends.size()))
+            ? sends[static_cast<std::size_t>(sendSlot)].level : 0.0;
+        if (const auto* lane = findAutomation(AutomationParam::trackSend, sendSlot); lane != nullptr && lane->active())
+            return juce::jlimit(0.0f, 1.0f, lane->valueAt(beat, static_cast<float>(fallback)));
+        return fallback;
+    }
     std::vector<TimelineClip> clips;
     juce::String samplerSourcePath;
     // --- MPC Sample kit --------------------------------------------------------------

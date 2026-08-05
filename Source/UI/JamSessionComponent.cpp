@@ -2,6 +2,7 @@
 
 #include "MacCharacterPalette.h"
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 
 namespace orion
 {
@@ -1047,6 +1048,7 @@ void JamSessionComponent::buttonClicked(juce::Button* button)
     else if (button == &tipButton)
     {
         juce::PopupMenu menu;
+        ui::stylePopupMenu(menu);
         menu.addItem(1, "Add files or photos");
         menu.addItem(2, "Add folders");
         menu.showMenuAsync(juce::PopupMenu::Options()

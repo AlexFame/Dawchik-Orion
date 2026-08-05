@@ -82,6 +82,7 @@ void MainComponent::restoreInsertsFromProject()
 {
     if (arrangementPlaybackSource == nullptr)
         return;
+    insertTouchListeners.clear();  // listeners hold raw instance pointers we're about to replace
     insertEditorWindows.clear();   // old windows reference instances we're about to replace
     auto& tracks = projectState.getTracks();
     for (int t = 0; t < static_cast<int>(tracks.size()); ++t)

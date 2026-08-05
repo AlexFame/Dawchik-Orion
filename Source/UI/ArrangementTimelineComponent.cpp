@@ -1,6 +1,7 @@
 #include "ArrangementTimelineComponent.h"
 
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 #include "../Audio/ChordDetector.h"
 #include "../Audio/StemSeparator.h"
 #include "../Audio/WarpEngine.h"
@@ -114,8 +115,50 @@ constexpr auto minimumOneShotClipLengthInBeats = 0.0625;
 constexpr auto minTrackHeaderWidth = 176;
 constexpr auto maxTrackHeaderWidth = 360;
 constexpr auto beatEpsilon = 0.0001;
-constexpr auto defaultLaneHeight = 78;
+constexpr auto defaultLaneHeight = 92;   // fits title + M/S/R + volume + pan rows without stretching
 constexpr auto minimumLaneHeight = 42;
+
+// Logic-style Audio FX stack geometry (track header). Kept here so computeHeaderLayout() and
+// insertStackFloorHeight() lay out and reserve exactly the same pixels.
+namespace fxStack
+{
+constexpr int gapBeforeStack = 5;   // between the volume row and the first slot
+constexpr int slotHeight     = 16;
+constexpr int slotGap        = 3;   // vertical gap after each slot (incl. before the add-slot)
+constexpr int addSlotHeight  = 9;   // last empty slot is shown at half height (Logic behaviour)
+constexpr int bottomInset    = 6;   // matches the card's reduced(8, 6)
+constexpr int maxVisibleSlots = 3;  // auto-grow caps here; extra inserts scroll (or stretch the lane)
+constexpr int slotStride      = slotHeight + slotGap;
+
+inline juce::Rectangle<int> actionBounds(juce::Rectangle<int> slot, int actionIndex)
+{
+    constexpr int buttonSize = 14;
+    constexpr int buttonGap = 3;
+    constexpr int rightInset = 4;
+    const int x = slot.getRight() - rightInset - buttonSize
+                - (2 - actionIndex) * (buttonSize + buttonGap);
+    return { x, slot.getY() + (slot.getHeight() - buttonSize) / 2, buttonSize, buttonSize };
+}
+}
+
+// Track-header row heights. Kept here so computeHeaderLayout() and insertStackFloorHeight()
+// agree, and so volume + pan both fit at the default 78px lane height (no stretching needed).
+namespace headerRows
+{
+constexpr int titleH          = 18;
+constexpr int gapAfterTitle    = 4;
+constexpr int controlsH        = 18;
+constexpr int gapAfterControls = 5;
+constexpr int volumeH          = 14;   // slider + dB readout
+constexpr int sliderVisualH    = 8;    // the drawn capsule inside a value row
+constexpr int valueWidth       = 46;   // dB / pan numeric readout column
+}
+// Pan row directly below the volume row.
+namespace panRow
+{
+constexpr int gapAbovePan = 2;
+constexpr int panRowH     = 12;   // slider + L/R readout
+}
 constexpr auto maximumLaneHeight = 176;
 constexpr auto minimumVerticalZoom = 0.54;
 constexpr auto maximumVerticalZoom = 2.26;
@@ -363,6 +406,8 @@ ArrangementTimelineComponent::ArrangementTimelineComponent(ProjectState& project
 {
     setWantsKeyboardFocus(true);
     addChildComponent(trackVolumeInlineEditor);
+    for (auto& anchor : fxTooltipAnchors)
+        addAndMakeVisible(anchor);
     trackVolumeInlineEditor.setJustification(juce::Justification::centredRight);
     trackVolumeInlineEditor.setSelectAllWhenFocused(true);
     trackVolumeInlineEditor.setInputRestrictions(8, "-.0123456789");
@@ -1077,21 +1122,97 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
             }
         }
 
-        auto sliderF = layout.slider.toFloat();
-        const auto sliderRadius = sliderF.getHeight() * 0.5f;
-        g.setColour(juce::Colours::black.withAlpha(0.62f));
-        g.fillRoundedRectangle(sliderF, sliderRadius);
-        const auto volumeRatio = juce::jmap(static_cast<float>(tracks[trackArrayIndex].volumeDb), -24.0f, 12.0f, 0.0f, 1.0f);
-        auto volumeFill = sliderF.removeFromLeft(juce::jmax(sliderF.getHeight(), sliderF.getWidth() * juce::jlimit(0.0f, 1.0f, volumeRatio)));
-        g.setColour(trackColour.withAlpha(0.84f));
-        g.fillRoundedRectangle(volumeFill, sliderRadius);
+        // FX button: entry point for the first insert. Track colour is only a small accent;
+        // hover uses a neutral light surface so the label remains readable.
+        if (! layout.fxButton.isEmpty())
+        {
+            const auto hasInserts = ! tracks[trackArrayIndex].inserts.empty();
+            const auto isHovered = hoveredFxTrackIndex == trackIndex
+                                && hoveredFxControl == TrackHeaderControl::fx;
+            auto box = layout.fxButton.toFloat();
+            g.setColour(isHovered ? juce::Colour(0xff536176)
+                                  : (hasInserts ? juce::Colour(0xff394657)
+                                                : juce::Colour(0xff27313f)));
+            g.fillRoundedRectangle(box, theme::metrics::controlRadius);
+            g.setColour(trackColour.withAlpha(hasInserts ? 0.88f : 0.48f));
+            g.fillRoundedRectangle(box.withWidth(2.5f), theme::metrics::controlRadius * 0.5f);
+            g.setColour(juce::Colours::white.withAlpha(isHovered ? 0.42f : 0.14f));
+            g.drawRoundedRectangle(box.reduced(0.5f), theme::metrics::controlRadius, 0.8f);
+            g.setColour(juce::Colour(0xffedf3f9).withAlpha(isHovered ? 1.0f : 0.88f));
+            g.setFont(juce::FontOptions("Avenir Next", 9.5f, juce::Font::bold));
+            g.drawText("FX", box, juce::Justification::centred);
+        }
+
+        // Modern round-handle knob shared by the volume + pan sliders.
+        const auto drawKnob = [&g](float cx, float cy, float trackH)
+        {
+            const auto d = trackH + 4.0f;                       // knob overhangs the thin track
+            const juce::Rectangle<float> k(cx - d * 0.5f, cy - d * 0.5f, d, d);
+            g.setColour(juce::Colours::black.withAlpha(0.35f));
+            g.fillEllipse(k.translated(0.0f, 0.6f));            // soft drop shadow
+            juce::ColourGradient kg(juce::Colour(0xffffffff), k.getX(), k.getY(),
+                                    juce::Colour(0xffc7d0dc), k.getX(), k.getBottom(), false);
+            g.setGradientFill(kg);
+            g.fillEllipse(k);
+            g.setColour(juce::Colours::black.withAlpha(0.18f));
+            g.drawEllipse(k.reduced(0.5f), 1.0f);
+        };
+
+        auto sliderTrack = layout.slider.toFloat();
+        const auto sliderRadius = sliderTrack.getHeight() * 0.5f;
+        {
+            g.setColour(juce::Colours::black.withAlpha(0.62f));
+            g.fillRoundedRectangle(sliderTrack, sliderRadius);
+            const auto volumeRatio = juce::jlimit(0.0f, 1.0f,
+                juce::jmap(static_cast<float>(tracks[trackArrayIndex].volumeDb), -24.0f, 12.0f, 0.0f, 1.0f));
+            const auto usable = sliderTrack.getWidth() - sliderTrack.getHeight();
+            const auto knobX = sliderTrack.getX() + sliderRadius + usable * volumeRatio;
+            // Fill up to the knob, in the track colour with a subtle vertical gradient.
+            juce::ColourGradient vg(trackColour.brighter(0.10f), sliderTrack.getX(), sliderTrack.getY(),
+                                    trackColour.darker(0.20f), sliderTrack.getX(), sliderTrack.getBottom(), false);
+            g.setGradientFill(vg);
+            g.fillRoundedRectangle(sliderTrack.withRight(knobX), sliderRadius);
+            drawKnob(knobX, sliderTrack.getCentreY(), sliderTrack.getHeight());
+        }
 
         if (! (volumeEditorTrackIndex.has_value() && *volumeEditorTrackIndex == trackIndex))
         {
             g.setColour(juce::Colours::white.withAlpha(0.88f));
-            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
             g.drawText(juce::String(tracks[trackArrayIndex].volumeDb, 1) + " dB",
                        layout.volumeValue, juce::Justification::centredRight);
+        }
+
+        // Pan slider: centre-anchored silver fill with a matching round handle + numeric readout.
+        if (! layout.panSlider.isEmpty())
+        {
+            auto panTrack = layout.panSlider.toFloat();
+            const auto panRadius = panTrack.getHeight() * 0.5f;
+            const auto pan = juce::jlimit(-1.0f, 1.0f, static_cast<float>(tracks[trackArrayIndex].pan));
+            const auto centreX = panTrack.getCentreX();
+            const auto usable  = panTrack.getWidth() * 0.5f - panRadius;
+            const auto knobX   = centreX + pan * usable;
+
+            g.setColour(juce::Colours::black.withAlpha(0.62f));
+            g.fillRoundedRectangle(panTrack, panRadius);
+            if (std::abs(pan) > 0.001f)
+            {
+                const auto left  = juce::jmin(centreX, knobX);
+                const auto right = juce::jmax(centreX, knobX);
+                g.setColour(juce::Colour(0xffb9c2cf).withAlpha(0.85f));   // silver fill
+                g.fillRoundedRectangle(juce::Rectangle<float>(left, panTrack.getY(), right - left, panTrack.getHeight()), panRadius);
+            }
+            g.setColour(juce::Colours::white.withAlpha(0.32f));          // centre detent tick
+            g.fillRect(centreX - 0.5f, panTrack.getY() - 1.0f, 1.0f, panTrack.getHeight() + 2.0f);
+            drawKnob(knobX, panTrack.getCentreY(), panTrack.getHeight());
+
+            // Numeric readout: C at centre, else L/R with a 0..100 amount.
+            const int amount = juce::roundToInt(std::abs(pan) * 100.0f);
+            const juce::String panText = amount == 0 ? juce::String("C")
+                                       : (pan < 0.0f ? "L" : "R") + juce::String(amount);
+            g.setColour(juce::Colours::white.withAlpha(0.82f));
+            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+            g.drawText(panText, layout.panValue, juce::Justification::centredRight);
         }
 
         // Stereo level meter on the right edge: two bars (L/R), one fixed colour scheme
@@ -1132,6 +1253,151 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
             drawBar(leftBar, levelL);
             drawBar(rightBar, levelR);
+        }
+
+        // Audio FX stack (Logic-style): one slot per insert, plus a half-height "add" slot.
+        // Clipped to the viewport so scrolled-out slots don't bleed into neighbouring rows.
+        if (! layout.insertStackViewport.isEmpty())
+        {
+            juce::Graphics::ScopedSaveState fxClip(g);
+            g.reduceClipRegion(layout.insertStackViewport);
+
+            const auto& inserts = tracks[trackArrayIndex].inserts;
+            for (int s = 0; s < layout.insertSlots.size(); ++s)
+            {
+                const int fxIndex = layout.insertSlotIndices[s];
+                if (fxIndex < 0 || fxIndex >= static_cast<int>(inserts.size()))
+                    continue;
+                const auto& fx = inserts[static_cast<std::size_t>(fxIndex)];
+                auto slot = layout.insertSlots.getReference(s).toFloat();
+                const auto radius = theme::metrics::controlRadius;
+                const auto isSlotHovered = hoveredFxTrackIndex == trackIndex
+                                        && hoveredFxSlotIndex == fxIndex
+                                        && (hoveredFxControl == TrackHeaderControl::insertSlot
+                                            || hoveredFxControl == TrackHeaderControl::insertBypassAction
+                                            || hoveredFxControl == TrackHeaderControl::insertReplaceAction
+                                            || hoveredFxControl == TrackHeaderControl::insertRemoveAction);
+                const auto isBypassHovered = hoveredFxControl == TrackHeaderControl::insertBypassAction
+                                          && isSlotHovered;
+                const auto isRemoveHovered = hoveredFxControl == TrackHeaderControl::insertRemoveAction
+                                          && isSlotHovered;
+                const auto isReplaceHovered = hoveredFxControl == TrackHeaderControl::insertReplaceAction
+                                           && isSlotHovered;
+                const auto showBypassAction = isSlotHovered || fx.bypassed;
+                // The action buttons are part of this same chip. Keep their space reserved in
+                // the label area instead of drawing a second panel on top of the effect.
+                const auto effectField = slot;
+
+                // Orion graphite chip: track colour is a narrow state accent, never the text
+                // field itself. Hover lifts the surface and makes the label immediately legible.
+                const auto bodyTop = isSlotHovered ? juce::Colour(0xff536176)
+                                                : (fx.bypassed ? juce::Colour(0xff303946)
+                                                               : juce::Colour(0xff394657));
+                const auto bodyBottom = isSlotHovered ? juce::Colour(0xff465467)
+                                                   : (fx.bypassed ? juce::Colour(0xff242c37)
+                                                                  : juce::Colour(0xff2b3544));
+                juce::ColourGradient body(bodyTop, effectField.getX(), effectField.getY(),
+                                          bodyBottom, effectField.getX(), effectField.getBottom(), false);
+                g.setGradientFill(body);
+                g.fillRoundedRectangle(effectField, radius);
+                const auto stateAccent = trackColour;
+                g.setColour(fx.bypassed ? juce::Colour(0xff667386).withAlpha(0.55f)
+                                        : stateAccent.withAlpha(0.9f));
+                g.fillRoundedRectangle(effectField.withWidth(3.0f), radius * 0.5f);
+                g.setColour(juce::Colours::white.withAlpha(isSlotHovered ? 0.48f
+                                                                      : (fx.bypassed ? 0.08f : 0.14f)));
+                g.drawRoundedRectangle(slot.reduced(0.5f), radius, 0.8f);
+
+                g.setColour(fx.bypassed ? juce::Colour(0xffaab5c3)
+                                        : juce::Colour(0xffedf3f9));
+                g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+                auto textArea = effectField.withTrimmedLeft(10.0f)
+                                             .withTrimmedRight(showBypassAction ? 42.0f : 6.0f);
+                g.drawText(fx.pluginName, textArea,
+                           juce::Justification::centredLeft, true);
+
+                if (showBypassAction)
+                {
+                    const auto bypass = fxStack::actionBounds(layout.insertSlots.getReference(s), 0).toFloat();
+                    g.setColour(fx.bypassed
+                                    ? (isBypassHovered ? juce::Colour(0xffe06b73)
+                                                       : juce::Colour(0xffb94d59))
+                                    : (isBypassHovered ? juce::Colour(0xff7b8da5)
+                                                       : juce::Colour(0xff344255)));
+                    g.fillRoundedRectangle(bypass, 4.0f);
+
+                    // Bypass icon: a compact power ring with a break at the top.
+                    g.setColour(juce::Colour(0xffe5edf6));
+                    juce::Path power;
+                    power.addCentredArc(bypass.getCentreX(), bypass.getCentreY() + 0.5f,
+                                        bypass.getWidth() * 0.28f, bypass.getHeight() * 0.28f,
+                                        0.0f, 0.55f, 5.75f, true);
+                    g.strokePath(power, juce::PathStrokeType(1.2f));
+                    g.drawLine(bypass.getCentreX(), bypass.getY() + 2.5f,
+                               bypass.getCentreX(), bypass.getY() + 6.5f, 1.2f);
+
+                    const auto replace = fxStack::actionBounds(layout.insertSlots.getReference(s), 1).toFloat();
+                    g.setColour(isReplaceHovered ? juce::Colour(0xff7b8da5) : juce::Colour(0xff344255));
+                    g.fillRoundedRectangle(replace, 4.0f);
+                    g.setColour(juce::Colour(0xffe5edf6));
+                    g.drawLine(replace.getX() + 3.0f, replace.getY() + 5.0f,
+                               replace.getRight() - 4.0f, replace.getY() + 5.0f, 1.1f);
+                    g.drawLine(replace.getRight() - 4.0f, replace.getY() + 5.0f,
+                               replace.getRight() - 7.0f, replace.getY() + 2.5f, 1.1f);
+                    g.drawLine(replace.getX() + 4.0f, replace.getBottom() - 5.0f,
+                               replace.getRight() - 3.0f, replace.getBottom() - 5.0f, 1.1f);
+                    g.drawLine(replace.getX() + 4.0f, replace.getBottom() - 5.0f,
+                               replace.getX() + 7.0f, replace.getBottom() - 2.5f, 1.1f);
+
+                    if (isSlotHovered)
+                    {
+                        const auto remove = fxStack::actionBounds(layout.insertSlots.getReference(s), 2).toFloat();
+                        g.setColour(isRemoveHovered ? juce::Colour(0xffb95260) : juce::Colour(0xff344255));
+                        g.fillRoundedRectangle(remove, 4.0f);
+                        g.setColour(juce::Colour(0xffe5edf6));
+                        g.drawLine(remove.getX() + 4.0f, remove.getY() + 4.0f,
+                                   remove.getRight() - 4.0f, remove.getBottom() - 4.0f, 1.3f);
+                        g.drawLine(remove.getRight() - 4.0f, remove.getY() + 4.0f,
+                                   remove.getX() + 4.0f, remove.getBottom() - 4.0f, 1.3f);
+                    }
+                }
+            }
+
+            if (! layout.addInsertSlot.isEmpty())
+            {
+                const bool emptyEntry = inserts.empty();   // the always-visible "add first effect" slot
+                const auto isHovered = hoveredFxTrackIndex == trackIndex
+                                    && hoveredFxControl == TrackHeaderControl::addInsertSlot;
+                auto add = layout.addInsertSlot.toFloat().reduced(0.5f);
+                const auto radius = theme::metrics::controlRadius;
+                // Keep the empty effect field readable against every track colour. It is a
+                // persistent control, not disabled space, so its graphite surface needs more
+                // separation than the old near-black fill provided.
+                const auto addSurface = emptyEntry
+                    ? trackColour.withSaturation(0.34f).withBrightness(isHovered ? 0.46f : 0.34f)
+                    : theme::surface::elevated.withAlpha(0.82f);
+                g.setColour(addSurface);
+                g.fillRoundedRectangle(add, radius);
+                g.setColour(trackColour.withAlpha(emptyEntry ? 0.88f : 0.58f));
+                g.fillRoundedRectangle(add.withWidth(3.0f), radius * 0.5f);
+                g.setColour((emptyEntry
+                                ? trackColour.brighter(isHovered ? 0.55f : 0.30f)
+                                : (isHovered ? theme::line::soft : theme::line::normal))
+                                .withAlpha(emptyEntry ? 0.86f : 0.72f));
+                g.drawRoundedRectangle(add.reduced(0.5f), radius, 0.8f);
+                g.setColour(theme::text::primary.withAlpha(isHovered ? 1.0f
+                                                                        : (emptyEntry ? 0.96f : 0.70f)));
+                if (emptyEntry)
+                {
+                    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+                    g.drawText("+  Add effect", add, juce::Justification::centred);
+                }
+                else
+                {
+                    g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+                    g.drawText("+", add, juce::Justification::centred);
+                }
+            }
         }
     }
 
@@ -1974,6 +2240,64 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
         }
     }
 
+    if (insertDragState.active && insertDragState.moved)
+    {
+        const auto& tracks = project.getTracks();
+        if (insertDragState.trackIndex >= 0
+            && insertDragState.trackIndex < static_cast<int>(tracks.size()))
+        {
+            const auto trackIndex = insertDragState.trackIndex;
+            const auto layout = computeHeaderLayout(trackIndex);
+            const auto& inserts = tracks[static_cast<std::size_t>(trackIndex)].inserts;
+            const auto sourceIt = std::find(layout.insertSlotIndices.begin(), layout.insertSlotIndices.end(),
+                                            insertDragState.insertIndex);
+            if (sourceIt != layout.insertSlotIndices.end())
+            {
+                const auto sourceSlot = layout.insertSlots.getReference(
+                    static_cast<int>(std::distance(layout.insertSlotIndices.begin(), sourceIt)));
+                g.setColour(juce::Colours::black.withAlpha(0.48f));
+                g.fillRoundedRectangle(sourceSlot.toFloat(), theme::metrics::controlRadius);
+            }
+
+            // A cyan insertion marker makes the exact drop location obvious while the dragged
+            // effect is dimmed in its original slot.
+            int markerY = layout.insertStackViewport.getBottom() - 2;
+            for (int s = 0; s < layout.insertSlots.size(); ++s)
+            {
+                if (layout.insertSlotIndices[s] >= insertDragState.targetIndex)
+                {
+                    markerY = layout.insertSlots.getReference(s).getY() - 2;
+                    break;
+                }
+            }
+            g.setColour(juce::Colour(0xffaab6c5).withAlpha(0.82f));
+            g.fillRoundedRectangle(juce::Rectangle<float>(layout.insertStackViewport.getX() + 2.0f,
+                                                            static_cast<float>(markerY),
+                                                            static_cast<float>(layout.insertStackViewport.getWidth() - 4),
+                                                            2.0f), 1.0f);
+
+            const auto name = insertDragState.insertIndex >= 0
+                           && insertDragState.insertIndex < static_cast<int>(inserts.size())
+                ? inserts[static_cast<std::size_t>(insertDragState.insertIndex)].pluginName
+                : juce::String("Effect");
+            const int ghostWidth = juce::jmin(190, trackHeaderWidth - 12);
+            const int ghostX = juce::jlimit(6, trackHeaderWidth - ghostWidth - 6,
+                                            insertDragState.currentPosition.x - ghostWidth / 2);
+            const int ghostY = juce::jlimit(6, getHeight() - 28,
+                                            insertDragState.currentPosition.y - 12);
+            const juce::Rectangle<float> ghost(static_cast<float>(ghostX), static_cast<float>(ghostY),
+                                               static_cast<float>(ghostWidth), 22.0f);
+            g.setColour(juce::Colour(0xff172434).withAlpha(0.96f));
+            g.fillRoundedRectangle(ghost, 5.0f);
+            g.setColour(juce::Colour(0xffaab6c5).withAlpha(0.92f));
+            g.drawRoundedRectangle(ghost.reduced(0.5f), 5.0f, 1.2f);
+            g.setColour(theme::text::primary);
+            g.setFont(juce::FontOptions("Avenir Next", 10.5f, juce::Font::bold));
+            g.drawFittedText("Move: " + name, ghost.toNearestInt().reduced(8, 2),
+                             juce::Justification::centredLeft, 1);
+        }
+    }
+
     paintToolPalette(g);
     drawRemoteCursors(g);
 }
@@ -2783,6 +3107,7 @@ bool ArrangementTimelineComponent::handleEditToolbarClick(juce::Point<int> posit
 void ArrangementTimelineComponent::showSplitSnapMenu()
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
     menu.addItem(1, "Smart", true, splitSnapMode == SplitSnapMode::smart);
     menu.addItem(2, "Bar", true, splitSnapMode == SplitSnapMode::bar);
     menu.addItem(3, "Beat", true, splitSnapMode == SplitSnapMode::beat);
@@ -3129,6 +3454,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
                     const auto suffix = multi ? " (" + juce::String(gainTargets.size()) + " clips)" : juce::String();
 
                     juce::PopupMenu menu;
+                    orion::ui::stylePopupMenu(menu);
                     menu.addItem(2, "Analyze chords");   // Logic-style: (re)detect this loop's progression
                     menu.addItem(3, "Separate stems (6)", orion::stems::isAvailable() && ! stemRunning, false);
                     menu.addItem(1, "Follow chord lane (re-harmonise)", true, on);
@@ -3422,15 +3748,98 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
                 onTrackInstrumentClicked(trackHeaderHit->trackIndex);
             return;
         }
+        else if (trackHeaderHit->control == TrackHeaderControl::fx
+              || trackHeaderHit->control == TrackHeaderControl::addInsertSlot)
+        {
+            // Add a new insert: the host shows the plug-in picker (insertIndex past the end = "add").
+            notifyClipSelectionChanged();
+            repaint();
+            if (onInsertSlotMenu)
+                onInsertSlotMenu(trackHeaderHit->trackIndex, trackHeaderHit->insertIndex);
+            return;
+        }
+        else if (trackHeaderHit->control == TrackHeaderControl::insertSlot)
+        {
+            notifyClipSelectionChanged();
+            repaint();
+            if (event.mods.isCommandDown())
+            {
+                if (onRemoveInsertSlot)                              // Cmd-click = quick remove (Logic eraser)
+                    onRemoveInsertSlot(trackHeaderHit->trackIndex, trackHeaderHit->insertIndex);
+            }
+            else if (event.mods.isPopupMenu())
+            {
+                if (onInsertSlotMenu)                                // right-click = open/bypass/replace/remove
+                    onInsertSlotMenu(trackHeaderHit->trackIndex, trackHeaderHit->insertIndex);
+            }
+            else
+            {
+                // Delay opening until mouse-up so a normal drag can reorder the insert chain.
+                insertDragState = { true, false, trackHeaderHit->trackIndex,
+                                     trackHeaderHit->insertIndex, trackHeaderHit->insertIndex,
+                                     event.getPosition(), event.getPosition() };
+            }
+            return;
+        }
+        else if (trackHeaderHit->control == TrackHeaderControl::insertBypassAction)
+        {
+            notifyClipSelectionChanged();
+            if (onToggleInsertBypass)
+                onToggleInsertBypass(trackHeaderHit->trackIndex, trackHeaderHit->insertIndex);
+            repaint();
+            return;
+        }
+        else if (trackHeaderHit->control == TrackHeaderControl::insertReplaceAction)
+        {
+            notifyClipSelectionChanged();
+            if (onReplaceInsertSlot)
+                onReplaceInsertSlot(trackHeaderHit->trackIndex, trackHeaderHit->insertIndex);
+            repaint();
+            return;
+        }
+        else if (trackHeaderHit->control == TrackHeaderControl::insertRemoveAction)
+        {
+            notifyClipSelectionChanged();
+            if (onRemoveInsertSlot)
+                onRemoveInsertSlot(trackHeaderHit->trackIndex, trackHeaderHit->insertIndex);
+            repaint();
+            return;
+        }
         else if (trackHeaderHit->control == TrackHeaderControl::volume)
         {
+            const auto idx = trackHeaderHit->trackIndex;
+            if (event.getNumberOfClicks() >= 2)   // double-click resets the fader to 0 dB
+            {
+                if (idx >= 0 && idx < static_cast<int>(project.getTracks().size()))
+                    project.getTracks()[static_cast<std::size_t>(idx)].volumeDb = 0.0;
+                notifyClipSelectionChanged();
+                repaint();
+                return;
+            }
             // Arm a drag but DON'T jump the value on the initial click — a click near the left edge used
             // to snap the volume to the bottom (-24). The value only changes once the user drags.
-            trackVolumeDragState = TrackVolumeDragState { true, trackHeaderHit->trackIndex, trackHeaderHit->bounds };
+            trackVolumeDragState = TrackVolumeDragState { true, idx, trackHeaderHit->bounds };
         }
         else if (trackHeaderHit->control == TrackHeaderControl::volumeValue)
         {
             showTrackVolumeEditor(trackHeaderHit->trackIndex);
+            notifyClipSelectionChanged();
+            repaint();
+            return;
+        }
+        else if (trackHeaderHit->control == TrackHeaderControl::pan)
+        {
+            const auto idx = trackHeaderHit->trackIndex;
+            if (event.getNumberOfClicks() >= 2)   // double-click resets pan to centre
+            {
+                if (idx >= 0 && idx < static_cast<int>(project.getTracks().size()))
+                    project.getTracks()[static_cast<std::size_t>(idx)].pan = 0.0;
+            }
+            else
+            {
+                trackPanDragState = TrackPanDragState { true, idx, trackHeaderHit->bounds };
+                updateTrackPanFromPoint(idx, trackHeaderHit->bounds, event.getPosition().x);
+            }
             notifyClipSelectionChanged();
             repaint();
             return;
@@ -3620,6 +4029,36 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     // Hold Cmd during a drag to temporarily bypass snapping (free, fine movement) — Ableton behaviour.
     snapBypass = event.mods.isCommandDown();
 
+    if (insertDragState.active)
+    {
+        insertDragState.currentPosition = event.getPosition();
+        if (event.getPosition().getDistanceFrom(insertDragState.startPosition) > 5)
+            insertDragState.moved = true;
+
+        if (insertDragState.moved)
+        {
+            if (const auto hit = hitTestTrackHeader(event.getPosition()))
+            {
+                const bool overInsert = hit->control == TrackHeaderControl::insertSlot
+                                      || hit->control == TrackHeaderControl::insertBypassAction
+                                      || hit->control == TrackHeaderControl::insertReplaceAction
+                                      || hit->control == TrackHeaderControl::insertRemoveAction;
+                if (overInsert && hit->trackIndex == insertDragState.trackIndex)
+                {
+                    insertDragState.targetIndex = hit->insertIndex
+                        + (event.getPosition().y > hit->bounds.getCentreY() ? 1 : 0);
+                }
+                else if (hit->control == TrackHeaderControl::addInsertSlot
+                         && hit->trackIndex == insertDragState.trackIndex)
+                {
+                    insertDragState.targetIndex = hit->insertIndex;
+                }
+            }
+            repaint();
+        }
+        return;
+    }
+
     if (handleAutomationMouseDrag(event))
         return;
 
@@ -3774,6 +4213,13 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
     if (trackVolumeDragState.active)
     {
         updateTrackVolumeFromPoint(trackVolumeDragState.trackIndex, trackVolumeDragState.bounds, event.getPosition().x);
+        repaint();
+        return;
+    }
+
+    if (trackPanDragState.active)
+    {
+        updateTrackPanFromPoint(trackPanDragState.trackIndex, trackPanDragState.bounds, event.getPosition().x);
         repaint();
         return;
     }
@@ -4089,6 +4535,74 @@ void ArrangementTimelineComponent::mouseDrag(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 {
+    // FX fields use their own hover treatment so the track colour does not turn into
+    // a confusing border around the whole control.
+    int nextHoveredFxTrack = -1;
+    int nextHoveredFxSlot = -1;
+    auto nextHoveredFxControl = TrackHeaderControl::none;
+    if (const auto hit = hitTestTrackHeader(event.getPosition()))
+    {
+        if (hit->control == TrackHeaderControl::fx
+            || hit->control == TrackHeaderControl::insertSlot
+            || hit->control == TrackHeaderControl::insertBypassAction
+            || hit->control == TrackHeaderControl::insertReplaceAction
+            || hit->control == TrackHeaderControl::insertRemoveAction
+            || hit->control == TrackHeaderControl::addInsertSlot)
+        {
+            nextHoveredFxTrack = hit->trackIndex;
+            nextHoveredFxSlot = hit->insertIndex;
+            nextHoveredFxControl = hit->control;
+        }
+    }
+    if (nextHoveredFxTrack != hoveredFxTrackIndex
+        || nextHoveredFxSlot != hoveredFxSlotIndex
+        || nextHoveredFxControl != hoveredFxControl)
+    {
+        hoveredFxTrackIndex = nextHoveredFxTrack;
+        hoveredFxSlotIndex = nextHoveredFxSlot;
+        hoveredFxControl = nextHoveredFxControl;
+        repaint();
+    }
+
+    // Use a tiny tooltip client over the actual action button. The timeline itself is
+    // much wider than the header, so attaching the tooltip to this component makes JUCE
+    // place the bubble beside the whole arrangement instead of below the hovered button.
+    for (auto& anchor : fxTooltipAnchors)
+    {
+        anchor.setBounds({});
+        anchor.setTooltip({});
+        anchor.onMouseDown = {};
+    }
+
+    if (nextHoveredFxControl == TrackHeaderControl::insertBypassAction
+        || nextHoveredFxControl == TrackHeaderControl::insertReplaceAction
+        || nextHoveredFxControl == TrackHeaderControl::insertRemoveAction)
+    {
+        const auto hit = hitTestTrackHeader(event.getPosition());
+        if (hit)
+        {
+            const int actionIndex = nextHoveredFxControl == TrackHeaderControl::insertBypassAction ? 0
+                                   : nextHoveredFxControl == TrackHeaderControl::insertReplaceAction ? 1 : 2;
+            auto& anchor = fxTooltipAnchors[static_cast<std::size_t>(actionIndex)];
+            anchor.setBounds(fxStack::actionBounds(hit->bounds, actionIndex));
+            anchor.setTooltip(actionIndex == 0 ? "Bypass effect"
+                              : actionIndex == 1 ? "Replace plugin" : "Remove effect");
+            anchor.onMouseDown = [this, actionIndex]
+            {
+                notifyClipSelectionChanged();
+                const auto trackIndex = hoveredFxTrackIndex;
+                const auto insertIndex = hoveredFxSlotIndex;
+                if (actionIndex == 0 && onToggleInsertBypass)
+                    onToggleInsertBypass(trackIndex, insertIndex);
+                else if (actionIndex == 1 && onReplaceInsertSlot)
+                    onReplaceInsertSlot(trackIndex, insertIndex);
+                else if (actionIndex == 2 && onRemoveInsertSlot)
+                    onRemoveInsertSlot(trackIndex, insertIndex);
+                repaint();
+            };
+        }
+    }
+
     // Track which automation point the cursor is over, so its value readout can show (Bitwig-style).
     if (automationMode)
     {
@@ -4179,8 +4693,19 @@ void ArrangementTimelineComponent::mouseMove(const juce::MouseEvent& event)
 
 void ArrangementTimelineComponent::mouseExit(const juce::MouseEvent&)
 {
+    // The tooltip anchors are child components placed over the FX actions. Entering one
+    // technically emits mouseExit for the timeline, but the pointer is still over the
+    // same FX slot, so keep the hover paint alive until the pointer truly leaves it.
+    const auto pointer = getMouseXYRelative();
+    for (const auto& anchor : fxTooltipAnchors)
+        if (! anchor.getBounds().isEmpty() && anchor.getBounds().contains(pointer))
+            return;
+
     hoverClip.reset();
     knifePreviewBeat.reset();
+    hoveredFxTrackIndex = -1;
+    hoveredFxSlotIndex = -1;
+    hoveredFxControl = TrackHeaderControl::none;
     setMouseCursor(juce::MouseCursor::NormalCursor);
     repaint();
 }
@@ -4203,6 +4728,25 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 {
     playlistBlocksDragStarted = false;
     snapBypass = false;   // end of drag — restore snapping
+
+    if (insertDragState.active)
+    {
+        const auto drag = insertDragState;
+        insertDragState = {};
+
+        if (drag.moved)
+        {
+            if (onMoveInsert && drag.targetIndex >= 0)
+                onMoveInsert(drag.trackIndex, drag.insertIndex,
+                             drag.trackIndex, drag.targetIndex);
+            repaint();
+        }
+        else if (onOpenInsertSlot)
+        {
+            onOpenInsertSlot(drag.trackIndex, drag.insertIndex);
+        }
+        return;
+    }
 
     if (handleAutomationMouseUp())
         return;
@@ -4258,6 +4802,7 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
     trackHeaderWidthResizeState.active = false;
     playheadDragState.active = false;
     trackVolumeDragState.active = false;
+    trackPanDragState.active = false;
     clipGainDragState = {};
     loopSelectionState.reset();
     selectionBoxState.active = false;
@@ -4721,12 +5266,43 @@ std::optional<ArrangementTimelineComponent::TrackHeaderHit> ArrangementTimelineC
             return TrackHeaderHit { trackIndex, TrackHeaderControl::record, layout.recordButton };
         if (! layout.instrumentButton.isEmpty() && layout.instrumentButton.contains(position))
             return TrackHeaderHit { trackIndex, TrackHeaderControl::instrument, layout.instrumentButton };
+        if (! layout.fxButton.isEmpty() && layout.fxButton.contains(position))
+            return TrackHeaderHit { trackIndex, TrackHeaderControl::fx, layout.fxButton };
 
         // Generous vertical hit zone around the thin slider so it's easy to grab.
         if (layout.slider.expanded(0, 6).contains(position))
             return TrackHeaderHit { trackIndex, TrackHeaderControl::volume, layout.slider };
         if (layout.volumeValue.expanded(6, 5).contains(position))
             return TrackHeaderHit { trackIndex, TrackHeaderControl::volumeValue, layout.volumeValue };
+        if (! layout.panSlider.isEmpty() && layout.panSlider.expanded(0, 4).contains(position))
+            return TrackHeaderHit { trackIndex, TrackHeaderControl::pan, layout.panSlider };
+
+        // Audio FX stack (only slots inside the viewport are hit-testable).
+        if (layout.insertStackViewport.contains(position))
+        {
+            for (int s = 0; s < layout.insertSlots.size(); ++s)
+                if (layout.insertSlots.getReference(s).contains(position))
+                {
+                    const auto slot = layout.insertSlots.getReference(s);
+                    const auto insertIndex = layout.insertSlotIndices[s];
+                    if (fxStack::actionBounds(slot, 0).contains(position))
+                        return TrackHeaderHit { trackIndex, TrackHeaderControl::insertBypassAction,
+                                                slot, insertIndex };
+                    if (fxStack::actionBounds(slot, 1).contains(position))
+                        return TrackHeaderHit { trackIndex, TrackHeaderControl::insertReplaceAction,
+                                                slot, insertIndex };
+                    if (fxStack::actionBounds(slot, 2).contains(position))
+                        return TrackHeaderHit { trackIndex, TrackHeaderControl::insertRemoveAction,
+                                                slot, insertIndex };
+                    return TrackHeaderHit { trackIndex, TrackHeaderControl::insertSlot,
+                                            slot, insertIndex };
+                }
+            if (! layout.addInsertSlot.isEmpty() && layout.addInsertSlot.contains(position))
+            {
+                const int addIndex = static_cast<int>(project.getTracks()[static_cast<std::size_t>(trackIndex)].inserts.size());
+                return TrackHeaderHit { trackIndex, TrackHeaderControl::addInsertSlot, layout.addInsertSlot, addIndex };
+            }
+        }
 
         return TrackHeaderHit { trackIndex, TrackHeaderControl::none, layout.card };
     }
@@ -4919,6 +5495,7 @@ juce::Rectangle<int> ArrangementTimelineComponent::getChordLaneToggleBounds() co
 void ArrangementTimelineComponent::showAddTrackMenu()
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
     menu.addItem(1, "Audio Track");
     menu.addItem(2, "MIDI Track");
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(getAddTrackButtonBounds())),
@@ -5175,6 +5752,20 @@ void ArrangementTimelineComponent::updateTrackVolumeFromPoint(int trackIndex, ju
     tracks[static_cast<std::size_t>(trackIndex)].volumeDb = juce::jmap(ratio, 0.0f, 1.0f, -24.0f, 12.0f);
 }
 
+void ArrangementTimelineComponent::updateTrackPanFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x)
+{
+    auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()) || sliderBounds.getWidth() <= 0)
+        return;
+
+    auto pan = juce::jmap(static_cast<float>(x - sliderBounds.getX()),
+                          0.0f, static_cast<float>(sliderBounds.getWidth()), -1.0f, 1.0f);
+    pan = juce::jlimit(-1.0f, 1.0f, pan);
+    if (std::abs(pan) < 0.06f)   // small snap-to-centre detent
+        pan = 0.0f;
+    tracks[static_cast<std::size_t>(trackIndex)].pan = pan;
+}
+
 ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::computeHeaderLayout(int trackIndex) const noexcept
 {
     HeaderLayout layout;
@@ -5196,10 +5787,10 @@ ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::compute
     layout.meter = inner.removeFromRight(9);
     inner.removeFromRight(10);
 
-    layout.title = inner.removeFromTop(18);
+    layout.title = inner.removeFromTop(headerRows::titleH);
     if (isFolderTrack)
         layout.collapseTriangle = layout.title.removeFromLeft(folderTriangleGutterPx);
-    inner.removeFromTop(4);
+    inner.removeFromTop(headerRows::gapAfterTitle);
 
     constexpr int buttonSize = 18;
     constexpr int buttonGap  = 6;
@@ -5220,13 +5811,75 @@ ArrangementTimelineComponent::HeaderLayout ArrangementTimelineComponent::compute
     if (isMidiTrack && ! hasSampler && controlsRow.getWidth() >= buttonSize)
         layout.instrumentButton = controlsRow.removeFromRight(buttonSize);   // square, matches M/S/R
 
-    inner.removeFromTop(5);
-    auto volumeRow = inner.removeFromTop(14);
-    layout.volumeValue = volumeRow.removeFromRight(46);
+    // Inserts live in the header FX stack (an always-visible empty slot to add the first one),
+    // so there's no separate FX button in the controls row.
+    const bool canHostInserts = trackIndex >= 0 && trackIndex < static_cast<int>(tracks.size()) && ! isFolderTrack;
+
+    inner.removeFromTop(headerRows::gapAfterControls);
+    auto volumeRow = inner.removeFromTop(headerRows::volumeH);
+    layout.volumeValue = volumeRow.removeFromRight(headerRows::valueWidth);
     volumeRow.removeFromRight(8);
-    constexpr int sliderHeight = 8;
-    volumeRow.removeFromTop(juce::jmax(0, (volumeRow.getHeight() - sliderHeight) / 2));
-    layout.slider = volumeRow.removeFromTop(sliderHeight);
+    volumeRow.removeFromTop(juce::jmax(0, (volumeRow.getHeight() - headerRows::sliderVisualH) / 2));
+    layout.slider = volumeRow.removeFromTop(headerRows::sliderVisualH);
+
+    // Slim pan row right below the volume row: laid out at the default lane height so both
+    // fader and pan are visible without stretching. Hidden only on very short (zoomed-out) lanes.
+    if (inner.getHeight() >= panRow::gapAbovePan + panRow::panRowH)
+    {
+        inner.removeFromTop(panRow::gapAbovePan);
+        auto panRowRect = inner.removeFromTop(panRow::panRowH);
+        layout.panValue = panRowRect.removeFromRight(headerRows::valueWidth);
+        panRowRect.removeFromRight(8);
+        panRowRect.removeFromTop(juce::jmax(0, (panRowRect.getHeight() - headerRows::sliderVisualH) / 2));
+        layout.panSlider = panRowRect.removeFromTop(headerRows::sliderVisualH);
+    }
+
+    // Audio FX stack: one slot per insert, then a half-height empty "add" slot. The lane grows to
+    // fit up to maxVisibleSlots (see insertStackFloorHeight); beyond that the stack SCROLLS within
+    // a fixed viewport (or the user stretches the lane to reveal more). No per-insert height jumps.
+    if (canHostInserts && inner.getHeight() > fxStack::gapBeforeStack)
+    {
+        const int n = static_cast<int>(tracks[static_cast<std::size_t>(trackIndex)].inserts.size());
+        if (n == 0)
+        {
+            // Always show one empty slot as the entry point — click it to pick the first plug-in.
+            inner.removeFromTop(fxStack::gapBeforeStack);
+            if (inner.getHeight() >= fxStack::slotHeight)
+            {
+                layout.addInsertSlot = inner.removeFromTop(fxStack::slotHeight);
+                layout.insertStackViewport = layout.addInsertSlot;
+            }
+        }
+        else
+        {
+            inner.removeFromTop(fxStack::gapBeforeStack);
+
+            const int contentH  = n * fxStack::slotStride + fxStack::addSlotHeight;
+            const int viewportH = juce::jmin(inner.getHeight(), contentH);
+            const auto viewport = inner.removeFromTop(viewportH);
+            layout.insertStackViewport = viewport;
+
+            const int maxScroll = juce::jmax(0, contentH - viewportH);
+            int scroll = 0;
+            if (const auto it = insertStackScroll.find(trackIndex); it != insertStackScroll.end())
+                scroll = juce::jlimit(0, maxScroll, it->second);
+
+            int y = viewport.getY() - scroll;
+            for (int s = 0; s < n; ++s)
+            {
+                const juce::Rectangle<int> slot(viewport.getX(), y, viewport.getWidth(), fxStack::slotHeight);
+                if (slot.getBottom() > viewport.getY() && slot.getY() < viewport.getBottom())
+                {
+                    layout.insertSlots.add(slot);
+                    layout.insertSlotIndices.add(s);
+                }
+                y += fxStack::slotStride;
+            }
+            const juce::Rectangle<int> addSlot(viewport.getX(), y, viewport.getWidth(), fxStack::addSlotHeight);
+            if (addSlot.getBottom() > viewport.getY() && addSlot.getY() < viewport.getBottom())
+                layout.addInsertSlot = addSlot;
+        }
+    }
 
     return layout;
 }
@@ -5376,6 +6029,29 @@ void ArrangementTimelineComponent::mouseWheelMove(const juce::MouseEvent& event,
     const bool overChordLane = getChordLaneBounds().contains(event.getPosition());
     if (! visibleTracksArea.contains(event.getPosition()) && ! overChordLane)
         return;
+
+    // Scroll an overflowing header FX stack when the pointer is over it (before playlist scroll).
+    {
+        const auto& tks = project.getTracks();
+        for (int t = 0; t < static_cast<int>(tks.size()); ++t)
+        {
+            const auto layout = computeHeaderLayout(t);
+            if (layout.insertStackViewport.isEmpty() || ! layout.insertStackViewport.contains(event.getPosition()))
+                continue;
+            const int n = static_cast<int>(tks[static_cast<std::size_t>(t)].inserts.size());
+            const int contentH  = n * fxStack::slotStride + fxStack::addSlotHeight;
+            const int maxScroll = juce::jmax(0, contentH - layout.insertStackViewport.getHeight());
+            if (maxScroll <= 0)
+                break;   // fits — let the normal playlist scroll handle it
+            int scroll = 0;
+            if (const auto it = insertStackScroll.find(t); it != insertStackScroll.end())
+                scroll = it->second;
+            scroll = juce::jlimit(0, maxScroll, scroll - juce::roundToInt(wheel.deltaY * fxStack::slotStride * 2.0f));
+            insertStackScroll[t] = scroll;
+            repaint();
+            return;
+        }
+    }
 
     const auto nowMs = juce::Time::getMillisecondCounterHiRes();
     const auto totalDelta = std::abs(wheel.deltaX) + std::abs(wheel.deltaY);
@@ -6237,10 +6913,41 @@ int ArrangementTimelineComponent::getLaneHeightForTrack(int trackIndex) const no
         maximumLaneHeight,
         static_cast<int>(std::round(static_cast<double>(defaultLaneHeight) * verticalZoom)));
 
-    if (const auto it = customTrackHeights.find(trackIndex); it != customTrackHeights.end())
-        return juce::jlimit(minimumLaneHeight, maxExpandedLaneHeight, it->second);
+    const auto it = customTrackHeights.find(trackIndex);
+    const auto base = (it != customTrackHeights.end())
+        ? juce::jlimit(minimumLaneHeight, maxExpandedLaneHeight, it->second)
+        : defaultHeight;
 
-    return defaultHeight;
+    // Grow the lane so the Audio FX stack fits (Logic-style). Only affects tracks that have
+    // inserts; a floor (never a write to customTrackHeights) so a taller manual resize still wins.
+    const auto floor = juce::jmin(maxExpandedLaneHeight, insertStackFloorHeight(trackIndex));
+    return juce::jmax(base, floor);
+}
+
+int ArrangementTimelineComponent::insertStackFloorHeight(int trackIndex) const noexcept
+{
+    const auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return 0;
+    const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+    if (track.isFolder)
+        return 0;
+
+    // Mirror computeHeaderLayout's vertical budget: card.reduced(8, 6) top inset, the
+    // title/controls/volume rows, then the FX stack.
+    constexpr int topInset   = 6;
+    constexpr int rowsHeight = headerRows::titleH + headerRows::gapAfterTitle
+                             + headerRows::controlsH + headerRows::gapAfterControls
+                             + headerRows::volumeH + panRow::gapAbovePan + panRow::panRowH;
+    // Always reserve at least one empty slot (the add entry point). With inserts, reserve up to
+    // maxVisibleSlots + the half-height add-slot; beyond that the stack scrolls (or the user
+    // stretches the lane). This caps the auto-grow so tracks don't balloon per insert.
+    const int n = static_cast<int>(track.inserts.size());
+    const int stack = (n == 0)
+        ? fxStack::gapBeforeStack + fxStack::slotHeight
+        : fxStack::gapBeforeStack + juce::jmin(n, fxStack::maxVisibleSlots) * fxStack::slotStride
+              + fxStack::addSlotHeight;
+    return topInset + rowsHeight + stack + fxStack::bottomInset;
 }
 
 int ArrangementTimelineComponent::getTrackTopForIndex(int trackIndex) const noexcept
@@ -6424,7 +7131,10 @@ void ArrangementTimelineComponent::drawAutomationOverlay(juce::Graphics& g)
                                     ? static_cast<float>(track.volumeDb)
                                     : (automationParam == AutomationParam::trackPan
                                            ? static_cast<float>(track.pan)
-                                           : automationParamDefault(automationParam));
+                                           : (automationParam == AutomationParam::trackSend
+                                                  ? static_cast<float>(juce::isPositiveAndBelow(automationTargetIndex, static_cast<int>(track.sends.size()))
+                                                         ? track.sends[static_cast<std::size_t>(automationTargetIndex)].level : 0.0)
+                                                  : automationParamDefault(automationParam)));
 
         if (lane == nullptr || lane->points.empty())
         {
@@ -6554,15 +7264,29 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
         if (automationParamChipBounds(i).contains(event.getPosition()))
         {
             juce::PopupMenu menu;
+            orion::ui::stylePopupMenu(menu);
             menu.addItem(1, "Volume", true, automationParam == AutomationParam::trackVolume);
             menu.addItem(2, "Pan",    true, automationParam == AutomationParam::trackPan);
+
+            // Aux sends: one entry per send slot. IDs 500 + slot.
+            const auto& sends = project.getTracks()[static_cast<std::size_t>(i)].sends;
+            if (! sends.empty())
+            {
+            juce::PopupMenu sub;
+            orion::ui::stylePopupMenu(sub);
+                for (int s = 0; s < static_cast<int>(sends.size()); ++s)
+                    sub.addItem(500 + s, "Send " + juce::String(s + 1) + " (Bus " + juce::String(sends[static_cast<std::size_t>(s)].busIndex + 1) + ")",
+                                true, automationParam == AutomationParam::trackSend && automationTargetIndex == s);
+                menu.addSubMenu("Sends", sub);
+            }
 
             juce::StringArray instNames;
             if (onRequestInstrumentParamNames)
                 instNames = onRequestInstrumentParamNames(i);
             if (! instNames.isEmpty())
             {
-                juce::PopupMenu sub;
+            juce::PopupMenu sub;
+            orion::ui::stylePopupMenu(sub);
                 for (int p = 0; p < instNames.size(); ++p)
                     sub.addItem(1000 + p, instNames[p], true,
                                 automationParam == AutomationParam::instrumentParam
@@ -6578,7 +7302,8 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
                     insNames = onRequestInsertParamNames(i, s);
                 if (insNames.isEmpty())
                     continue;
-                juce::PopupMenu sub;
+            juce::PopupMenu sub;
+            orion::ui::stylePopupMenu(sub);
                 for (int p = 0; p < insNames.size(); ++p)
                     sub.addItem(10000 + s * 1000 + p, insNames[p], true,
                                 automationParam == AutomationParam::insertParam
@@ -6616,6 +7341,11 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
                     }
                     if (r == 1) { setAutomationParam(AutomationParam::trackVolume); }
                     else if (r == 2) { setAutomationParam(AutomationParam::trackPan); }
+                    else if (r >= 500 && r < 1000)
+                    {
+                        const int s = r - 500;
+                        setAutomationTarget(AutomationParam::trackSend, s, -1, "Send " + juce::String(s + 1));
+                    }
                     else if (r >= 1000 && r < 10000)
                     {
                         const int p = r - 1000;
@@ -6669,7 +7399,10 @@ bool ArrangementTimelineComponent::handleAutomationMouseDown(const juce::MouseEv
                                        ? static_cast<float>(track.volumeDb)
                                        : (automationParam == AutomationParam::trackPan
                                               ? static_cast<float>(track.pan)
-                                              : automationParamDefault(automationParam));
+                                              : (automationParam == AutomationParam::trackSend
+                                                     ? static_cast<float>(juce::isPositiveAndBelow(automationTargetIndex, static_cast<int>(track.sends.size()))
+                                                            ? track.sends[static_cast<std::size_t>(automationTargetIndex)].level : 0.0)
+                                                     : automationParamDefault(automationParam)));
             const auto* existing = track.findAutomation(automationParam, automationTargetIndex, automationParamIndex);
             const float lineVal = existing != nullptr ? existing->valueAt(beat, fallback) : fallback;
 

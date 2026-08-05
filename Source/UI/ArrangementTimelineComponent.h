@@ -22,6 +22,7 @@ namespace orion::stems { struct Result; }   // stem-separation result (Audio/Ste
 namespace orion
 {
 class ArrangementTimelineComponent final : public juce::Component,
+                                           public juce::SettableTooltipClient,
                                            public juce::DragAndDropTarget,
                                            public juce::FileDragAndDropTarget,
                                            private juce::Timer
@@ -48,6 +49,16 @@ public:
     // Fired when the instrument button on a MIDI track header is clicked. The host opens
     // the plugin editor if an instrument is loaded, or the instrument picker if not.
     std::function<void(int)> onTrackInstrumentClicked;
+    // Logic-style Audio FX stack in the track header. onInsertSlotMenu shows the add menu when
+    // insertIndex is past the end (the empty add-slot / FX button) or the manage menu for an
+    // existing slot; onOpenInsertSlot opens that insert's plugin window; onRemoveInsertSlot
+    // Cmd-click deletes it. The host owns the plugin engine, so it services all three.
+    std::function<void(int trackIndex, int insertIndex)> onInsertSlotMenu;
+    std::function<void(int trackIndex, int insertIndex)> onOpenInsertSlot;
+    std::function<void(int trackIndex, int insertIndex)> onToggleInsertBypass;
+    std::function<void(int trackIndex, int insertIndex)> onReplaceInsertSlot;
+    std::function<void(int trackIndex, int insertIndex)> onRemoveInsertSlot;
+    std::function<void(int fromTrack, int fromIndex, int toTrack, int toIndex)> onMoveInsert;
     std::function<void()> onTogglePlayback;
     // Fired when the "+" add-track button is clicked. The host opens the full Add Track
     // dialog. If unset, falls back to the inline popup menu.
@@ -266,9 +277,16 @@ private:
         solo,
         record,
         instrument,
+        fx,            // FX button in the M/S/R row: adds the first insert
+        insertSlot,    // an existing insert slot in the header FX stack
+        insertBypassAction,
+        insertReplaceAction,
+        insertRemoveAction,
+        addInsertSlot, // the half-height empty slot below the stack
         inspector,
         volume,
-        volumeValue
+        volumeValue,
+        pan
     };
 
     struct TrackHeaderHit
@@ -276,6 +294,7 @@ private:
         int trackIndex { -1 };
         TrackHeaderControl control { TrackHeaderControl::none };
         juce::Rectangle<int> bounds;
+        int insertIndex { -1 };   // valid for insertSlot / addInsertSlot
     };
 
     struct DragState
@@ -304,6 +323,17 @@ private:
         bool copyOnDrag { false };
         bool copyCreated { false };
         std::vector<ClipItem> clipItems;
+    };
+
+    struct InsertDragState
+    {
+        bool active { false };
+        bool moved { false };
+        int trackIndex { -1 };
+        int insertIndex { -1 };
+        int targetIndex { -1 };
+        juce::Point<int> startPosition;
+        juce::Point<int> currentPosition;
     };
 
     struct LoopSelectionState
@@ -355,6 +385,13 @@ private:
         int trackIndex { -1 };
         juce::Rectangle<int> bounds;
     };
+    // Same drag model for the slim pan bar.
+    struct TrackPanDragState
+    {
+        bool active { false };
+        int trackIndex { -1 };
+        juce::Rectangle<int> bounds;
+    };
 
     // Drag state for the per-clip gain handle (a dot at the top-centre of each clip).
     struct ClipGainDragState
@@ -400,12 +437,21 @@ private:
         juce::Rectangle<int> soloButton;
         juce::Rectangle<int> recordButton;
         juce::Rectangle<int> instrumentButton;   // MIDI tracks only (empty otherwise)
+        juce::Rectangle<int> fxButton;           // add first insert (empty when no room)
         juce::Rectangle<int> slider;
+        juce::Rectangle<int> panSlider;          // slim pan bar below the volume row
+        juce::Rectangle<int> panValue;           // numeric L/R readout
         juce::Rectangle<int> volumeValue;
         juce::Rectangle<int> meter;
         juce::Rectangle<int> collapseTriangle;   // folders only (empty otherwise)
+        juce::Rectangle<int> insertStackViewport;        // clipped scroll area for the FX stack
+        juce::Array<juce::Rectangle<int>> insertSlots;   // Logic-style Audio FX stack (VISIBLE slots only)
+        juce::Array<int> insertSlotIndices;              // insert index for each visible slot (scroll-aware)
+        juce::Rectangle<int> addInsertSlot;              // half-height empty add slot below the stack
     };
     HeaderLayout computeHeaderLayout(int trackIndex) const noexcept;
+    // Extra header height needed to show the FX stack for a track that has inserts (0 otherwise).
+    int insertStackFloorHeight(int trackIndex) const noexcept;
 
     static constexpr int folderChildIndentPx     = 16;   // child header card right-shift
     static constexpr int folderTriangleGutterPx  = 20;   // folder collapse-triangle gutter
@@ -571,8 +617,26 @@ private:
     juce::Rectangle<int> getChordOctaveDownBounds() const noexcept;
     juce::Rectangle<int> getTrackVolumeValueBounds(int trackIndex) const noexcept;
     void updateTrackVolumeFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x);
+    void updateTrackPanFromPoint(int trackIndex, juce::Rectangle<int> sliderBounds, int x);
     void showTrackVolumeEditor(int trackIndex);
     void commitTrackVolumeEditor(bool applyChanges);
+
+    struct FxTooltipAnchor final : public juce::Component,
+                                   public juce::SettableTooltipClient
+    {
+        std::function<void()> onMouseDown;
+
+        FxTooltipAnchor()
+        {
+            setInterceptsMouseClicks(true, false);
+        }
+
+        void mouseDown(const juce::MouseEvent&) override
+        {
+            if (onMouseDown)
+                onMouseDown();
+        }
+    };
 
     struct AudioPeaks
     {
@@ -596,6 +660,7 @@ private:
     std::set<int> selectedTrackIndices;      // all selected track headers (Cmd/Shift-click)
     std::vector<SelectedClip> selectedClips;
     std::optional<DragState> dragState;
+    InsertDragState insertDragState;
     bool playlistBlocksDragStarted { false };
     std::optional<LoopSelectionState> loopSelectionState;
     PlayheadDragState playheadDragState;
@@ -603,10 +668,17 @@ private:
     TrackHeaderWidthResizeState trackHeaderWidthResizeState;
     SelectionBoxState selectionBoxState;
     TrackVolumeDragState trackVolumeDragState;
+    TrackPanDragState trackPanDragState;
+    // Per-track vertical scroll (px) of the header FX stack when it overflows the reserved area.
+    mutable std::map<int, int> insertStackScroll;
     ClipGainDragState clipGainDragState;
     juce::TextEditor trackVolumeInlineEditor;
+    std::array<FxTooltipAnchor, 3> fxTooltipAnchors;
     std::optional<int> volumeEditorTrackIndex;
     std::optional<ClipHit> hoverClip;
+    int hoveredFxTrackIndex { -1 };
+    int hoveredFxSlotIndex { -1 };
+    TrackHeaderControl hoveredFxControl { TrackHeaderControl::none };
     std::optional<double> focusedSplitBeat;
     std::optional<double> knifePreviewBeat;
     std::vector<TimelineSnapshot> undoStack;

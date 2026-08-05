@@ -466,6 +466,10 @@ void MainComponent::wireBrowserAndDialogs()
         // Silence the browser preview as soon as the sample is dragged toward the playlist.
         stopBrowserPreview(true);
     };
+    browserPanel.onPreviewCleared = [this]
+    {
+        stopBrowserPreview(true);
+    };
     browserPanel.onPreviewBpmSyncToggled = [this]
     {
         // Reload preview with the new sync mode if a sample is already loaded.
@@ -580,6 +584,20 @@ void MainComponent::wireBrowserAndDialogs()
     // Modern instrument picker overlay (replaces the native instrument popup menu).
     pluginPicker.onPick = [this](const juce::PluginDescription& desc)
     {
+        if (pluginPickerTargetInsert >= 0)
+        {
+            const auto target = pluginPickerTargetTrack;
+            const auto insert = pluginPickerTargetInsert;
+            const auto replacing = pluginPickerReplacingInsert;
+            pluginPickerTargetInsert = -1;
+            pluginPickerReplacingInsert = false;
+            if (replacing)
+                replaceInsertOnTrack(target, insert, desc);
+            else
+                addInsertOnTrack(target, desc);
+            return;
+        }
+
         int target = pluginPickerTargetTrack;
         if (target < 0)
         {
@@ -598,7 +616,21 @@ void MainComponent::wireBrowserAndDialogs()
         scanPluginsInteractively([this]()
         {
             if (pluginPicker.isVisible())
-                pluginPicker.show("Load Instrument", pluginManager.getInstrumentDescriptions(), pluginManager.isScanning());
+            {
+                if (pluginPickerTargetInsert >= 0)
+                {
+                    juce::Array<juce::PluginDescription> effects;
+                    for (const auto& d : pluginManager.getAllDescriptions())
+                        if (! d.isInstrument)
+                            effects.add(d);
+                    pluginPicker.show(pluginPickerReplacingInsert ? "Replace Effect" : "Add Effect",
+                                      effects, pluginManager.isScanning());
+                }
+                else
+                {
+                    pluginPicker.show("Load Instrument", pluginManager.getInstrumentDescriptions(), pluginManager.isScanning());
+                }
+            }
         });
     };
     pluginPicker.onClose = [this]() { arrangementTimeline.grabKeyboardFocus(); };
@@ -1111,6 +1143,41 @@ void MainComponent::wireEditors()
             openInstrumentEditor(trackIndex);
         else
             showInstrumentPicker(trackIndex);
+    };
+
+    // Logic-style Audio FX stack in the track header.
+    arrangementTimeline.onInsertSlotMenu = [this](int trackIndex, int insertIndex)
+    {
+        showInsertMenuForTrack(trackIndex, insertIndex);   // add menu when insertIndex is past the end
+    };
+    arrangementTimeline.onOpenInsertSlot = [this](int trackIndex, int insertIndex)
+    {
+        openInsertEditor(trackIndex, insertIndex);
+    };
+    arrangementTimeline.onToggleInsertBypass = [this](int trackIndex, int insertIndex)
+    {
+        toggleInsertBypass(trackIndex, insertIndex);
+    };
+    arrangementTimeline.onReplaceInsertSlot = [this](int trackIndex, int insertIndex)
+    {
+        juce::Array<juce::PluginDescription> effects;
+        for (const auto& d : pluginManager.getAllDescriptions())
+            if (! d.isInstrument)
+                effects.add(d);
+        pluginPickerTargetTrack = trackIndex;
+        pluginPickerTargetInsert = insertIndex;
+        pluginPickerReplacingInsert = true;
+        pluginPicker.setBounds(getLocalBounds());
+        pluginPicker.show("Replace Effect", effects, pluginManager.isScanning());
+        pluginPicker.toFront(true);
+    };
+    arrangementTimeline.onRemoveInsertSlot = [this](int trackIndex, int insertIndex)
+    {
+        removeInsertFromTrack(trackIndex, insertIndex);
+    };
+    arrangementTimeline.onMoveInsert = [this](int fromTrack, int fromIndex, int toTrack, int toIndex)
+    {
+        moveInsert(fromTrack, fromIndex, toTrack, toIndex);
     };
 
     // Automation param picker needs the live plugins' parameter names. They live on the engine, so

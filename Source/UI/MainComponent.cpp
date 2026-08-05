@@ -16,6 +16,7 @@
 #include "../Audio/WarpEngine.h"
 #include "../Sampler/SamplerEngine.h"
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 #include "MainComponentInternal.h"
 
 namespace
@@ -645,12 +646,14 @@ juce::StringArray MainComponent::getMenuBarNames()
 juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName)
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
 
     if (menuName == "Project")
     {
         menu.addItem(menuProjectNew, "New");
         menu.addItem(menuProjectOpen, "Open...");
         juce::PopupMenu recentMenu;
+        orion::ui::stylePopupMenu(recentMenu);
         recentProjects.createPopupMenuItems(recentMenu, recentProjectBaseMenuId, false, true);
         menu.addSubMenu("Open Recent", recentMenu, recentMenu.getNumItems() > 0);
         menu.addItem(menuProjectSave, "Save");
@@ -850,6 +853,7 @@ MainComponent::MainComponent()
     transportBar.onRecordOptions = [this]()
     {
         juce::PopupMenu menu;
+        orion::ui::stylePopupMenu(menu);
         const auto withMetro = projectState.isRecordWithMetronome();
         const auto withPrecount = projectState.isRecordWithCountIn();
         // INDEPENDENT toggles — previously "4-count" forcibly turned the metronome OFF, so you could
@@ -1501,6 +1505,7 @@ MainComponent::~MainComponent()
     // Editor windows borrow plugin instances owned by the playback source — close
     // them before that source (and its instruments) is destroyed.
     closeAllInstrumentEditors();
+    insertTouchListeners.clear();
     insertEditorWindows.clear();
 
     finalizeRecordingClip();
@@ -2030,6 +2035,7 @@ void MainComponent::mouseDown(const juce::MouseEvent& event)
     if (event.eventComponent == &recordButton && event.mods.isPopupMenu())
     {
         juce::PopupMenu menu;
+        orion::ui::stylePopupMenu(menu);
         const auto withMetro = projectState.isRecordWithMetronome();
         const auto withPrecount = projectState.isRecordWithCountIn();
         // Independent toggles (same as the transport-bar record options).
@@ -3101,6 +3107,8 @@ int MainComponent::getCurrentPluginBlockSize() const noexcept
 void MainComponent::showInstrumentPicker(int trackIndex)
 {
     pluginPickerTargetTrack = trackIndex;
+    pluginPickerTargetInsert = -1;
+    pluginPickerReplacingInsert = false;
     pluginPicker.setBounds(getLocalBounds());
     pluginPicker.show("Load Instrument", pluginManager.getInstrumentDescriptions(), pluginManager.isScanning());
     pluginPicker.toFront(true);
@@ -3120,6 +3128,7 @@ void MainComponent::showTrackInstrumentMenu(int trackIndex)
     const auto loadablePlugins = pluginManager.getInstrumentDescriptions();
 
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
     if (hasInstrument)
     {
         menu.addSectionHeader(track.instrumentPluginName.isNotEmpty() ? track.instrumentPluginName
@@ -3130,6 +3139,7 @@ void MainComponent::showTrackInstrumentMenu(int trackIndex)
     }
 
     juce::PopupMenu loadMenu;
+    orion::ui::stylePopupMenu(loadMenu);
     if (loadablePlugins.isEmpty())
     {
         if (pluginManager.isScanning())
@@ -3367,6 +3377,11 @@ void MainComponent::toggleMixerFromUi()
     }
     else
     {
+        clipEditorPanel.setVisible(false);
+        samplerPanel.setVisible(false);
+        stepSequencer.setVisible(false);
+        mpcSamplePanel.setVisible(false);
+        stopClipEditorPreview(true);
         mixerPanel.setBounds(getLocalBounds());
         mixerPanel.open();
     }
@@ -3386,6 +3401,8 @@ void MainComponent::toggleClipEditorFromUi()
             return;
         }
 
+        if (mixerPanel.isVisible())
+            mixerPanel.closePanel();
         samplerPanel.setVisible(false);
         stepSequencer.setVisible(false);
         refreshClipEditor();
@@ -3406,6 +3423,8 @@ void MainComponent::toggleStepSequencerFromUi()
     if (shouldOpen)
     {
         // Only one lower panel at a time.
+        if (mixerPanel.isVisible())
+            mixerPanel.closePanel();
         samplerPanel.setVisible(false);
         clipEditorPanel.setVisible(false);
         stopClipEditorPreview(true);
@@ -3428,6 +3447,8 @@ void MainComponent::toggleMpcSampleFromUi()
     if (shouldOpen)
     {
         // The MPC surface shares the lower-panel slot with the editor and sampler.
+        if (mixerPanel.isVisible())
+            mixerPanel.closePanel();
         samplerPanel.setVisible(false);
         clipEditorPanel.setVisible(false);
         stepSequencer.setVisible(false);
@@ -4226,6 +4247,7 @@ void MainComponent::endTempoEditing(bool applyChanges)
 void MainComponent::showKeySelectionMenu(juce::Rectangle<int> targetScreenArea)
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
     static const char* noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
 
     const auto currentRoot  = projectState.getKeyRoot();
@@ -4233,6 +4255,8 @@ void MainComponent::showKeySelectionMenu(juce::Rectangle<int> targetScreenArea)
 
     juce::PopupMenu majorSub;
     juce::PopupMenu minorSub;
+    orion::ui::stylePopupMenu(majorSub);
+    orion::ui::stylePopupMenu(minorSub);
     for (int root = 0; root < 12; ++root)
     {
         const auto majorId = 100 + root;
@@ -4252,6 +4276,7 @@ void MainComponent::showKeySelectionMenu(juce::Rectangle<int> targetScreenArea)
     menu.addSeparator();
     menu.addItem(2, "Chord mode (one key = chord)", projectState.isKeyEnabled(), projectState.isChordModeEnabled());
     juce::PopupMenu chordSub;
+    orion::ui::stylePopupMenu(chordSub);
     static const std::array<std::pair<const char*, int>, 5> chordTypes {{
         { "Triad", 3 }, { "7th", 4 }, { "9th", 5 }, { "11th", 6 }, { "13th", 7 } }};
     for (const auto& [name, size] : chordTypes)

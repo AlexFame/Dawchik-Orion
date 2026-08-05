@@ -1,6 +1,7 @@
 #include "MidiEditorOverlayComponent.h"
 
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 
 #include <algorithm>
 #include <array>
@@ -4332,6 +4333,7 @@ void MidiEditorOverlayComponent::showSlidePresetMenu()
     const bool haveSlide = activeClip != nullptr && selectedSlide.has_value();
 
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
     menu.addSectionHeader("Pitch curve (on selected notes)");
     menu.addItem(1, "Scoop up into note", haveNotes);
     menu.addItem(2, "Slide down into note", haveNotes);
@@ -4341,12 +4343,14 @@ void MidiEditorOverlayComponent::showSlidePresetMenu()
     menu.addItem(6, "Vibrato (whole note)", haveNotes);
 
     juce::PopupMenu depth;
+    orion::ui::stylePopupMenu(depth);
     depth.addItem(20, "Subtle (±0.3 st)", haveSlide);
     depth.addItem(21, "Medium (±0.7 st)", haveSlide);
     depth.addItem(22, "Wide (±1.5 st)", haveSlide);
     menu.addSubMenu("Vibrato depth", depth, haveSlide);
 
     juce::PopupMenu rate;
+    orion::ui::stylePopupMenu(rate);
     rate.addItem(30, "Slow (2 / beat)", haveSlide);
     rate.addItem(31, "Medium (4 / beat)", haveSlide);
     rate.addItem(32, "Fast (6 / beat)", haveSlide);
@@ -4736,6 +4740,7 @@ juce::String MidiEditorOverlayComponent::getSnapName() const
 void MidiEditorOverlayComponent::showScaleMenu()
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
 
     for (int rootIndex = 0; rootIndex < static_cast<int>(rootNames.size()); ++rootIndex)
     {
@@ -4765,6 +4770,7 @@ void MidiEditorOverlayComponent::showScaleMenu()
 void MidiEditorOverlayComponent::showSnapMenu()
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
 
     for (int i = 0; i < static_cast<int>(snapSettings.size()); ++i)
     {
@@ -4791,6 +4797,7 @@ void MidiEditorOverlayComponent::showSnapMenu()
 void MidiEditorOverlayComponent::showStepLengthMenu()
 {
     juce::PopupMenu menu;
+    orion::ui::stylePopupMenu(menu);
 
     const std::array<SnapSetting, 4> stepLengths {{
         { "1/4", 1.0 },

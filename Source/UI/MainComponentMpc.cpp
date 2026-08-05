@@ -9,6 +9,7 @@
 #include "../Sampler/SamplerEngine.h"
 #include "MainComponentInternal.h"   // liveMidiDisplayText()
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 
 #include <vector>
 
@@ -238,9 +239,12 @@ void MainComponent::showMpcHighlightKeyMenu(juce::Rectangle<int> targetScreenAre
 {
     static const char* noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
     juce::PopupMenu menu;
+    ui::stylePopupMenu(menu);
     menu.addItem(1, "Off (follow project key)", true, ! mpc.highlightKeyActive);
     menu.addSeparator();
     juce::PopupMenu majorSub, minorSub;
+    ui::stylePopupMenu(majorSub);
+    ui::stylePopupMenu(minorSub);
     for (int r = 0; r < 12; ++r)
     {
         majorSub.addItem(100 + r, juce::String(noteNames[r]) + " major", true,

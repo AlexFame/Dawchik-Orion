@@ -14,7 +14,7 @@ constexpr int kPanelHeight = 88;
 constexpr int kReadoutRowHeight = 40;   // shared readout band; the remaining band holds transport controls
 constexpr int kUtilityHeight = 56;
 constexpr int kBrandWidth = 272;
-constexpr int kSideGroupWidth = 540;   // holds MIXER · CLIP EDITOR · STEPS · MPC SAMPLE · JAM
+constexpr int kSideGroupWidth = 450;   // holds MIXER · CLIP EDITOR · STEPS · MPC SAMPLE · JAM
 constexpr int kCpuWidth = 92;            // CPU readout (label + bars + %)
 constexpr int kMasterMeterWidth = 230;   // master meter is fixed-width, not edge-to-edge
 constexpr int kOuterPadding = 24;
@@ -456,9 +456,12 @@ void TransportBarComponent::resized()
     const auto clusterH = panel.getHeight();
     utilityClusterBounds = juce::Rectangle<int>(panel.getX() - kGroupGap - kSideGroupWidth,
                                                 clusterY, kSideGroupWidth, clusterH);
+    // Keep the project identity fully to the left of the utility menus.  A forced minimum
+    // width here used to make the brand cluster grow underneath PRO MIXER at narrower widths.
+    const int availableBrandWidth = juce::jmax(0, utilityClusterBounds.getX() - kOuterPadding - kGroupGap);
     brandClusterBounds = juce::Rectangle<int>(kOuterPadding,
                                               clusterY,
-                                              juce::jmax(190, juce::jmin(kBrandWidth, utilityClusterBounds.getX() - kOuterPadding - kGroupGap)),
+                                              juce::jmin(kBrandWidth, availableBrandWidth),
                                               clusterH);
 
     const auto monitorX = panel.getRight() + kGroupGap;
@@ -656,18 +659,23 @@ void TransportBarComponent::drawUtilityItem(juce::Graphics& g, UtilityItem item,
                      || (item == UtilityItem::mpcSample && state.mpcSampleOpen)
                      || (item == UtilityItem::jam && state.jamOpen);
     const auto hovered = hoveredUtilityItem == item;
-    const auto fill = active ? theme::cool::cyan.withAlpha(0.10f)
+    const auto card = bounds.toFloat().reduced(3.0f, 4.0f);
+    const auto fill = active ? theme::cool::cyan.withAlpha(0.12f)
                     : hovered ? theme::text::primary.withAlpha(0.055f)
-                              : juce::Colours::transparentBlack;
-    const auto colour = active ? theme::text::primary.withAlpha(0.92f)
-                      : hovered ? theme::text::secondary.withAlpha(0.92f)
-                                : theme::text::muted.withAlpha(0.78f);
+                              : theme::surface::elevated.withAlpha(0.16f);
+    const auto outline = active ? theme::cool::cyan.withAlpha(0.42f)
+                       : hovered ? theme::text::primary.withAlpha(0.22f)
+                                 : theme::line::subtle.withAlpha(0.20f);
+    const auto colour = active ? theme::text::primary.withAlpha(0.96f)
+                      : hovered ? theme::text::secondary.withAlpha(0.96f)
+                                : theme::text::muted.withAlpha(0.86f);
 
-    if (active || hovered)
-    {
-        g.setColour(fill);
-    g.fillRoundedRectangle(bounds.toFloat().reduced(2.0f, 1.0f), theme::metrics::controlRadius);
-    }
+    // Every workspace control owns a stable, visible zone. The active state changes only
+    // the treatment inside that zone, so one menu never visually swallows its neighbours.
+    g.setColour(fill);
+    g.fillRoundedRectangle(card, theme::metrics::controlRadius);
+    g.setColour(outline);
+    g.drawRoundedRectangle(card.reduced(0.5f), theme::metrics::controlRadius, active ? 1.2f : 0.8f);
 
     auto content = bounds.withSizeKeepingCentre(bounds.getWidth(), kContentBand).reduced(8, 0);
     auto labelRow = content.removeFromTop(kLabelRowH);

@@ -4,8 +4,10 @@
 #include <cmath>
 #include <optional>
 #include <regex>
+#include <limits>
 
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 
 namespace
 {
@@ -22,7 +24,7 @@ constexpr int rowGap = th::metrics::rowGap;
 // square corners; rounded geometry is reserved for controls and the preview surface.
 constexpr float rowCornerRadius = 0.0f;
 constexpr int dragThresholdPx = 5;
-constexpr int headerHeight = 144; // title + search + type filters
+constexpr int headerHeight = 176; // title + location + search + type filters + breathing room
 constexpr int browserSectionGap = th::metrics::gridUnit * 2;
 constexpr int listTopPadding = th::metrics::gridUnit * 3;
 constexpr int previewBarHeight = 72; // bottom preview card (waveform + play + name)
@@ -32,8 +34,10 @@ constexpr int contentPadX = 4; // uniform horizontal inset so left/right padding
 constexpr float horizontalSwipeThreshold = 0.14f;
 constexpr int horizontalSwipeLockMs = 320;
 const juce::String mountedDevicesHubName = "Mounted Devices";
-const auto bpmBadgeColour = th::surface::panel;
-const auto keyBadgeColour = th::surface::hover;
+// Two fixed Orion accent colours keep the metadata readable and coherent: coral for
+// tempo and cyan for key. drawBadge softens them for the dark browser surface.
+const auto bpmBadgeColour = th::accent::activeCoral;
+const auto keyBadgeColour = th::accent::brandCyanDim;
 
 bool isMountedVolumePath(const juce::File& file)
 {
@@ -60,7 +64,7 @@ public:
     {
         auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
         const auto active = button.getToggleState();
-        const auto radius = th::metrics::controlRadius;
+        const auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f;
         auto fill = active ? th::accent::activeCoral.withAlpha(0.18f)
                            : th::surface::elevated.withAlpha(isMouseOverButton ? 0.78f : 0.46f);
         if (isButtonDown)
@@ -73,11 +77,6 @@ public:
                                     : th::line::normal.withAlpha(isMouseOverButton ? 0.92f : 0.72f);
         g.setColour(outline);
         g.drawRoundedRectangle(bounds, radius, active ? 1.2f : 1.0f);
-        if (active)
-        {
-            g.setColour(th::accent::activeCoralLight);
-            g.fillRoundedRectangle(bounds.withTrimmedTop(bounds.getHeight() - 2.0f), 1.0f);
-        }
     }
 
     void drawButtonText(juce::Graphics& g, juce::TextButton& button, bool, bool) override
@@ -271,9 +270,13 @@ void drawBadge(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::Strin
     if (bounds.getWidth() <= 0 || text.isEmpty())
         return;
 
-    g.setColour(colour.withAlpha(0.70f));
-    g.fillRoundedRectangle(bounds.toFloat(), th::metrics::smallRadius);
-    g.setColour(th::text::secondary.withAlpha(0.80f));
+    // Metadata is secondary to the sample name: use the Orion accent as a quiet tint,
+    // not as a second headline competing with the row title.
+    g.setColour(colour.withAlpha(0.24f));
+    g.fillRoundedRectangle(bounds.toFloat(), th::metrics::controlRadius);
+    g.setColour(colour.withAlpha(0.42f));
+    g.drawRoundedRectangle(bounds.toFloat().reduced(0.5f), th::metrics::controlRadius, 0.8f);
+    g.setColour(th::text::secondary.withAlpha(0.92f));
     g.setFont(browserFont(13.0f, juce::Font::bold));
     g.drawText(text, bounds.reduced(6, 0), juce::Justification::centred, true);
 }
@@ -445,8 +448,87 @@ struct BrowserSearchFilter
 {
     bool wantsLoop { false };
     bool wantsOneShot { false };
+    std::optional<double> minBpm;
+    std::optional<double> maxBpm;
+    juce::String keyQuery;
     juce::StringArray terms;
 };
+
+int cappedEditDistance(const juce::String& lhs, const juce::String& rhs, int limit)
+{
+    if (std::abs(lhs.length() - rhs.length()) > limit)
+        return limit + 1;
+
+    std::vector<int> previous(static_cast<std::size_t>(rhs.length() + 1));
+    std::vector<int> current(static_cast<std::size_t>(rhs.length() + 1));
+    for (int j = 0; j <= rhs.length(); ++j)
+        previous[static_cast<std::size_t>(j)] = j;
+
+    for (int i = 1; i <= lhs.length(); ++i)
+    {
+        current[0] = i;
+        auto rowMinimum = current[0];
+        for (int j = 1; j <= rhs.length(); ++j)
+        {
+            const auto cost = lhs[i - 1] == rhs[j - 1] ? 0 : 1;
+            current[static_cast<std::size_t>(j)] = std::min({
+                previous[static_cast<std::size_t>(j)] + 1,
+                current[static_cast<std::size_t>(j - 1)] + 1,
+                previous[static_cast<std::size_t>(j - 1)] + cost
+            });
+            rowMinimum = std::min(rowMinimum, current[static_cast<std::size_t>(j)]);
+        }
+        if (rowMinimum > limit)
+            return limit + 1;
+        std::swap(previous, current);
+    }
+    return previous[static_cast<std::size_t>(rhs.length())];
+}
+
+juce::String compactSearchText(juce::String text)
+{
+    return text.toLowerCase().removeCharacters(" -_./\\,;:()[]{}");
+}
+
+bool fuzzyTermMatches(const juce::String& searchable, const juce::String& term)
+{
+    if (term.isEmpty() || searchable.contains(term))
+        return true;
+
+    const auto maxDistance = term.length() >= 6 ? 2 : 1;
+    juce::StringArray words;
+    words.addTokens(searchable, " \t\r\n-_./\\,;:()[]{}", "");
+    for (const auto& word : words)
+    {
+        if (word.length() < term.length() - maxDistance
+            || word.length() > term.length() + maxDistance)
+            continue;
+        if (cappedEditDistance(word, term, maxDistance) <= maxDistance)
+            return true;
+    }
+    return false;
+}
+
+std::optional<std::pair<double, double>> parseBpmRange(const juce::String& value)
+{
+    const auto range = value.trim().replaceCharacter('-', ':');
+    juce::StringArray parts;
+    parts.addTokens(range, ":", "");
+    if (parts.size() == 1)
+    {
+        const auto bpm = parts[0].getDoubleValue();
+        if (bpm > 0.0)
+            return std::make_pair(bpm, bpm);
+    }
+    if (parts.size() == 2)
+    {
+        const auto low = parts[0].getDoubleValue();
+        const auto high = parts[1].getDoubleValue();
+        if (low > 0.0 && high > 0.0)
+            return std::make_pair(std::min(low, high), std::max(low, high));
+    }
+    return std::nullopt;
+}
 
 bool isLoopItem(const orion::BrowserItem& item)
 {
@@ -467,8 +549,7 @@ bool isOneShotItem(const orion::BrowserItem& item)
 BrowserSearchFilter parseBrowserSearchFilter(const juce::String& query)
 {
     auto normalised = query.toLowerCase();
-    normalised = normalised.replaceCharacter('-', ' ')
-                           .replaceCharacter('_', ' ')
+    normalised = normalised.replaceCharacter('_', ' ')
                            .replaceCharacter('/', ' ')
                            .replaceCharacter('.', ' ')
                            .replaceCharacter(',', ' ');
@@ -490,6 +571,51 @@ BrowserSearchFilter parseBrowserSearchFilter(const juce::String& query)
 
     for (const auto& term : rawTerms)
     {
+        const auto compactTerm = compactSearchText(term);
+        if (compactTerm.startsWith("bpm") || compactTerm.startsWith("tempo"))
+        {
+            const auto separator = term.indexOfChar(':');
+            if (separator >= 0)
+            {
+                if (const auto range = parseBpmRange(term.substring(separator + 1)))
+                {
+                    filter.minBpm = range->first;
+                    filter.maxBpm = range->second;
+                    continue;
+                }
+            }
+        }
+
+        if (compactTerm.startsWith("key") || compactTerm.startsWith("tonality"))
+        {
+            const auto separator = term.indexOfChar(':');
+            if (separator >= 0)
+            {
+                filter.keyQuery = compactSearchText(term.substring(separator + 1));
+                if (filter.keyQuery.endsWith("minor"))
+                    filter.keyQuery = filter.keyQuery.replace("minor", "min");
+                else if (filter.keyQuery == "cm") filter.keyQuery = "cmin";
+                else if (filter.keyQuery == "dm") filter.keyQuery = "dmin";
+                else if (filter.keyQuery == "em") filter.keyQuery = "emin";
+                else if (filter.keyQuery == "fm") filter.keyQuery = "fmin";
+                else if (filter.keyQuery == "gm") filter.keyQuery = "gmin";
+                else if (filter.keyQuery == "am") filter.keyQuery = "amin";
+                else if (filter.keyQuery == "bm") filter.keyQuery = "bmin";
+                if (filter.keyQuery.isNotEmpty())
+                    continue;
+            }
+        }
+
+        if (term.containsOnly("0123456789-"))
+        {
+            if (const auto range = parseBpmRange(term))
+            {
+                filter.minBpm = range->first;
+                filter.maxBpm = range->second;
+                continue;
+            }
+        }
+
         if (term == "loop" || term == "loops" || term == "луп" || term == "лупы" || term == "петля" || term == "петли")
             continue;
 
@@ -516,13 +642,44 @@ bool matchesBrowserSearch(const orion::BrowserItem& item, const BrowserSearchFil
     if (filter.wantsOneShot && ! isOneShotItem(item))
         return false;
 
+    const auto bpm = parseBpmFromFileName(item.file);
+    if (filter.minBpm.has_value()
+        && (bpm <= 0.0 || bpm < *filter.minBpm || bpm > *filter.maxBpm))
+        return false;
+
+    if (filter.keyQuery.isNotEmpty())
+    {
+        const auto key = parseKeyFromFileName(item.file);
+        if (! key.has_value() || ! fuzzyTermMatches(compactSearchText(*key), filter.keyQuery))
+            return false;
+    }
+
     const auto searchable = (item.name + " " + item.subtitle + " " + item.category + " "
                              + item.tags.joinIntoString(" ") + " " + item.file.getFullPathName()).toLowerCase();
     for (const auto& term : filter.terms)
-        if (! searchable.contains(term))
+        if (! fuzzyTermMatches(searchable, term))
             return false;
 
     return true;
+}
+
+int browserSearchScore(const orion::BrowserItem& item, const BrowserSearchFilter& filter)
+{
+    const auto name = item.name.toLowerCase();
+    const auto searchable = (name + " " + item.subtitle + " " + item.category + " "
+                             + item.tags.joinIntoString(" ")).toLowerCase();
+    int score = 0;
+    for (const auto& term : filter.terms)
+    {
+        if (name == term) score += 1000;
+        else if (name.startsWith(term)) score += 700;
+        else if (name.contains(term)) score += 500;
+        else if (searchable.contains(term)) score += 250;
+        else score += 50;
+    }
+    if (filter.keyQuery.isNotEmpty()) score += 100;
+    if (filter.minBpm.has_value()) score += 100;
+    return score;
 }
 
 }  // namespace
@@ -569,15 +726,21 @@ BrowserPanelComponent::BrowserPanelComponent()
     // same geometry as the browser pills instead of using the square native TextEditor surface.
     searchEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
     searchEditor.setColour(juce::TextEditor::textColourId, th::text::primary);
+    searchEditor.setColour(juce::CaretComponent::caretColourId, th::text::primary);
     searchEditor.setColour(juce::TextEditor::highlightColourId, juce::Colours::white.withAlpha(0.20f));
     searchEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
     searchEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
     searchEditor.setIndents(32, 0);
+    searchEditor.setJustification(juce::Justification::centredLeft);
     searchEditor.setFont(browserFont(16.0f));
     searchEditor.setReturnKeyStartsNewLine(false);
     searchEditor.onTextChange = [this]
     {
         searchQuery = searchEditor.getText().trim();
+        clearSearchButton.setVisible(searchQuery.isNotEmpty());
+        if (onPreviewCleared && ! previewPeaks.empty())
+            onPreviewCleared();
+        clearPreview();
         if (inSimilarMode() && searchQuery.isNotEmpty())   // typing a query leaves similar mode
         {
             similarQuery.reset();
@@ -588,6 +751,23 @@ BrowserPanelComponent::BrowserPanelComponent()
         refreshEntries();
     };
     addAndMakeVisible(searchEditor);
+
+    const auto styleNavigationButton = [this](juce::TextButton& button)
+    {
+        button.setWantsKeyboardFocus(false);
+        button.setLookAndFeel(&browserButtonLookAndFeel);
+        button.setColour(juce::TextButton::textColourOffId, th::text::secondary);
+        button.setColour(juce::TextButton::textColourOnId, th::text::primary);
+        button.addListener(this);
+        addAndMakeVisible(button);
+    };
+    styleNavigationButton(backButton);
+    styleNavigationButton(forwardButton);
+    styleNavigationButton(clearSearchButton);
+    clearSearchButton.setVisible(false);
+    backButton.setTooltip("Back");
+    forwardButton.setTooltip("Forward");
+    clearSearchButton.setTooltip("Clear search");
 
     const auto styleSectionButton = [this](juce::TextButton& button)
     {
@@ -608,6 +788,7 @@ BrowserPanelComponent::BrowserPanelComponent()
     currentDirectory = getMacBrowseRoot();
     showLocationRoots(false);
     refreshEntries();
+    updateNavigationButtons();
     startTimer(1200);
 }
 
@@ -642,7 +823,7 @@ void BrowserPanelComponent::chooseRootFolder()
 void BrowserPanelComponent::openFolder(const juce::File& directory)
 {
     if (directory.isDirectory())
-        navigateTo(directory);
+        navigateTo(directory, true, isCustomLibraryRoot(directory));
 }
 
 void BrowserPanelComponent::showRootLocations()
@@ -665,7 +846,12 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
     auto titleArea = header.removeFromTop(40);
     g.setColour(th::text::primary);
     g.setFont(browserFont(22.0f, juce::Font::bold));
-    g.drawText("Browser", titleArea, juce::Justification::centredLeft);
+    g.drawText("Browser", titleArea.withRight(titleArea.getRight() - 72), juce::Justification::centredLeft);
+
+    auto locationArea = header.removeFromTop(24).reduced(2, 0);
+    g.setColour(th::text::tertiary);
+    g.setFont(browserFont(13.0f));
+    g.drawText(getLocationDisplayName(), locationArea, juce::Justification::centredLeft, true);
 
     // The current folder is intentionally omitted here. The list already communicates the
     // location, while a path under the title made the browser header feel like a debug readout.
@@ -675,10 +861,8 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
     const auto searchBounds = searchEditor.getBounds().toFloat();
     g.setColour(th::surface::elevated.withAlpha(0.82f));
     g.fillRoundedRectangle(searchBounds, th::metrics::controlRadius);
-    g.setColour(searchEditor.hasKeyboardFocus(true) ? th::accent::brandCyan.withAlpha(0.9f)
-                                                     : th::line::normal.withAlpha(0.82f));
-    g.drawRoundedRectangle(searchBounds.reduced(0.5f), th::metrics::controlRadius,
-                           searchEditor.hasKeyboardFocus(true) ? 1.25f : 1.0f);
+    g.setColour(th::line::normal.withAlpha(0.82f));
+    g.drawRoundedRectangle(searchBounds.reduced(0.5f), th::metrics::controlRadius, 1.0f);
     const auto searchIcon = searchBounds.withX(searchBounds.getX() + 11.0f)
                                        .withY(searchBounds.getCentreY() - 6.0f)
                                        .withSize(12.0f, 12.0f);
@@ -769,6 +953,19 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         g.setColour(mutedText);
         g.setFont(browserFont(15.0f));
         g.drawText(item.subtitle, row, juce::Justification::centredLeft, true);
+    }
+
+    if (items.empty() && searchQuery.isNotEmpty() && ! recursiveScanPending)
+    {
+        auto emptyState = listViewport.reduced(18, 20);
+        g.setColour(th::text::secondary.withAlpha(0.88f));
+        g.setFont(browserFont(16.0f, true));
+        g.drawText("No sounds found", emptyState.removeFromTop(24),
+                   juce::Justification::centred, true);
+        g.setColour(th::text::tertiary.withAlpha(0.82f));
+        g.setFont(browserFont(13.0f));
+        g.drawText("Try another name, tag, or folder", emptyState.removeFromTop(22),
+                   juce::Justification::centred, true);
     }
 
     g.restoreState();
@@ -955,17 +1152,24 @@ void BrowserPanelComponent::resized()
     auto titleRow = bounds.removeFromTop(40);
     closeButton.setBounds({});
     chooseFolderButton.setBounds({});
+    auto navArea = titleRow.removeFromRight(68).reduced(0, 5);
+    backButton.setBounds(navArea.removeFromLeft(30));
+    navArea.removeFromLeft(4);
+    forwardButton.setBounds(navArea.removeFromLeft(30));
 
-    bounds.removeFromTop(browserSectionGap * 2); // clean air below the title
-    bounds.removeFromTop(browserSectionGap);  // gap before search
-    searchEditor.setBounds(bounds.removeFromTop(th::metrics::controlHeight));
+    bounds.removeFromTop(24); // current location row, painted by the browser
+    bounds.removeFromTop(browserSectionGap * 2);  // breathing room below the location label
+    auto searchRow = bounds.removeFromTop(th::metrics::controlHeight);
+    clearSearchButton.setBounds(searchRow.removeFromRight(28).reduced(2, 2));
+    searchEditor.setBounds(searchRow);
 
-    bounds.removeFromTop(browserSectionGap * 2); // clear separation between search and filters
+    bounds.removeFromTop(browserSectionGap); // clear separation between search and filters
     auto sectionRow = bounds.removeFromTop(th::metrics::controlHeight);
     constexpr int pillW = 88;
     loopsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
     sectionRow.removeFromLeft(browserSectionGap);
     oneShotsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
+    updateNavigationButtons();
 }
 
 void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
@@ -1016,6 +1220,7 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
             return;
 
         juce::PopupMenu menu;
+        orion::ui::stylePopupMenu(menu);
         if (! item.isDirectory)
         {
             menu.addItem(3, "Add to playlist");                  // sampler track + clip
@@ -1078,6 +1283,10 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 
 void BrowserPanelComponent::openDirectoryItem(const BrowserItem& item)
 {
+    if (onPreviewCleared && ! previewPeaks.empty())
+        onPreviewCleared();
+    clearPreview();
+
     // Navigating away leaves similar mode (the following refresh rebuilds a normal listing).
     similarQuery.reset();
     similarQueryEmb.clear();
@@ -1090,8 +1299,10 @@ void BrowserPanelComponent::openDirectoryItem(const BrowserItem& item)
         showingLocationRoots = false;
         showingMacRootOverview = true;
         showingUserHomeOverview = false;
+        customRootActive = false;
         currentDirectory = getMacBrowseRoot();
         refreshEntries();
+        updateNavigationButtons();
         return;
     }
 
@@ -1112,6 +1323,12 @@ void BrowserPanelComponent::openDirectoryItem(const BrowserItem& item)
             || ! parentDirectory.isDirectory())
         {
             showLocationRoots();
+        }
+        else if (item.file.isDirectory())
+        {
+            // Parent rows carry the resolved destination. Use it directly instead of
+            // recalculating from a virtual browser state or a symlinked location.
+            navigateTo(item.file);
         }
         else
             navigateTo(parentDirectory);
@@ -1339,6 +1556,12 @@ void BrowserPanelComponent::buttonClicked(juce::Button* button)
 {
     if (button == &chooseFolderButton)
         chooseRootFolder();
+    else if (button == &backButton)
+        goBackInBrowserHistory();
+    else if (button == &forwardButton)
+        goForwardInBrowserHistory();
+    else if (button == &clearSearchButton)
+        clearSearch();
     else if (button == &loopsSectionButton)
         setBrowserSection(browserSection == BrowserSection::loops ? BrowserSection::all : BrowserSection::loops);
     else if (button == &oneShotsSectionButton)
@@ -1414,6 +1637,11 @@ void BrowserPanelComponent::refreshEntries()
                 if (! matchesBrowserSearch(it, filter)) continue;
                 items.push_back(it);
             }
+
+            std::stable_sort(items.begin(), items.end(), [&filter](const auto& lhs, const auto& rhs)
+            {
+                return browserSearchScore(lhs, filter) > browserSearchScore(rhs, filter);
+            });
         }
         if (recursiveScanPending && items.empty())
             items.push_back(BrowserItem { juce::String::fromUTF8("Searching\xe2\x80\xa6"), "", "",
@@ -1566,7 +1794,7 @@ void BrowserPanelComponent::refreshEntries()
     else if (currentDirectory.isDirectory())
     {
         const auto parentDirectory = currentDirectory.getParentDirectory();
-        if (parentDirectory != currentDirectory && parentDirectory.exists())
+        if (! customRootActive && parentDirectory != currentDirectory && parentDirectory.exists())
         {
             refreshedItems.push_back(BrowserItem {
                 "..",
@@ -1706,6 +1934,14 @@ void BrowserPanelComponent::refreshEntries()
             continue;
 
         items.push_back(item);
+    }
+
+    if (searching)
+    {
+        std::stable_sort(items.begin(), items.end(), [&filter](const auto& lhs, const auto& rhs)
+        {
+            return browserSearchScore(lhs, filter) > browserSearchScore(rhs, filter);
+        });
     }
 
     // While the background recursive scan is still running, show a placeholder so the user
@@ -1920,7 +2156,16 @@ void BrowserPanelComponent::beginRecursiveScan(std::vector<juce::File> roots, co
     });
 }
 
-void BrowserPanelComponent::navigateTo(const juce::File& directory, bool addToHistory)
+bool BrowserPanelComponent::isCustomLibraryRoot(const juce::File& directory) const
+{
+    const auto path = directory.getFullPathName();
+    return std::any_of(libraryRoots.begin(), libraryRoots.end(), [&path](const juce::File& root)
+    {
+        return root.getFullPathName() == path;
+    });
+}
+
+void BrowserPanelComponent::navigateTo(const juce::File& directory, bool addToHistory, bool customRoot)
 {
     if (! directory.isDirectory())
         return;
@@ -1944,9 +2189,11 @@ void BrowserPanelComponent::navigateTo(const juce::File& directory, bool addToHi
     showingLocationRoots = false;
     showingMacRootOverview = false;
     showingUserHomeOverview = isUserHomeDirectory(directory);
+    customRootActive = customRoot;
     currentDirectory = directory;
     scrollOffsetY = 0.0;
     refreshEntries();
+    updateNavigationButtons();
 }
 
 void BrowserPanelComponent::showLocationRoots(bool addToHistory)
@@ -1970,9 +2217,11 @@ void BrowserPanelComponent::showLocationRoots(bool addToHistory)
     showingLocationRoots = true;
     showingMacRootOverview = false;
     showingUserHomeOverview = false;
+    customRootActive = false;
     currentDirectory = getMacBrowseRoot();
     scrollOffsetY = 0.0;
     refreshEntries();
+    updateNavigationButtons();
 }
 
 BrowserPanelComponent::BrowserLocationState BrowserPanelComponent::getCurrentLocationState() const
@@ -1997,6 +2246,8 @@ void BrowserPanelComponent::restoreLocationState(const BrowserLocationState& sta
     showingLocationRoots = state.locationRoots;
     showingMacRootOverview = state.macRootOverview;
     showingUserHomeOverview = state.userHomeOverview;
+    customRootActive = ! state.locationRoots && ! state.macRootOverview && ! state.userHomeOverview
+                    && isCustomLibraryRoot(state.directory);
     scrollOffsetY = 0.0;
     refreshEntries();
 }
@@ -2023,24 +2274,59 @@ void BrowserPanelComponent::pushCurrentLocationToBackHistory()
 
 void BrowserPanelComponent::goBackInBrowserHistory()
 {
-    if (backHistory.empty())
+    if (customRootActive || backHistory.empty())
         return;
 
     forwardHistory.push_back(getCurrentLocationState());
     const auto previousState = backHistory.back();
     backHistory.pop_back();
     restoreLocationState(previousState);
+    updateNavigationButtons();
 }
 
 void BrowserPanelComponent::goForwardInBrowserHistory()
 {
-    if (forwardHistory.empty())
+    if (customRootActive || forwardHistory.empty())
         return;
 
     backHistory.push_back(getCurrentLocationState());
     const auto nextState = forwardHistory.back();
     forwardHistory.pop_back();
     restoreLocationState(nextState);
+    updateNavigationButtons();
+}
+
+void BrowserPanelComponent::clearSearch()
+{
+    if (searchEditor.getText().isEmpty())
+        return;
+
+    searchEditor.clear();
+    searchEditor.grabKeyboardFocus();
+}
+
+juce::String BrowserPanelComponent::getLocationDisplayName() const
+{
+    if (inSimilarMode())
+        return "Similar sounds";
+
+    if (showingLocationRoots)
+        return "Locations";
+
+    if (showingUserHomeOverview)
+        return "Home";
+
+    const auto name = currentDirectory.getFileName();
+    return name.isNotEmpty() ? name : currentDirectory.getFullPathName();
+}
+
+void BrowserPanelComponent::updateNavigationButtons()
+{
+    const auto showNavigation = ! customRootActive;
+    backButton.setVisible(showNavigation);
+    forwardButton.setVisible(showNavigation);
+    backButton.setEnabled(! customRootActive && ! backHistory.empty());
+    forwardButton.setEnabled(! customRootActive && ! forwardHistory.empty());
 }
 
 void BrowserPanelComponent::unlockHorizontalSwipeGesture() noexcept

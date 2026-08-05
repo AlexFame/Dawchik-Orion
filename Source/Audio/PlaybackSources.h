@@ -693,6 +693,7 @@ public:
 
         // Pre-allocate the metering scratch buffer so the audio callback never reallocates.
         samplerMeterScratch.setSize(2, preparedBlockSize, false, false, true);
+        seekAudioScratch.setSize(2, preparedBlockSize, false, false, true);
 
         // Spin up (or resize) the parallel instrument-render workers for this block size.
         renderPool.setBlockTiming(outputSampleRate, preparedBlockSize);
@@ -731,6 +732,16 @@ public:
     {
         if (wasPlaying)
         {
+            if (transport.isPlaying())
+            {
+                // A seek during playback must bridge the old and new timeline positions. Jumping
+                // directly at the next block boundary leaves a sample discontinuity (a click).
+                declickStartBeat.store(currentTimelineBeat, std::memory_order_relaxed);
+                seekTargetBeat.store(transport.getPlayheadBeat(), std::memory_order_relaxed);
+                seekArmed.store(true, std::memory_order_release);
+                return;
+            }
+
             // Hand the audio thread the beat we actually stopped at, so its tail keeps
             // rendering the audio you were hearing rather than restarting from the top.
             declickStartBeat.store(currentTimelineBeat, std::memory_order_relaxed);
@@ -1377,8 +1388,37 @@ public:
         }
 
         const auto beatAdvancePerSample = beatsPerSecond / outputSampleRate;
+        const bool seekFromMessageThread = seekArmed.exchange(false, std::memory_order_acquire);
+        const auto seekBeat = seekTargetBeat.load(std::memory_order_relaxed);
         updateChordPlayback(currentTimelineBeat, true);
         renderAudioIntoBuffer(*info.buffer, info.startSample, info.numSamples, currentTimelineBeat, outputSampleRate, loopActive, ! loopActive, true);
+
+        if (seekFromMessageThread)
+        {
+            // Render the destination into a preallocated side buffer, then crossfade the audio
+            // over a few milliseconds. The existing block remains the outgoing side of the fade,
+            // so the transition is continuous even when the playhead is dragged quickly.
+            seekAudioScratch.clear();
+            renderAudioIntoBuffer(seekAudioScratch, 0, info.numSamples, seekBeat, outputSampleRate,
+                                  loopActive, ! loopActive, true, false);
+            const int fadeSamples = juce::jmin(info.numSamples,
+                                               juce::jmax(1, static_cast<int>(outputSampleRate * 0.008)));
+            const int channels = juce::jmin(info.buffer->getNumChannels(), seekAudioScratch.getNumChannels());
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                auto* dst = info.buffer->getWritePointer(channel, info.startSample);
+                const auto* src = seekAudioScratch.getReadPointer(channel);
+                for (int sample = 0; sample < info.numSamples; ++sample)
+                {
+                    const auto targetGain = sample < fadeSamples
+                        ? static_cast<float>(sample + 1) / static_cast<float>(fadeSamples)
+                        : 1.0f;
+                    const auto outgoingGain = 1.0f - targetGain;
+                    dst[sample] = dst[sample] * outgoingGain + src[sample] * targetGain;
+                }
+            }
+        }
+
         samplerEngine.renderLiveNotes(*info.buffer, info.startSample, info.numSamples, outputSampleRate);        chordPreviewSynth.renderNextBlock(*info.buffer, {}, info.startSample, info.numSamples);
 
         currentTimelineBeat += static_cast<double>(info.numSamples) * beatAdvancePerSample;
@@ -1389,6 +1429,19 @@ public:
             const auto repeatEndBeat = project.getPlaybackEndInBeats();
             while (repeatEndBeat > 0.0 && currentTimelineBeat >= repeatEndBeat)
                 currentTimelineBeat = std::fmod(currentTimelineBeat, repeatEndBeat);
+        }
+
+        if (seekFromMessageThread)
+        {
+            currentTimelineBeat = seekBeat + static_cast<double>(info.numSamples) * beatAdvancePerSample;
+            while (loopActive && currentTimelineBeat >= loopEndBeat)
+                currentTimelineBeat = loopStartBeat + std::fmod(currentTimelineBeat - loopStartBeat, loopSpanBeats);
+            if (! loopActive)
+            {
+                const auto repeatEndBeat = project.getPlaybackEndInBeats();
+                while (repeatEndBeat > 0.0 && currentTimelineBeat >= repeatEndBeat)
+                    currentTimelineBeat = std::fmod(currentTimelineBeat, repeatEndBeat);
+            }
         }
     }
 
@@ -2242,9 +2295,11 @@ private:
                 // pre-fader undoes the channel fader (so the send is independent of volume).
                 if (hasSends)
                 {
-                    for (const auto& send : track.sends)
+                    for (int sendSlot = 0; sendSlot < static_cast<int>(track.sends.size()); ++sendSlot)
                     {
-                        const auto level = static_cast<float>(juce::jlimit(0.0, 1.0, send.level));
+                        const auto& send = track.sends[static_cast<std::size_t>(sendSlot)];
+                        // Automated send level (falls back to the static level when not automated).
+                        const auto level = static_cast<float>(juce::jlimit(0.0, 1.0, track.automatedSendLevel(sendSlot, blockStartBeat)));
                         if (level <= 0.0001f || send.busIndex < 0 || send.busIndex >= static_cast<int>(busBuffers.size()))
                             continue;
                         const auto sendGain = send.prefader
@@ -3061,6 +3116,8 @@ private:
     // does. It parks the edge (and the beat to fade out from) here for the next audio block.
     std::atomic<bool> declickArmed { false };
     std::atomic<double> declickStartBeat { 0.0 };
+    std::atomic<bool> seekArmed { false };
+    std::atomic<double> seekTargetBeat { 0.0 };
     std::map<std::string, std::unique_ptr<AudioFileData>> audioCache;
     std::map<std::string, std::unique_ptr<AudioFileData>> warpedAudioCache;
     // Full decoded source files are also real memory (a few long stereo files quickly become GB).
@@ -3183,6 +3240,7 @@ private:
     std::array<std::atomic<float>, maxMeterTracks> trackPeaksL {};
     std::array<std::atomic<float>, maxMeterTracks> trackPeaksR {};
     juce::AudioBuffer<float> samplerMeterScratch;
+    juce::AudioBuffer<float> seekAudioScratch;
     juce::AudioBuffer<float> trackMeterBefore;   // per-track mix snapshot for accurate metering
     juce::AudioBuffer<float> trackFxScratch;     // isolated per-track buffer for insert FX
     std::map<int, std::vector<std::unique_ptr<InsertSlot>>> trackInserts;

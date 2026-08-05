@@ -51,6 +51,8 @@ public:
     std::function<void(float)>               onSeekPreview;
     // Fired when the user starts dragging an item to the playlist — caller stops the preview.
     std::function<void()>                   onDragStarted;
+    // Fired when search/navigation invalidates the currently previewed item.
+    std::function<void()>                   onPreviewCleared;
     // Fired when the SYNC toggle is clicked — caller should reload the preview buffer.
     std::function<void()>                   onPreviewBpmSyncToggled;
     std::function<void(const juce::File&)>  onRootFolderChosen;
@@ -136,13 +138,17 @@ private:
     void openDirectoryItem(const BrowserItem& item);   // navigate into a folder / parent / root
     void refreshEntries();
     void showLocationRoots(bool addToHistory = true);
-    void navigateTo(const juce::File& directory, bool addToHistory = true);
+    void navigateTo(const juce::File& directory, bool addToHistory = true, bool customRoot = false);
+    bool isCustomLibraryRoot(const juce::File& directory) const;
     BrowserLocationState getCurrentLocationState() const;
     void restoreLocationState(const BrowserLocationState& state);
     bool isCurrentLocation(const BrowserLocationState& state) const;
     void pushCurrentLocationToBackHistory();
     void goBackInBrowserHistory();
     void goForwardInBrowserHistory();
+    void clearSearch();
+    juce::String getLocationDisplayName() const;
+    void updateNavigationButtons();
     void unlockHorizontalSwipeGesture() noexcept;
     juce::Rectangle<int> getRowBounds(int index) const noexcept;
     juce::Rectangle<int> getListViewportBounds() const noexcept;
@@ -209,11 +215,15 @@ private:
     SwipeUnlockTimer swipeUnlockTimer { *this };
     std::vector<BrowserLocationState> backHistory;
     std::vector<BrowserLocationState> forwardHistory;
+    bool customRootActive { false };
     juce::Time watchedLocationTimestamp;
     std::unique_ptr<juce::FileChooser> folderChooser;
     juce::TextButton chooseFolderButton { "Add Folder" };
     juce::TextButton closeButton { juce::String::charToString(0x00D7) }; // "×"
     juce::TextEditor searchEditor;
+    juce::TextButton backButton { "<" };
+    juce::TextButton forwardButton { ">" };
+    juce::TextButton clearSearchButton { "x" };
     juce::TextButton loopsSectionButton { "Loops" };
     juce::TextButton oneShotsSectionButton { "One-Shots" };
     BrowserSection browserSection { BrowserSection::all };

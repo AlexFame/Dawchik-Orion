@@ -34,7 +34,7 @@ void SidebarNavComponent::rebuildNavEntries()
     // SAMPLES/HISTORY/CLOUD hidden for now — SAMPLES duplicated FILES (no dedicated sample
     // library yet); the others are placeholders. Easy to re-add when they do something real.
     navEntries = {
-        { SidebarNavItem::addFolder, "ADD", {} },
+        { SidebarNavItem::addFolder, "ADD FOLDER", {} },
         { SidebarNavItem::files, "FILES", {} },
         { SidebarNavItem::vst, "VST", {} }
     };

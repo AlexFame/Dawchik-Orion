@@ -8,9 +8,174 @@
 
 #include "../Audio/PlaybackSources.h"
 #include "OrionTheme.h"
+#include "OrionPopupMenu.h"
 
 #include <memory>
 #include <vector>
+
+namespace
+{
+class OrionPopupMenuLookAndFeel final : public juce::LookAndFeel_V4
+{
+public:
+    OrionPopupMenuLookAndFeel()
+    {
+        setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff151c26));
+        setColour(juce::PopupMenu::textColourId, juce::Colour(0xffe7edf5));
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xff536176));
+        setColour(juce::PopupMenu::highlightedTextColourId, juce::Colour(0xfff7fbff));
+    }
+
+    void drawPopupMenuBackground(juce::Graphics& g, int width, int height) override
+    {
+        const auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+        g.setColour(juce::Colour(0xff151c26));
+        g.fillRoundedRectangle(bounds, 8.0f);
+        g.setColour(juce::Colour(0xff455266).withAlpha(0.85f));
+        g.drawRoundedRectangle(bounds.reduced(0.5f), 8.0f, 1.0f);
+    }
+
+    void drawPopupMenuBackgroundWithOptions(juce::Graphics& g, int width, int height,
+                                            const juce::PopupMenu::Options&) override
+    {
+        auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width),
+                                             static_cast<float>(height)).reduced(1.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.30f));
+        g.fillRoundedRectangle(bounds.translated(0.0f, 2.0f), 10.0f);
+        g.setColour(juce::Colour(0xff151c26));
+        g.fillRoundedRectangle(bounds, 10.0f);
+        g.setColour(juce::Colour(0xff536176).withAlpha(0.72f));
+        g.drawRoundedRectangle(bounds, 10.0f, 1.0f);
+    }
+
+    void getIdealPopupMenuItemSizeWithOptions(const juce::String& text, bool isSeparator,
+                                              int standardMenuItemHeight, int& idealWidth,
+                                              int& idealHeight,
+                                              const juce::PopupMenu::Options& options) override
+    {
+        juce::LookAndFeel_V4::getIdealPopupMenuItemSizeWithOptions(text, isSeparator,
+                                                                   standardMenuItemHeight,
+                                                                   idealWidth, idealHeight, options);
+        if (! isSeparator)
+        {
+            idealHeight = juce::jmax(idealHeight, 32);
+            idealWidth += 28;
+        }
+    }
+
+    void drawPopupMenuItem(juce::Graphics& g, const juce::Rectangle<int>& area,
+                           bool isSeparator, bool isActive, bool isHighlighted,
+                           bool isTicked, bool hasSubMenu, const juce::String& text,
+                           const juce::String& shortcutKeyText, const juce::Drawable* icon,
+                           const juce::Colour* textColour) override
+    {
+        if (isSeparator)
+        {
+            g.setColour(juce::Colour(0xff455266).withAlpha(0.45f));
+            g.fillRect(area.reduced(10, 0).withHeight(1));
+            return;
+        }
+
+        auto item = area.reduced(4, 1);
+        if (isHighlighted && isActive)
+        {
+            g.setColour(juce::Colour(0xffe85d63).withAlpha(0.86f));
+            g.fillRoundedRectangle(item.toFloat(), 5.0f);
+        }
+
+        auto textArea = item.reduced(10, 0);
+        if (isTicked)
+        {
+            g.setColour(isHighlighted ? juce::Colours::white : juce::Colour(0xff63d6a0));
+            g.fillEllipse(static_cast<float>(textArea.getX()), static_cast<float>(textArea.getCentreY() - 3), 6.0f, 6.0f);
+            textArea.removeFromLeft(16);
+        }
+
+        if (icon != nullptr)
+            icon->drawWithin(g, textArea.removeFromLeft(20).toFloat(), juce::RectanglePlacement::centred, 1.0f);
+
+        g.setColour(isActive ? (isHighlighted ? juce::Colours::white
+                                               : (textColour != nullptr ? *textColour : juce::Colour(0xffe7edf5)))
+                             : juce::Colour(0xff778497));
+        g.setFont(juce::FontOptions("Avenir Next", 13.0f, isHighlighted ? juce::Font::bold : juce::Font::plain));
+        g.drawText(text, textArea, juce::Justification::centredLeft, true);
+
+        if (shortcutKeyText.isNotEmpty())
+        {
+            g.setColour(juce::Colour(0xff9aa7b8).withAlpha(isActive ? 0.9f : 0.55f));
+            g.setFont(juce::FontOptions("Avenir Next", 11.0f, juce::Font::plain));
+            g.drawText(shortcutKeyText, item.reduced(10, 0), juce::Justification::centredRight, false);
+        }
+
+        if (hasSubMenu)
+        {
+            g.setColour(isHighlighted ? juce::Colours::white : juce::Colour(0xff9aa7b8));
+            const auto x = static_cast<float>(item.getRight() - 12);
+            const auto y = static_cast<float>(item.getCentreY());
+            g.drawLine(x - 3.0f, y - 4.0f, x + 1.0f, y, 1.4f);
+            g.drawLine(x + 1.0f, y, x - 3.0f, y + 4.0f, 1.4f);
+        }
+    }
+
+    void drawPopupMenuItemWithOptions(juce::Graphics& g, const juce::Rectangle<int>& area,
+                                      bool isHighlighted, const juce::PopupMenu::Item& item,
+                                      const juce::PopupMenu::Options&) override
+    {
+        if (item.isSeparator)
+        {
+            g.setColour(juce::Colour(0xff536176).withAlpha(0.42f));
+            g.fillRect(area.reduced(12, 0).removeFromTop(1).translated(0, area.getHeight() / 2));
+            return;
+        }
+
+        auto itemArea = area.reduced(5, 2);
+        if (isHighlighted && item.isEnabled)
+        {
+            g.setColour(juce::Colour(0xff536176).withAlpha(0.96f));
+            g.fillRoundedRectangle(itemArea.toFloat(), 7.0f);
+        }
+
+        auto textArea = itemArea.reduced(12, 0);
+        if (item.isTicked)
+        {
+            g.setColour(isHighlighted ? juce::Colours::white : juce::Colour(0xff63d6a0));
+            g.fillEllipse(static_cast<float>(textArea.getX()),
+                          static_cast<float>(textArea.getCentreY() - 3), 6.0f, 6.0f);
+            textArea.removeFromLeft(16);
+        }
+
+        g.setColour(item.isEnabled
+                        ? (isHighlighted ? juce::Colour(0xfff7fbff) : juce::Colour(0xffe7edf5))
+                        : juce::Colour(0xff778497));
+        g.setFont(juce::FontOptions("Avenir Next", 13.0f,
+                                    isHighlighted ? juce::Font::bold : juce::Font::plain));
+        g.drawText(item.text, textArea, juce::Justification::centredLeft, true);
+
+        if (item.subMenu != nullptr)
+        {
+            g.setColour(isHighlighted ? juce::Colours::white : juce::Colour(0xff9aa7b8));
+            const auto x = static_cast<float>(itemArea.getRight() - 12);
+            const auto y = static_cast<float>(itemArea.getCentreY());
+            g.drawLine(x - 3.0f, y - 4.0f, x + 1.0f, y, 1.4f);
+            g.drawLine(x + 1.0f, y, x - 3.0f, y + 4.0f, 1.4f);
+        }
+    }
+
+    int getPopupMenuBorderSize() override { return 6; }
+
+    juce::Font getPopupMenuFont() override
+    {
+        return juce::FontOptions("Avenir Next", 13.0f, juce::Font::plain);
+    }
+};
+
+OrionPopupMenuLookAndFeel orionPopupMenuLookAndFeel;
+
+void stylePopupMenu(juce::PopupMenu& menu)
+{
+    menu.setLookAndFeel(&orion::ui::popupMenuLookAndFeel());
+}
+} // namespace
 
 namespace orion
 {
@@ -61,6 +226,7 @@ void MainComponent::showSendMenuForTrack(int trackIndex, int sendIndex)
     auto& buses = projectState.getBuses();
 
     juce::PopupMenu menu;
+    stylePopupMenu(menu);
 
     // Existing send row: change level or remove.
     if (sendIndex >= 0 && sendIndex < static_cast<int>(track.sends.size()))
@@ -122,6 +288,7 @@ void MainComponent::showOutputRouteMenuForTrack(int trackIndex)
     const auto& buses = projectState.getBuses();
 
     juce::PopupMenu menu;
+    stylePopupMenu(menu);
     menu.addItem(1, "Master", true, track.outputBus < 0);
     if (! buses.empty())
     {
@@ -147,6 +314,7 @@ void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
     auto& chain = *chainPtr;
 
     juce::PopupMenu menu;
+    stylePopupMenu(menu);
 
     // VST3 effects list (shared by add + replace).
     juce::Array<juce::PluginDescription> effects;
@@ -162,6 +330,7 @@ void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
         menu.addItem(2, fx.bypassed ? "Un-bypass" : "Bypass", true, fx.bypassed);
 
         juce::PopupMenu replaceMenu;
+        stylePopupMenu(replaceMenu);
         {
             int id = 2000;
             for (const auto& d : effects)
@@ -190,35 +359,16 @@ void MainComponent::showInsertMenuForTrack(int trackIndex, int insertIndex)
         return;
     }
 
-    // The "+" add slot: pick a VST3 effect to append.
-    juce::PopupMenu addMenu;
-    if (effects.isEmpty())
-        addMenu.addItem(900, pluginManager.isScanning() ? "Scanning..." : "No VST3 effects found — Rescan...", ! pluginManager.isScanning());
-    else
-    {
-        int id = 1000;
-        for (const auto& d : effects)
-        {
-            auto label = d.name;
-            if (d.manufacturerName.isNotEmpty()) label += " - " + d.manufacturerName;
-            addMenu.addItem(id++, label);
-        }
-    }
-    menu.addSubMenu("Add effect", addMenu);
-    menu.addSeparator();
-    menu.addItem(901, pluginManager.isScanning() ? "Scanning..." : "Rescan VST3 plugins...", ! pluginManager.isScanning());
-
-    const auto list = effects;
-    menu.showMenuAsync(juce::PopupMenu::Options(), [this, trackIndex, list](int r)
-    {
-        if (r == 900 || r == 901) { scanPluginsInteractively(); return; }
-        if (r >= 1000)
-        {
-            const auto i = r - 1000;
-            if (i >= 0 && i < list.size())
-                addInsertOnTrack(trackIndex, list.getReference(i));
-        }
-    });
+    // Adding an effect opens the same searchable picker used for instruments. This keeps the
+    // common plugin-loading workflow in one polished surface instead of a tiny nested popup.
+    // NOTE: the add slot passes insertIndex = -1; onPick treats a negative target as the INSTRUMENT
+    // path, so pin it to the append position (chain size) — a non-negative, effect-insert target.
+    pluginPickerTargetTrack = trackIndex;
+    pluginPickerTargetInsert = static_cast<int>(chain.size());
+    pluginPickerReplacingInsert = false;
+    pluginPicker.setBounds(getLocalBounds());
+    pluginPicker.show("Add Effect", effects, pluginManager.isScanning());
+    pluginPicker.toFront(true);
 }
 
 void MainComponent::addInsertOnTrack(int trackIndex, const juce::PluginDescription& description)
@@ -272,6 +422,7 @@ void MainComponent::replaceInsertOnTrack(int trackIndex, int insertIndex, const 
     }
 
     const auto bypassed = chain[static_cast<std::size_t>(insertIndex)].bypassed;
+    insertTouchListeners.erase({ trackIndex, insertIndex });
     insertEditorWindows.erase({ trackIndex, insertIndex });
 
     // Engine: drop the old instance, add the new one and move it to the same slot.
@@ -295,6 +446,7 @@ void MainComponent::replaceInsertOnTrack(int trackIndex, int insertIndex, const 
 void MainComponent::removeInsertFromTrack(int trackIndex, int insertIndex)
 {
     arrangementTimeline.captureUndoSnapshot();
+    insertTouchListeners.erase({ trackIndex, insertIndex });
     insertEditorWindows.erase({ trackIndex, insertIndex });
     if (arrangementPlaybackSource != nullptr)
         arrangementPlaybackSource->removeInsert(trackIndex, insertIndex);
@@ -342,9 +494,34 @@ void MainComponent::openInsertEditor(int trackIndex, int insertIndex)
 
     insertEditorWindows[key] = std::make_unique<PluginEditorWindow>(
         *instance, title,
-        [this, key]() { insertEditorWindows.erase(key); },
+        [this, key]() { insertTouchListeners.erase(key); insertEditorWindows.erase(key); },
         [this](const juce::KeyPress& k) { return keyPressed(k); },
         [this](bool down) { return keyStateChanged(down); });
+
+    // While the editor is open, grabbing any knob auto-maps the automation lane to that insert param.
+    auto listener = std::make_unique<PluginTouchListener>(
+        [this, trackIndex, insertIndex](int paramIndex) { onInsertParamTouched(trackIndex, insertIndex, paramIndex); });
+    listener->attachTo(instance);
+    insertTouchListeners[key] = std::move(listener);
+}
+
+void MainComponent::onInsertParamTouched(int trackIndex, int insertIndex, int paramIndex)
+{
+    if (arrangementPlaybackSource == nullptr)
+        return;
+    auto* instance = arrangementPlaybackSource->getInsertInstance(trackIndex, insertIndex);
+    if (instance == nullptr)
+        return;
+    const auto& params = instance->getParameters();
+    if (! juce::isPositiveAndBelow(paramIndex, params.size()))
+        return;
+
+    // Point the automation editor at this track + insert param, exactly as picking it from the chip
+    // menu would. Stored even when automation mode is off, so pressing A reveals the last-touched knob.
+    arrangementTimeline.selectTrack(trackIndex);
+    arrangementTimeline.setAutomationTarget(orion::AutomationParam::insertParam, insertIndex, paramIndex,
+                                            params[paramIndex]->getName(48));
+    arrangementTimeline.repaint();
 }
 
 void MainComponent::moveInsert(int fromTrack, int fromIndex, int toTrack, int toIndex)
@@ -361,6 +538,7 @@ void MainComponent::moveInsert(int fromTrack, int fromIndex, int toTrack, int to
         return;   // no-op move
 
     // Editor windows are keyed by (track,index); indices shift, so just close them.
+    insertTouchListeners.clear();
     insertEditorWindows.clear();
 
     // Move in the engine (the live instance).
