@@ -3725,7 +3725,7 @@ void MainComponent::applyBackgroundAnalysis(const std::map<juce::String, orion::
 
             if (clip.signalAnalysisPending)
             {
-                if (a.sourceKeyRoot >= 0)
+                if (clip.sourceKeyRoot < 0 && a.sourceKeyRoot >= 0)
                 {
                     clip.sourceKeyRoot    = a.sourceKeyRoot;
                     clip.sourceKeyIsMinor = a.sourceKeyIsMinor;
