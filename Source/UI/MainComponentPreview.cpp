@@ -40,11 +40,15 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
         return;
     }
 
-    // Same file already loaded at the current tempo and sync mode → just restart instantly.
+    const auto projectKeyRoot = projectState.isKeyEnabled() ? projectState.getKeyRoot() : -1;
+
+    // Same file already loaded at the current tempo, key and sync modes -> just restart instantly.
     if ((previewBufferSource != nullptr || previewFileSource != nullptr)
         && item.file == currentPreviewFile
         && std::abs(currentPreviewTempoBpm - projectState.getTempoBpm()) < 0.001
-        && currentPreviewBpmSync == browserPanel.isPreviewBpmSyncEnabled())
+        && currentPreviewBpmSync == browserPanel.isPreviewBpmSyncEnabled()
+        && currentPreviewKeySync == browserPanel.isPreviewKeySyncEnabled()
+        && currentPreviewProjectKeyRoot == projectKeyRoot)
     {
         pendingBrowserPreviewStart = false;
         previewTransportSource.stop();
@@ -69,7 +73,10 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
     const auto tempoNow = projectState.getTempoBpm();
     const auto numerator = projectState.getNumerator();
     const auto fitToTempo = browserPanel.isPreviewBpmSyncEnabled();
+    const auto fitToKey = browserPanel.isPreviewKeySyncEnabled() && projectKeyRoot >= 0;
     currentPreviewBpmSync = fitToTempo;
+    currentPreviewKeySync = browserPanel.isPreviewKeySyncEnabled();
+    currentPreviewProjectKeyRoot = projectKeyRoot;
     currentPreviewLooping = item.defaultClipLengthInBeats
                             > static_cast<double>(juce::jmax(1, projectState.getNumerator()));
 
@@ -82,7 +89,8 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
     browserPanel.setPreviewPlayback(false, 0.0f);
     juce::Component::SafePointer<MainComponent> safeThis(this);
 
-    previewLoadPool.addJob([this, safeThis, generation, file, displayName, tempoNow, numerator, fitToTempo]
+    previewLoadPool.addJob([this, safeThis, generation, file, displayName, tempoNow, numerator,
+                            fitToTempo, fitToKey, projectKeyRoot]
     {
         std::unique_ptr<juce::AudioFormatReader> reader(audioFormatManager.createReaderFor(file));
         if (reader == nullptr || reader->lengthInSamples <= 0)
@@ -90,7 +98,8 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
 
         const auto sampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 44100.0;
         const auto sourceSamples = juce::jmax<juce::int64>(1, reader->lengthInSamples);
-        const auto analysis = fitToTempo ? analyzeAudioWarpMetadata(file, tempoNow, numerator, false)
+        const auto analysis = (fitToTempo || fitToKey)
+                             ? analyzeAudioWarpMetadata(file, tempoNow, numerator, false)
                                          : AudioWarpAnalysis {};
         const auto tempoRatio = fitToTempo && analysis.sourceBpm > 0.0 && tempoNow > 0.0
                               ? analysis.sourceBpm / tempoNow : 1.0;
@@ -101,16 +110,26 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
         if (outputSamples <= 0)
             return;
 
+        double pitchScale = 1.0;
+        if (fitToKey && analysis.sourceKeyRoot >= 0)
+        {
+            int keyDiff = projectKeyRoot - analysis.sourceKeyRoot;
+            while (keyDiff > 6)  keyDiff -= 12;
+            while (keyDiff < -6) keyDiff += 12;
+            pitchScale = std::pow(2.0, static_cast<double>(keyDiff) / 12.0);
+        }
+
         // If a newer preview was requested while we were reading, drop this one.
         if (generation != previewRequestGeneration.load())
             return;
 
         juce::MessageManager::callAsync([safeThis, generation, reader = std::move(reader), outputSamples,
-                                         sampleRate, file, displayName]() mutable
+                                         sampleRate, file, displayName, pitchScale]() mutable
         {
             if (safeThis == nullptr || generation != safeThis->previewRequestGeneration.load())
                 return;
-            safeThis->startStreamingPreviewPlayback(std::move(reader), outputSamples, sampleRate, file, displayName);
+            safeThis->startStreamingPreviewPlayback(std::move(reader), outputSamples, sampleRate,
+                                                     file, displayName, pitchScale);
         });
 
         // Waveform analysis is deliberately decoupled from audio start. It can finish later
@@ -231,7 +250,8 @@ void MainComponent::startPreviewPlayback(juce::AudioBuffer<float> previewBuffer,
 
 void MainComponent::startStreamingPreviewPlayback(std::unique_ptr<juce::AudioFormatReader> reader,
                                                    int outputSamples, double sampleRate,
-                                                   const juce::File& file, const juce::String& displayName)
+                                                   const juce::File& file, const juce::String& displayName,
+                                                   double pitchScale)
 {
     previewTransportSource.stop();
     previewTransportSource.setSource(nullptr);
@@ -239,12 +259,15 @@ void MainComponent::startStreamingPreviewPlayback(std::unique_ptr<juce::AudioFor
     previewFileSource.reset();
 
     previewFileSource = std::make_unique<StreamingFilePreviewSource>(std::move(reader), outputSamples,
-                                                                       sampleRate, currentPreviewLooping);
+                                                                       sampleRate, currentPreviewLooping,
+                                                                       pitchScale);
     previewTransportSource.setSource(previewFileSource.get(), 0, nullptr, sampleRate);
     previewTransportSource.setGain(juce::Decibels::decibelsToGain(browserPreviewHeadroomDb));
     currentPreviewFile = file;
     currentPreviewTempoBpm = projectState.getTempoBpm();
     currentPreviewBpmSync = browserPanel.isPreviewBpmSyncEnabled();
+    currentPreviewKeySync = browserPanel.isPreviewKeySyncEnabled();
+    currentPreviewProjectKeyRoot = projectState.isKeyEnabled() ? projectState.getKeyRoot() : -1;
     armOrStartBrowserPreview();
 }
 

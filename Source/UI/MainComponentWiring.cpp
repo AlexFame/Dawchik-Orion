@@ -474,9 +474,19 @@ void MainComponent::wireBrowserAndDialogs()
     {
         // Reload preview with the new sync mode if a sample is already loaded.
         auto selected = browserPanel.getSelectedItem();
-        if (selected.has_value() && previewBufferSource != nullptr)
+        if (selected.has_value() && (previewBufferSource != nullptr || previewFileSource != nullptr))
         {
             currentPreviewTempoBpm = 0.0;  // invalidate cache
+            playBrowserPreview(*selected);
+        }
+    };
+    browserPanel.onPreviewKeySyncToggled = [this]
+    {
+        auto selected = browserPanel.getSelectedItem();
+        if (selected.has_value() && (previewBufferSource != nullptr || previewFileSource != nullptr))
+        {
+            currentPreviewTempoBpm = 0.0;  // invalidate cache
+            currentPreviewProjectKeyRoot = -1;
             playBrowserPreview(*selected);
         }
     };

@@ -477,6 +477,8 @@ private:
     juce::File currentPreviewFile;
     double currentPreviewTempoBpm { 0.0 };
     bool   currentPreviewBpmSync { false };
+    bool   currentPreviewKeySync { false };
+    int    currentPreviewProjectKeyRoot { -1 };
     bool   currentPreviewLooping { false };
     bool   pendingBrowserPreviewStart { false };
     int    pendingBrowserPreviewGeneration { 0 };
@@ -492,7 +494,8 @@ private:
                               const juce::File& file, const juce::String& displayName);
     void startStreamingPreviewPlayback(std::unique_ptr<juce::AudioFormatReader> reader,
                                        int outputSamples, double sampleRate,
-                                       const juce::File& file, const juce::String& displayName);
+                                       const juce::File& file, const juce::String& displayName,
+                                       double pitchScale);
     std::optional<std::pair<int, int>> selectedArrangementClip;
     std::optional<std::pair<int, int>> clipEditorPreviewClip;
     std::map<std::pair<int, int>, std::pair<double, double>> clipEditorSelectionRanges;

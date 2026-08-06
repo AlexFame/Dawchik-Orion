@@ -1040,18 +1040,21 @@ void BrowserPanelComponent::paintPreviewBar(juce::Graphics& g)
         g.drawRoundedRectangle(cardF.reduced(0.5f), cardR, 1.0f);
     }
 
-    // SYNC toggle pill — sits in its own row just below the card so nothing overlaps it.
+    // Independent BPM and key sync pills. BPM uses the existing preview warp; key sync adds
+    // a pitch-preserving Rubber Band transpose to that same stream.
+    const auto paintSyncButton = [&g, &accent](juce::Rectangle<int> button, bool enabled,
+                                                const juce::String& onText, const juce::String& offText)
     {
-        const auto syncBtn = getPreviewSyncButtonBounds();
-        g.setColour(previewBpmSync ? accent.withAlpha(0.85f) : juce::Colours::white.withAlpha(0.06f));
-        g.fillRoundedRectangle(syncBtn.toFloat(), th::metrics::controlRadius);
-        g.setColour(previewBpmSync ? accent.withAlpha(0.9f) : juce::Colours::white.withAlpha(0.16f));
-        g.drawRoundedRectangle(syncBtn.toFloat().reduced(0.5f), th::metrics::controlRadius, 1.0f);
-        g.setColour(previewBpmSync ? juce::Colour(0xff10141a) : juce::Colours::white.withAlpha(0.72f));
-        g.setFont(browserFont(14.0f, juce::Font::bold));
-        g.drawText(previewBpmSync ? "SYNC TO PROJECT BPM  -  ON" : "SYNC TO PROJECT BPM  -  OFF",
-                   syncBtn, juce::Justification::centred);
-    }
+        g.setColour(enabled ? accent.withAlpha(0.85f) : juce::Colours::white.withAlpha(0.06f));
+        g.fillRoundedRectangle(button.toFloat(), th::metrics::controlRadius);
+        g.setColour(enabled ? accent.withAlpha(0.9f) : juce::Colours::white.withAlpha(0.16f));
+        g.drawRoundedRectangle(button.toFloat().reduced(0.5f), th::metrics::controlRadius, 1.0f);
+        g.setColour(enabled ? juce::Colour(0xff10141a) : juce::Colours::white.withAlpha(0.72f));
+        g.setFont(browserFont(12.0f, juce::Font::bold));
+        g.drawText(enabled ? onText : offText, button, juce::Justification::centred);
+    };
+    paintSyncButton(getPreviewSyncButtonBounds(), previewBpmSync, "BPM SYNC  -  ON", "BPM SYNC  -  OFF");
+    paintSyncButton(getPreviewKeySyncButtonBounds(), previewKeySync, "KEY SYNC  -  ON", "KEY SYNC  -  OFF");
 
     // Play / stop button.
     const auto btn = getPreviewPlayButtonBounds();
@@ -1174,13 +1177,21 @@ void BrowserPanelComponent::resized()
 
 void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
 {
-    // SYNC toggle row (below the preview card).
+    // Independent sync toggles (below the preview card).
     if (getPreviewSyncButtonBounds().contains(event.getPosition()))
     {
         previewBpmSync = !previewBpmSync;
         repaint(getPreviewSyncButtonBounds());
         if (onPreviewBpmSyncToggled)
             onPreviewBpmSyncToggled();
+        return;
+    }
+    if (getPreviewKeySyncButtonBounds().contains(event.getPosition()))
+    {
+        previewKeySync = !previewKeySync;
+        repaint(getPreviewKeySyncButtonBounds());
+        if (onPreviewKeySyncToggled)
+            onPreviewKeySyncToggled();
         return;
     }
 
@@ -2377,8 +2388,16 @@ juce::Rectangle<int> BrowserPanelComponent::getPreviewSyncButtonBounds() const n
 {
     auto bounds = getLocalBounds().reduced(contentPadX, 0);
     auto row = bounds.removeFromBottom(previewSyncRowHeight);
-    // Full-width pill (matches the card's left/right inset) with a little vertical breathing room.
-    return row.reduced(2, 3);
+    row = row.reduced(2, 3);
+    return row.removeFromLeft((row.getWidth() - 4) / 2);
+}
+
+juce::Rectangle<int> BrowserPanelComponent::getPreviewKeySyncButtonBounds() const noexcept
+{
+    auto bounds = getLocalBounds().reduced(contentPadX, 0);
+    auto row = bounds.removeFromBottom(previewSyncRowHeight).reduced(2, 3);
+    row.removeFromLeft((row.getWidth() - 4) / 2 + 4);
+    return row;
 }
 
 juce::Rectangle<int> BrowserPanelComponent::getPreviewWaveformBounds() const noexcept

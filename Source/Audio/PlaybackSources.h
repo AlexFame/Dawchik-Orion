@@ -161,12 +161,14 @@ class StreamingFilePreviewSource final : public juce::PositionableAudioSource,
 {
 public:
     StreamingFilePreviewSource(std::unique_ptr<juce::AudioFormatReader> formatReader,
-                               int outputSamples, double outputSampleRate, bool shouldLoop)
+                               int outputSamples, double outputSampleRate, bool shouldLoop,
+                               double pitchScaleIn = 1.0)
         : juce::Thread("BrowserPreviewReader"),
           reader(std::move(formatReader)),
           sampleRate(outputSampleRate > 0.0 ? outputSampleRate : 44100.0),
           totalOut(juce::jmax(1, outputSamples)),
-          looping(shouldLoop)
+          looping(shouldLoop),
+          pitchScale(juce::jlimit(0.25, 4.0, pitchScaleIn))
     {
         channels = juce::jlimit(1, 2, static_cast<int>(reader != nullptr ? reader->numChannels : 1));
         sourceSamples = reader != nullptr ? juce::jmax<juce::int64>(1, reader->lengthInSamples) : 1;
@@ -192,7 +194,8 @@ public:
         if (reader == nullptr)
             return;
 
-        if (std::abs(sourceSamples - static_cast<juce::int64>(totalOut)) <= 1)
+        if (std::abs(sourceSamples - static_cast<juce::int64>(totalOut)) <= 1
+            && std::abs(pitchScale - 1.0) < 0.000001)
         {
             int produced = 0;
             while (produced < totalOut && ! threadShouldExit())
@@ -214,7 +217,7 @@ public:
                            | RB::OptionDetectorCompound;
         RB stretcher(static_cast<std::size_t>(std::llround(sampleRate)),
                      static_cast<std::size_t>(channels), options,
-                     static_cast<double>(totalOut) / static_cast<double>(sourceSamples), 1.0);
+                     static_cast<double>(totalOut) / static_cast<double>(sourceSamples), pitchScale);
         stretcher.setMaxProcessSize(blockSize);
 
         juce::AudioBuffer<float> inputBlock(channels, blockSize);
@@ -348,6 +351,7 @@ private:
     int totalOut { 1 };
     int channels { 1 };
     bool looping { false };
+    double pitchScale { 1.0 };
     juce::AudioBuffer<float> out;
     std::atomic<int> producedSamples { 0 };
     std::atomic<juce::int64> positionSamples { 0 };

@@ -55,9 +55,11 @@ public:
     std::function<void()>                   onPreviewCleared;
     // Fired when the SYNC toggle is clicked — caller should reload the preview buffer.
     std::function<void()>                   onPreviewBpmSyncToggled;
+    std::function<void()>                   onPreviewKeySyncToggled;
     std::function<void(const juce::File&)>  onRootFolderChosen;
 
     bool isPreviewBpmSyncEnabled() const noexcept { return previewBpmSync; }
+    bool isPreviewKeySyncEnabled() const noexcept { return previewKeySync; }
 
     std::optional<BrowserItem> getSelectedItem() const;
     // The user's added library folders — "find similar" spans ALL of these, not just the open folder.
@@ -155,6 +157,7 @@ private:
     juce::Rectangle<int> getPreviewBarBounds() const noexcept;
     juce::Rectangle<int> getPreviewPlayButtonBounds() const noexcept;
     juce::Rectangle<int> getPreviewSyncButtonBounds() const noexcept;
+    juce::Rectangle<int> getPreviewKeySyncButtonBounds() const noexcept;
     juce::Rectangle<int> getPreviewWaveformBounds() const noexcept;
     void paintPreviewBar(juce::Graphics& g);
     void paintTagsRow(juce::Graphics& g);
@@ -256,5 +259,6 @@ private:
     // On by default, matching Ableton, whose Raw switch (the inverse of this) is off by default:
     // previews warp to the project tempo, loop, and launch on the next bar.
     bool                previewBpmSync { true };
+    bool                previewKeySync { false };
 };
 }  // namespace orion
