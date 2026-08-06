@@ -1921,9 +1921,10 @@ void MainComponent::resized()
     const auto arrangementArea = bottomPanelOpen ? openArrangementArea : closedArrangementArea;
 
     arrangementTimeline.setBounds(arrangementArea);
-    // Any open lower panel (sampler / clip editor / step sequencer) compresses the track lanes
-    // so every track stays visible instead of being covered by the panel.
-    arrangementTimeline.setFitTrackLanesToVisibleArea(bottomPanelOpen);
+    // Lower panels consume space below the arrangement. Keep the track lane geometry stable when
+    // they open or close: redistributing every lane to fit the new viewport makes the playlist
+    // jump vertically even when there is plenty of unused space below the last track.
+    arrangementTimeline.setFitTrackLanesToVisibleArea(false);
 
     if (browserPanelShown())
     {
