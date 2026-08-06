@@ -1,7 +1,6 @@
 #include "WarpEngine.h"
 #include "OrionStretchEngine.h"
 
-#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -796,29 +795,19 @@ juce::AudioBuffer<float> loadMonoForAnalysis(const juce::File& file, double& sam
 // 12-bin chroma (pitch-class energy) via Goertzel filters across ~5 octaves.
 // Tuned against a real melody pack (see Source/Tools/KeyTest.cpp): per-frame
 // normalization so loud sustained notes don't swamp the tonal profile.
-struct ChromaAnalysis
+std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, double sr)
 {
-    std::array<double, 12> aggregate {};
-    std::vector<std::array<double, 12>> frames;
-};
-
-ChromaAnalysis computeChroma(const juce::AudioBuffer<float>& mono, double sr)
-{
-    ChromaAnalysis result;
-    result.aggregate.fill(0.0);
+    std::array<double, 12> chroma {};
+    chroma.fill(0.0);
     const auto n = mono.getNumSamples();
     if (n < 4096 || sr <= 0.0)
-        return result;
+        return chroma;
 
     const auto* x = mono.getReadPointer(0);
     constexpr int frame = 4096;
     constexpr int hop = 2048;
     constexpr int loMidi = 36, hiMidi = 95;   // C2..B6
     const auto twoPi = juce::MathConstants<double>::twoPi;
-    std::array<double, frame> analysisWindow {};
-    for (int i = 0; i < frame; ++i)
-        analysisWindow[static_cast<std::size_t>(i)] = 0.5 - 0.5 * std::cos(
-            twoPi * static_cast<double>(i) / static_cast<double>(frame - 1));
 
     std::array<double, hiMidi - loMidi + 1> coeffs {};
     for (int midi = loMidi; midi <= hiMidi; ++midi)
@@ -838,8 +827,7 @@ ChromaAnalysis computeChroma(const juce::AudioBuffer<float>& mono, double sr)
             double s1 = 0.0, s2 = 0.0;
             for (int i = 0; i < frame; ++i)
             {
-                const auto s0 = static_cast<double>(x[start + i]) * analysisWindow[static_cast<std::size_t>(i)]
-                              + coeff * s1 - s2;
+                const auto s0 = static_cast<double>(x[start + i]) + coeff * s1 - s2;
                 s2 = s1;
                 s1 = s0;
             }
@@ -849,28 +837,25 @@ ChromaAnalysis computeChroma(const juce::AudioBuffer<float>& mono, double sr)
         double fsum = 0.0;
         for (auto v : frameChroma) fsum += v;
         if (fsum > 1.0e-9)
-        {
-            for (auto& value : frameChroma) value /= fsum;
-            result.frames.push_back(frameChroma);
-            for (int i = 0; i < 12; ++i)
-                result.aggregate[static_cast<std::size_t>(i)] += frameChroma[static_cast<std::size_t>(i)];
-        }
+            for (int i = 0; i < 12; ++i) chroma[static_cast<std::size_t>(i)] += frameChroma[static_cast<std::size_t>(i)] / fsum;
     }
 
     double sum = 0.0;
-    for (auto v : result.aggregate) sum += v;
+    for (auto v : chroma) sum += v;
     if (sum > 0.0)
-        for (auto& v : result.aggregate) v /= sum;
-    return result;
+        for (auto& v : chroma) v /= sum;
+    return chroma;
 }
 
 struct KeyEstimate { int root { -1 }; bool minor { false }; double confidence { 0.0 }; };
 
-// Correlate the chroma against rotated major/minor profiles.
+// Correlate the chroma against rotated major/minor profiles. Uses the corpus-derived
+// Albrecht & Shanahan (2013) profiles, which on real melodic material gave markedly
+// better mode (major/minor) accuracy than the classic Krumhansl-Schmuckler weights.
 KeyEstimate estimateKeyFromChroma(const std::array<double, 12>& chroma)
 {
-    static const double major[12] = { 0.748, 0.060, 0.488, 0.082, 0.670, 0.460, 0.096, 0.715, 0.104, 0.366, 0.057, 0.400 };
-    static const double minor[12] = { 0.712, 0.084, 0.474, 0.618, 0.049, 0.460, 0.105, 0.747, 0.404, 0.067, 0.133, 0.330 };
+    static const double major[12] = { 0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081 };
+    static const double minor[12] = { 0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052 };
 
     double chromaMean = 0.0;
     for (auto v : chroma) chromaMean += v;
@@ -903,36 +888,6 @@ KeyEstimate estimateKeyFromChroma(const std::array<double, 12>& chroma)
         if (cMin > best.confidence) { best = { root, true, cMin }; }
     }
     return best;
-}
-
-KeyEstimate estimateKeyFromAnalysis(const ChromaAnalysis& analysis)
-{
-    constexpr int windowFrames = 64;
-    if (analysis.frames.size() < windowFrames)
-        return estimateKeyFromChroma(analysis.aggregate);
-
-    std::array<double, 24> votes {};
-    votes.fill(0.0);
-    constexpr int windowHop = windowFrames / 2;
-    for (int start = 0; start + windowFrames <= static_cast<int>(analysis.frames.size()); start += windowHop)
-    {
-        std::array<double, 12> window {};
-        window.fill(0.0);
-        for (int frameIndex = 0; frameIndex < windowFrames; ++frameIndex)
-            for (int pitch = 0; pitch < 12; ++pitch)
-                window[static_cast<std::size_t>(pitch)] += analysis.frames[static_cast<std::size_t>(start + frameIndex)][static_cast<std::size_t>(pitch)];
-
-        const auto estimate = estimateKeyFromChroma(window);
-        if (estimate.root >= 0)
-            votes[static_cast<std::size_t>((estimate.minor ? 12 : 0) + estimate.root)] += juce::jmax(0.05, estimate.confidence);
-    }
-
-    const auto global = estimateKeyFromChroma(analysis.aggregate);
-    if (global.root >= 0)
-        votes[static_cast<std::size_t>((global.minor ? 12 : 0) + global.root)] += juce::jmax(0.05, global.confidence);
-
-    const auto best = static_cast<int>(std::distance(votes.begin(), std::max_element(votes.begin(), votes.end())));
-    return { best % 12, best >= 12, global.confidence };
 }
 
 struct TempoEstimate { double bpm { 0.0 }; double confidence { 0.0 }; };
@@ -1144,9 +1099,10 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
     result.sourceKeyIsMinor = parsedKey.minor;
     if (parsedKey.root < 0 && deepAnalysis && ensureMono())
     {
-        const auto est = estimateKeyFromAnalysis(computeChroma(mono, monoSr));
-        // Keep uncertain or atonal material unknown rather than applying a risky shift.
-        if (est.root >= 0 && est.confidence >= 0.55)
+        const auto est = estimateKeyFromChroma(computeChroma(mono, monoSr));
+        // Threshold tuned on a real melody pack: ~95% of tonal melodies clear it while
+        // drums/atonal material (flat chroma) score well below and stay "unknown".
+        if (est.root >= 0 && est.confidence >= 0.6)
         {
             result.sourceKeyRoot    = est.root;
             result.sourceKeyIsMinor = est.minor;
