@@ -1538,6 +1538,12 @@ public:
     struct WarpStream
     {
         signalsmith::stretch::SignalsmithStretch<float> stretch;
+#if ORION_HAVE_RUBBERBAND
+        std::unique_ptr<RubberBand::RubberBandStretcher> realtimeStretch;
+        int startPadRemaining { 0 };
+        int startDelayRemaining { 0 };
+        bool finalInputSent { false };
+#endif
         AudioFileData out;                       // out.buffer (targetSamples): producer writes, audio reads
         const AudioFileData* original { nullptr };
         int targetSamples { 0 };
@@ -1614,8 +1620,25 @@ public:
                 s->targetSamples = targetSamples;
                 s->sourcePath = clip.sourcePath;
                 s->semis = semis;
+#if ORION_HAVE_RUBBERBAND
+                using RB = RubberBand::RubberBandStretcher;
+                const auto options = RB::OptionProcessRealTime
+                                   | RB::OptionEngineFiner
+                                   | RB::OptionTransientsCrisp
+                                   | RB::OptionDetectorCompound;
+                const auto timeRatio = static_cast<double>(targetSamples)
+                                     / static_cast<double>(s->originalSamples);
+                const auto pitchScale = std::pow(2.0, static_cast<double>(semis) / 12.0);
+                s->realtimeStretch = std::make_unique<RB>(
+                    static_cast<std::size_t>(std::llround(original->sampleRate)),
+                    static_cast<std::size_t>(s->channels), options, timeRatio, pitchScale);
+                s->realtimeStretch->setMaxProcessSize(2048);
+                s->startPadRemaining = static_cast<int>(s->realtimeStretch->getPreferredStartPad());
+                s->startDelayRemaining = static_cast<int>(s->realtimeStretch->getStartDelay());
+#else
                 s->stretch.presetDefault(s->channels, static_cast<float>(original->sampleRate));
                 s->stretch.setTransposeSemitones(static_cast<float>(semis));
+#endif
                 s->out.sampleRate = original->sampleRate;
                 s->out.buffer.setSize(s->channels, targetSamples);
                 s->out.buffer.clear();
@@ -1871,6 +1894,89 @@ public:
             return;
         want = juce::jmin(want, s.targetSamples);
         const int ch = s.channels;
+#if ORION_HAVE_RUBBERBAND
+        if (s.realtimeStretch != nullptr)
+        {
+            constexpr int blockSize = 2048;
+            if (warpProducerScratch.getNumSamples() < blockSize)
+                warpProducerScratch.setSize(2, blockSize, false, false, true);
+            if (warpProducerRetrieveScratch.getNumSamples() < blockSize)
+                warpProducerRetrieveScratch.setSize(2, blockSize, false, false, true);
+
+            int produced = s.producedSamples.load(std::memory_order_relaxed);
+            const int stepTarget = juce::jmin(want, produced + 32768);
+            const auto drainOutput = [&]
+            {
+                while (produced < stepTarget)
+                {
+                    const auto available = s.realtimeStretch->available();
+                    if (available <= 0)
+                        break;
+
+                    const auto usefulRemaining = stepTarget - produced;
+                    const auto count = juce::jmin(blockSize,
+                                                  juce::jmin(available, s.startDelayRemaining + usefulRemaining));
+                    float* outputPointers[2] = {
+                        warpProducerRetrieveScratch.getWritePointer(0),
+                        ch > 1 ? warpProducerRetrieveScratch.getWritePointer(1) : nullptr
+                    };
+                    const auto retrieved = static_cast<int>(s.realtimeStretch->retrieve(outputPointers, count));
+                    if (retrieved <= 0)
+                        break;
+
+                    const auto skip = juce::jmin(s.startDelayRemaining, retrieved);
+                    s.startDelayRemaining -= skip;
+                    const auto copyCount = juce::jmin(retrieved - skip, stepTarget - produced);
+                    if (copyCount > 0)
+                    {
+                        for (int c = 0; c < ch; ++c)
+                            s.out.buffer.copyFrom(c, produced, warpProducerRetrieveScratch, c, skip, copyCount);
+                        produced += copyCount;
+                        s.producedSamples.store(produced, std::memory_order_release);
+                    }
+                }
+            };
+
+            while (produced < stepTarget)
+            {
+                drainOutput();
+                if (produced >= stepTarget || s.finalInputSent)
+                    break;
+
+                int count = 0;
+                bool final = false;
+                const float* inputPointers[2] = { nullptr, nullptr };
+                if (s.startPadRemaining > 0)
+                {
+                    count = juce::jmin(blockSize, s.startPadRemaining);
+                    warpProducerScratch.clear();
+                    inputPointers[0] = warpProducerScratch.getReadPointer(0);
+                    inputPointers[1] = ch > 1 ? warpProducerScratch.getReadPointer(1) : nullptr;
+                    s.startPadRemaining -= count;
+                }
+                else
+                {
+                    count = juce::jmin(blockSize, s.originalSamples - s.inputPos);
+                    if (count <= 0)
+                    {
+                        s.finalInputSent = true;
+                        break;
+                    }
+                    inputPointers[0] = s.original->buffer.getReadPointer(0, s.inputPos);
+                    inputPointers[1] = ch > 1
+                        ? s.original->buffer.getReadPointer(juce::jmin(1, s.original->buffer.getNumChannels() - 1), s.inputPos)
+                        : nullptr;
+                    s.inputPos += count;
+                    final = s.inputPos >= s.originalSamples;
+                    s.finalInputSent = final;
+                }
+
+                s.realtimeStretch->process(inputPointers, static_cast<std::size_t>(count), final);
+            }
+            drainOutput();
+            return;
+        }
+#endif
         const double inRatio = static_cast<double>(s.originalSamples) / juce::jmax(1, s.targetSamples);
 
         if (warpProducerScratch.getNumSamples() < 4096)
@@ -3312,6 +3418,7 @@ private:
     std::thread warpOfflineThread;            // separate thread: heavy RubberBand renders
     juce::WaitableEvent warpOfflineWake;
     juce::AudioBuffer<float> warpProducerScratch;   // producer-thread input scratch
+    juce::AudioBuffer<float> warpProducerRetrieveScratch;
     std::atomic<bool> realtimeWarpEnabled { true };
 
     juce::CriticalSection instrumentLock;
