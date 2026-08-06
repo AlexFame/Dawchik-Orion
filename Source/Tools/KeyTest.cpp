@@ -12,6 +12,7 @@
 #include <juce_core/juce_core.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -23,6 +24,10 @@ namespace
 // artifacts — so the default is 0 (disabled), matching the shipping engine.
 double g_b3 = 0.0;   // 3rd-harmonic (fifth) suppression
 double g_b5 = 0.0;   // 5th-harmonic (major third) suppression
+int g_profile = 2;
+double g_rootWeight = 0.0;
+int g_temporalWindowFrames = 64;
+bool g_useHannWindow = true;
 
 juce::AudioBuffer<float> loadMonoForAnalysis(const juce::File& file, double& sampleRateOut, double maxSeconds = 30.0)
 {
@@ -54,7 +59,8 @@ juce::AudioBuffer<float> loadMonoForAnalysis(const juce::File& file, double& sam
 }
 
 // ---- TUNABLE: chroma extraction ----
-std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, double sr)
+std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, double sr,
+                                     std::vector<std::array<double, 12>>* frameHistory = nullptr)
 {
     std::array<double, 12> chroma {};
     chroma.fill(0.0);
@@ -67,6 +73,11 @@ std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, doubl
     constexpr int hop = 2048;
     constexpr int loMidi = 36, hiMidi = 95;   // C2..B6
     const auto twoPi = juce::MathConstants<double>::twoPi;
+    std::array<double, frame> analysisWindow {};
+    for (int i = 0; i < frame; ++i)
+        analysisWindow[static_cast<std::size_t>(i)] = g_useHannWindow
+            ? 0.5 - 0.5 * std::cos(twoPi * static_cast<double>(i) / static_cast<double>(frame - 1))
+            : 1.0;
 
     // Precompute Goertzel coefficients per note.
     std::array<double, hiMidi - loMidi + 1> coeffs {};
@@ -96,7 +107,7 @@ std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, doubl
             double s1 = 0.0, s2 = 0.0;
             for (int i = 0; i < frame; ++i)
             {
-                const auto s0 = static_cast<double>(x[start + i]) + coeff * s1 - s2;
+                const auto s0 = static_cast<double>(x[start + i]) * analysisWindow[static_cast<std::size_t>(i)] + coeff * s1 - s2;
                 s2 = s1;
                 s1 = s0;
             }
@@ -117,7 +128,11 @@ std::array<double, 12> computeChroma(const juce::AudioBuffer<float>& mono, doubl
         double fsum = 0.0;
         for (auto v : frameChroma) fsum += v;
         if (fsum > 1.0e-9)
-            for (int i = 0; i < 12; ++i) chroma[static_cast<std::size_t>(i)] += frameChroma[static_cast<std::size_t>(i)] / fsum;
+        {
+            for (auto& value : frameChroma) value /= fsum;
+            if (frameHistory != nullptr) frameHistory->push_back(frameChroma);
+            for (int i = 0; i < 12; ++i) chroma[static_cast<std::size_t>(i)] += frameChroma[static_cast<std::size_t>(i)];
+        }
     }
 
     double sum = 0.0;
@@ -132,13 +147,26 @@ struct KeyEstimate { int root { -1 }; bool minor { false }; double confidence { 
 // ---- TUNABLE: profiles + correlation ----
 KeyEstimate estimateKeyFromChroma(const std::array<double, 12>& chroma)
 {
-    // Albrecht & Shanahan (2013) corpus-derived key profiles.
-    static const double major[12] = { 0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081 };
-    static const double minor[12] = { 0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052 };
+    static const double majorProfiles[][12] = {
+        { 0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081 },
+        { 6.350, 2.230, 3.480, 2.330, 4.380, 4.090, 2.520, 5.190, 2.390, 3.660, 2.290, 2.880 },
+        { 0.748, 0.060, 0.488, 0.082, 0.670, 0.460, 0.096, 0.715, 0.104, 0.366, 0.057, 0.400 }
+    };
+    static const double minorProfiles[][12] = {
+        { 0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052 },
+        { 6.330, 2.680, 3.520, 5.380, 2.600, 3.530, 2.540, 4.750, 3.980, 2.690, 3.340, 3.170 },
+        { 0.712, 0.084, 0.474, 0.618, 0.049, 0.460, 0.105, 0.747, 0.404, 0.067, 0.133, 0.330 }
+    };
+    const auto profileIndex = juce::jlimit(0, 2, g_profile);
+    const auto* major = majorProfiles[profileIndex];
+    const auto* minor = minorProfiles[profileIndex];
 
     double chromaMean = 0.0;
     for (auto v : chroma) chromaMean += v;
     chromaMean /= 12.0;
+    double chromaVariance = 0.0;
+    for (auto v : chroma) chromaVariance += (v - chromaMean) * (v - chromaMean);
+    const auto chromaStdDev = std::sqrt(chromaVariance / 12.0);
 
     const auto correlate = [&](const double* profile, int rotation)
     {
@@ -161,24 +189,73 @@ KeyEstimate estimateKeyFromChroma(const std::array<double, 12>& chroma)
     KeyEstimate best;
     for (int root = 0; root < 12; ++root)
     {
-        const auto cMaj = correlate(major, root);
+        const auto rootPrior = chromaStdDev > 0.0
+                             ? (chroma[static_cast<std::size_t>(root)] - chromaMean) / chromaStdDev
+                             : 0.0;
+        const auto cMaj = correlate(major, root) + g_rootWeight * rootPrior;
         if (cMaj > best.confidence) best = { root, false, cMaj };
-        const auto cMin = correlate(minor, root);
+        const auto cMin = correlate(minor, root) + g_rootWeight * rootPrior;
         if (cMin > best.confidence) best = { root, true, cMin };
     }
     return best;
 }
 
+KeyEstimate estimateKeyFromWindows(const std::array<double, 12>& globalChroma,
+                                   const std::vector<std::array<double, 12>>& frames)
+{
+    if (g_temporalWindowFrames <= 0 || frames.size() < static_cast<std::size_t>(g_temporalWindowFrames))
+        return estimateKeyFromChroma(globalChroma);
+
+    std::array<double, 24> votes {};
+    votes.fill(0.0);
+    const auto hop = juce::jmax(1, g_temporalWindowFrames / 2);
+    for (int start = 0; start + g_temporalWindowFrames <= static_cast<int>(frames.size()); start += hop)
+    {
+        std::array<double, 12> window {};
+        window.fill(0.0);
+        for (int frameIndex = 0; frameIndex < g_temporalWindowFrames; ++frameIndex)
+            for (int pitch = 0; pitch < 12; ++pitch)
+                window[static_cast<std::size_t>(pitch)] += frames[static_cast<std::size_t>(start + frameIndex)][static_cast<std::size_t>(pitch)];
+
+        const auto estimate = estimateKeyFromChroma(window);
+        if (estimate.root >= 0)
+            votes[static_cast<std::size_t>((estimate.minor ? 12 : 0) + estimate.root)] += juce::jmax(0.05, estimate.confidence);
+    }
+
+    const auto global = estimateKeyFromChroma(globalChroma);
+    if (global.root >= 0)
+        votes[static_cast<std::size_t>((global.minor ? 12 : 0) + global.root)] += juce::jmax(0.05, global.confidence);
+
+    const auto best = static_cast<int>(std::distance(votes.begin(), std::max_element(votes.begin(), votes.end())));
+    return { best % 12, best >= 12, global.confidence };
+}
+
 // Ground-truth key from a Cymatics-style name: "... 140 BPM F Min.wav".
 KeyEstimate parseTruth(const juce::File& file)
 {
-    auto t = juce::String(' ') + file.getFileNameWithoutExtension().toLowerCase() + juce::String(' ');
     const auto semi = [](juce::juce_wchar c) -> int
     {
         switch (c) { case 'c': return 0; case 'd': return 2; case 'e': return 4; case 'f': return 5;
                      case 'g': return 7; case 'a': return 9; case 'b': return 11; }
         return -1;
     };
+
+    // Splice-style packs commonly keep the key as a strict final token:
+    // "..._150_Em.wav" or "..._150_E.wav".
+    const auto baseName = file.getFileNameWithoutExtension().toLowerCase();
+    const auto suffix = baseName.fromLastOccurrenceOf("_", false, false);
+    if (suffix.length() >= 1 && suffix.length() <= 3)
+    {
+        auto root = semi(suffix[0]);
+        auto pos = 1;
+        if (root >= 0 && pos < suffix.length() && suffix[pos] == '#') { root = (root + 1) % 12; ++pos; }
+        else if (root >= 0 && pos < suffix.length() && suffix[pos] == 'b') { root = (root + 11) % 12; ++pos; }
+
+        if (root >= 0 && (pos == suffix.length() || (pos + 1 == suffix.length() && suffix[pos] == 'm')))
+            return { root, pos < suffix.length(), 1.0 };
+    }
+
+    auto t = juce::String(' ') + baseName + juce::String(' ');
     for (int i = 1; i + 1 < t.length(); ++i)
     {
         if (t[i - 1] != ' ') continue;
@@ -206,6 +283,10 @@ int main(int argc, char* argv[])
     const double confThreshold = argc >= 3 ? juce::String(argv[2]).getDoubleValue() : 0.0;
     if (argc >= 4) g_b3 = juce::String(argv[3]).getDoubleValue();
     if (argc >= 5) g_b5 = juce::String(argv[4]).getDoubleValue();
+    if (argc >= 6) g_profile = juce::String(argv[5]).getIntValue();
+    if (argc >= 7) g_rootWeight = juce::String(argv[6]).getDoubleValue();
+    if (argc >= 8) g_temporalWindowFrames = juce::String(argv[7]).getIntValue();
+    if (argc >= 9) g_useHannWindow = juce::String(argv[8]).getIntValue() != 0;
 
     auto files = folder.findChildFiles(juce::File::findFiles, true, "*.wav;*.aif;*.aiff");
     files.sort();
@@ -227,7 +308,9 @@ int main(int argc, char* argv[])
         double sr = 0.0;
         auto mono = loadMonoForAnalysis(f, sr);
         if (mono.getNumSamples() == 0 || sr <= 0.0) continue;
-        const auto est = estimateKeyFromChroma(computeChroma(mono, sr));
+        std::vector<std::array<double, 12>> frameHistory;
+        const auto chroma = computeChroma(mono, sr, &frameHistory);
+        const auto est = estimateKeyFromWindows(chroma, frameHistory);
 
         const bool isExact = est.root == truth.root && est.minor == truth.minor;
         // relative major/minor: minor i <-> relative major at +3
