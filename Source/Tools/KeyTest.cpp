@@ -244,15 +244,17 @@ KeyEstimate parseTruth(const juce::File& file)
     // "..._150_Em.wav" or "..._150_E.wav".
     const auto baseName = file.getFileNameWithoutExtension().toLowerCase();
     const auto suffix = baseName.fromLastOccurrenceOf("_", false, false);
-    if (suffix.length() >= 1 && suffix.length() <= 3)
+    if (suffix.length() >= 1 && suffix.length() <= 6)
     {
         auto root = semi(suffix[0]);
         auto pos = 1;
         if (root >= 0 && pos < suffix.length() && suffix[pos] == '#') { root = (root + 1) % 12; ++pos; }
         else if (root >= 0 && pos < suffix.length() && suffix[pos] == 'b') { root = (root + 11) % 12; ++pos; }
 
-        if (root >= 0 && (pos == suffix.length() || (pos + 1 == suffix.length() && suffix[pos] == 'm')))
-            return { root, pos < suffix.length(), 1.0 };
+        const auto mode = suffix.substring(pos);
+        if (root >= 0 && (mode.isEmpty() || mode == "m" || mode == "min" || mode == "minor"
+                         || mode == "maj" || mode == "major"))
+            return { root, mode == "m" || mode == "min" || mode == "minor", 1.0 };
     }
 
     auto t = juce::String(' ') + baseName + juce::String(' ');
