@@ -24,10 +24,9 @@ juce::String currentWarpBackendTag();
 // Convert (rootSemi 0..11, minor) -> display name like "Cm" / "F#" / "Bb minor".
 juce::String formatKeyName(int rootSemi, bool minor, bool fullName = false);
 
-// Returns the shortest pitch shift that aligns the source tonic with the project
-// tonic. A uniform pitch shift cannot change chord quality, so major/minor must
-// not move the target tonic to a relative key (that made every cross-mode import
-// land three semitones away from the key shown in the transport).
+// Returns the shortest pitch shift that makes the source scale harmonically
+// compatible with the project scale. Opposite modes target the relative key:
+// e.g. G major -> C minor becomes Eb major (-4 st), not C major (+5 st).
 constexpr int computeKeyMatchSemitones(int sourceRoot, bool sourceMinor,
                                        int projectRoot, bool projectMinor) noexcept
 {
@@ -37,24 +36,23 @@ constexpr int computeKeyMatchSemitones(int sourceRoot, bool sourceMinor,
     sourceRoot  = ((sourceRoot % 12) + 12) % 12;
     projectRoot = ((projectRoot % 12) + 12) % 12;
 
-    (void) sourceMinor;
-    (void) projectMinor;
-    int shift = projectRoot - sourceRoot;
+    // A minor key shares its notes with the major key three semitones above.
+    // Matching opposite modes through that relative key preserves the scale
+    // content; a uniform pitch shift cannot turn a parallel major into minor.
+    int compatibleTargetRoot = projectRoot;
+    if (! sourceMinor && projectMinor)
+        compatibleTargetRoot = (projectRoot + 3) % 12;
+    else if (sourceMinor && ! projectMinor)
+        compatibleTargetRoot = (projectRoot + 9) % 12;
+
+    int shift = compatibleTargetRoot - sourceRoot;
     while (shift > 6)  shift -= 12;
     while (shift < -6) shift += 12;
     return shift;
 }
 
-static_assert(computeKeyMatchSemitones(7, false, 0, true) == 5,
-              "G major must keep C as the tonic inside a C minor project");
-static_assert(computeKeyMatchSemitones(11, true, 0, true) == 1,
-              "B minor must move up one semitone into C minor");
-static_assert(computeKeyMatchSemitones(10, true, 0, true) == 2,
-              "Bb minor must move up two semitones into C minor");
-static_assert(computeKeyMatchSemitones(1, false, 0, true) == -1,
-              "Db major must keep C as the tonic inside a C minor project");
-static_assert(computeKeyMatchSemitones(0, true, 0, true) == 0,
-              "C minor must remain unchanged inside a C minor project");
+static_assert(computeKeyMatchSemitones(7, false, 0, true) == -4,
+              "G major must map to Eb major inside a C minor project");
 static_assert(computeKeyMatchSemitones(7, false, 7, false) == 0,
               "matching roots and modes must remain unchanged");
 

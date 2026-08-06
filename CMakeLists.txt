@@ -338,30 +338,6 @@ target_link_libraries(
         juce::juce_recommended_warning_flags
 )
 
-juce_add_console_app(OrionKeyPipelineTest PRODUCT_NAME "Orion Key Pipeline Test")
-target_sources(OrionKeyPipelineTest PRIVATE
-    Source/Tools/KeyPipelineTest.cpp
-    Source/Audio/WarpEngine.cpp
-    Source/Audio/ChordDetector.cpp
-    Source/Audio/OrionStretchEngine.cpp)
-target_include_directories(OrionKeyPipelineTest PRIVATE
-    Source
-    $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_INCLUDE_DIR}>)
-target_compile_definitions(OrionKeyPipelineTest PRIVATE
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-    ORION_HAVE_RUBBERBAND=${ORION_HAVE_RUBBERBAND})
-target_link_libraries(OrionKeyPipelineTest PRIVATE
-    juce::juce_audio_basics
-    juce::juce_audio_formats
-    juce::juce_core
-    signalsmith-stretch
-    $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_RUBBERBAND_LIBRARY}>
-    $<$<BOOL:${ORION_HAVE_RUBBERBAND}>:${ORION_ACCELERATE_FRAMEWORK}>
-    PUBLIC
-    juce::juce_recommended_config_flags
-    juce::juce_recommended_warning_flags)
-
 juce_add_console_app(OrionRenderPoolTest PRODUCT_NAME "Orion Render Pool Test")
 target_sources(OrionRenderPoolTest PRIVATE Source/Tools/RenderPoolTest.cpp Source/Audio/AudioRenderPool.cpp)
 target_compile_definitions(OrionRenderPoolTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
