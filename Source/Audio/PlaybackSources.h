@@ -150,9 +150,8 @@ private:
 };
 
 // File-backed browser preview. The audio thread only copies samples that the
-// producer has already decoded; the producer reads and resamples the file in
-// small chunks, so the same preview starts quickly and keeps filling without a
-// later raw-to-warped source swap.
+// producer has already decoded. Tempo-synced previews use pitch-preserving
+// time-stretching; unsynced previews are decoded without DSP.
 class StreamingFilePreviewSource final : public juce::PositionableAudioSource,
                                           private juce::Thread
 {
@@ -189,35 +188,70 @@ public:
         if (reader == nullptr)
             return;
 
-        const auto ratio = static_cast<double>(sourceSamples) / static_cast<double>(totalOut);
-        juce::AudioBuffer<float> sourceChunk(channels, 4098);
+        if (std::abs(sourceSamples - static_cast<juce::int64>(totalOut)) <= 1)
+        {
+            int produced = 0;
+            while (produced < totalOut && ! threadShouldExit())
+            {
+                const auto count = juce::jmin(2048, totalOut - produced);
+                reader->read(&out, produced, count, produced, true, true);
+                produced += count;
+                producedSamples.store(produced, std::memory_order_release);
+            }
+            return;
+        }
+
+        const auto inputPerOutput = static_cast<double>(sourceSamples) / static_cast<double>(totalOut);
+        signalsmith::stretch::SignalsmithStretch<float> stretch;
+        stretch.presetDefault(channels, static_cast<float>(sampleRate));
+        stretch.setTransposeFactor(1.0f); // Browser tempo sync must never alter the source pitch.
+
+        juce::int64 inputPosition = 0;
+        const auto sourceSamplesInt = static_cast<int>(juce::jmin<juce::int64>(
+            sourceSamples, static_cast<juce::int64>(std::numeric_limits<int>::max())));
+        const auto seekLength = juce::jmin(sourceSamplesInt,
+                                           stretch.outputSeekLength(static_cast<float>(inputPerOutput)));
+        if (seekLength > 0)
+        {
+            juce::AudioBuffer<float> seekBuffer(channels, seekLength);
+            seekBuffer.clear();
+            reader->read(&seekBuffer, 0, seekLength, 0, true, true);
+            const float* seekPointers[2] = {
+                seekBuffer.getReadPointer(0),
+                channels > 1 ? seekBuffer.getReadPointer(1) : nullptr
+            };
+            stretch.outputSeek(seekPointers, seekLength);
+            inputPosition = seekLength;
+        }
+
+        juce::AudioBuffer<float> sourceChunk(channels, 4096);
+        const auto sourceChunkCapacity = sourceChunk.getNumSamples();
 
         int produced = 0;
         while (produced < totalOut && ! threadShouldExit())
         {
-            const auto outCount = juce::jmin(2048, totalOut - produced);
-            const auto sourceStart = static_cast<juce::int64>(std::floor(produced * ratio));
-            const auto sourceEnd = juce::jmin(sourceSamples,
-                                              static_cast<juce::int64>(std::ceil((produced + outCount) * ratio)) + 2);
-            const auto sourceCount = static_cast<int>(juce::jmax<juce::int64>(1, sourceEnd - sourceStart));
-
-            sourceChunk.setSize(channels, sourceCount, false, false, true);
+            const auto maxOutputForInputBuffer = inputPerOutput > 1.0
+                                               ? juce::jmax(1, static_cast<int>(sourceChunkCapacity / inputPerOutput))
+                                               : 2048;
+            const auto outCount = juce::jmin(juce::jmin(2048, maxOutputForInputBuffer), totalOut - produced);
+            const auto sourceCount = juce::jlimit(
+                1, sourceChunkCapacity, static_cast<int>(std::llround(outCount * inputPerOutput)));
             sourceChunk.clear();
-            reader->read(&sourceChunk, 0, sourceCount, sourceStart, true, true);
+            const auto available = static_cast<int>(juce::jmax<juce::int64>(
+                0, juce::jmin<juce::int64>(sourceCount, sourceSamples - inputPosition)));
+            if (available > 0)
+                reader->read(&sourceChunk, 0, available, inputPosition, true, true);
+            inputPosition += sourceCount;
 
-            for (int c = 0; c < channels; ++c)
-            {
-                auto* dst = out.getWritePointer(c) + produced;
-                const auto* src = sourceChunk.getReadPointer(juce::jmin(c, sourceChunk.getNumChannels() - 1));
-                for (int i = 0; i < outCount; ++i)
-                {
-                    const auto sourcePos = (produced + i) * ratio - sourceStart;
-                    const auto i0 = juce::jlimit(0, sourceCount - 1, static_cast<int>(std::floor(sourcePos)));
-                    const auto i1 = juce::jmin(sourceCount - 1, i0 + 1);
-                    const auto t = static_cast<float>(sourcePos - std::floor(sourcePos));
-                    dst[i] = src[i0] + (src[i1] - src[i0]) * t;
-                }
-            }
+            const float* inputPointers[2] = {
+                sourceChunk.getReadPointer(0),
+                channels > 1 ? sourceChunk.getReadPointer(1) : nullptr
+            };
+            float* outputPointers[2] = {
+                out.getWritePointer(0) + produced,
+                channels > 1 ? out.getWritePointer(1) + produced : nullptr
+            };
+            stretch.process(inputPointers, sourceCount, outputPointers, outCount);
 
             produced += outCount;
             producedSamples.store(produced, std::memory_order_release);
