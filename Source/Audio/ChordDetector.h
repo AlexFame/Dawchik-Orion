@@ -51,14 +51,4 @@ namespace orion::chorddetect
         orion::chords::ChordSpec spec {};
     };
     std::vector<ChordChange> detectChordChanges(const juce::File& file, const Options& opts);
-
-    // Independent root evidence from the bundled NNLS analyser. Used only as a conservative
-    // correction for an already-accepted native key estimate; -1 fields mean analysis failed.
-    struct KeyRootEvidence
-    {
-        int nnlsRoot { -1 };
-        int bassRoot { -1 };
-        int octaveRoot { -1 };
-    };
-    KeyRootEvidence detectKeyRootEvidence(const juce::File& file);
 }
