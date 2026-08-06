@@ -105,13 +105,39 @@ void MainComponent::playBrowserPreview(const BrowserItem& item)
         if (generation != previewRequestGeneration.load())
             return;
 
-        juce::MessageManager::callAsync([safeThis, generation, reader = std::move(reader), outputSamples,
-                                         sampleRate, file, displayName]() mutable
+        if (fitToTempo && std::abs(outputSamples64 - sourceSamples) > 1
+            && sourceSamples <= static_cast<juce::int64>(std::numeric_limits<int>::max()))
         {
-            if (safeThis == nullptr || generation != safeThis->previewRequestGeneration.load())
+            const auto sourceSampleCount = static_cast<int>(sourceSamples);
+            const auto sourceChannels = juce::jlimit(1, 2, static_cast<int>(reader->numChannels));
+            juce::AudioBuffer<float> sourceBuffer(sourceChannels, sourceSampleCount);
+            sourceBuffer.clear();
+            reader->read(&sourceBuffer, 0, sourceSampleCount, 0, true, true);
+
+            auto previewBuffer = stretchBufferRubberBandPreview(sourceBuffer, outputSamples, sampleRate);
+            if (generation != previewRequestGeneration.load())
                 return;
-            safeThis->startStreamingPreviewPlayback(std::move(reader), outputSamples, sampleRate, file, displayName);
-        });
+
+            juce::MessageManager::callAsync([safeThis, generation, previewBuffer = std::move(previewBuffer),
+                                             sampleRate, file, displayName]() mutable
+            {
+                if (safeThis == nullptr || generation != safeThis->previewRequestGeneration.load())
+                    return;
+                safeThis->startPreviewPlayback(std::move(previewBuffer), sampleRate, file, displayName);
+            });
+        }
+        else
+        {
+            juce::MessageManager::callAsync([safeThis, generation, reader = std::move(reader), sourceSamples,
+                                             sampleRate, file, displayName]() mutable
+            {
+                if (safeThis == nullptr || generation != safeThis->previewRequestGeneration.load())
+                    return;
+                const auto rawSamples = static_cast<int>(juce::jmin<juce::int64>(
+                    sourceSamples, static_cast<juce::int64>(std::numeric_limits<int>::max())));
+                safeThis->startStreamingPreviewPlayback(std::move(reader), rawSamples, sampleRate, file, displayName);
+            });
+        }
 
         // Waveform analysis is deliberately decoupled from audio start. It can finish later
         // without affecting the already-playing stream.
