@@ -87,12 +87,6 @@ juce::AudioBuffer<float> stretchBufferFastPreview(const juce::AudioBuffer<float>
                                                   double sampleRate,
                                                   double pitchScale = 1.0);
 
-// Browser Sync render: Rubber Band R3 changes duration while preserving the
-// source pitch exactly. This path never performs project-key transposition.
-juce::AudioBuffer<float> stretchBufferRubberBandPreview(const juce::AudioBuffer<float>& source,
-                                                        int outputSamples,
-                                                        double sampleRate);
-
 // Convenience wrapper: tempo-fit a preview buffer from `sourceBpm` to `projectTempoBpm`.
 juce::AudioBuffer<float> makeTempoFittedPreviewBuffer(const juce::AudioBuffer<float>& source,
                                                       double sourceBpm,

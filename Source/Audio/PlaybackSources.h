@@ -19,6 +19,10 @@
 
 #include <signalsmith-stretch/signalsmith-stretch.h>
 
+#if ORION_HAVE_RUBBERBAND
+ #include <rubberband/RubberBandStretcher.h>
+#endif
+
 #if JUCE_MAC || JUCE_IOS
  #include <pthread.h>
  #include <sys/qos.h>
@@ -149,9 +153,9 @@ private:
     bool looping { false };
 };
 
-// File-backed raw browser preview. The audio thread only copies samples that
-// the producer has already decoded; tempo-synced previews are rendered through
-// Rubber Band before they reach this playback layer.
+// File-backed browser preview. Raw previews are decoded directly; tempo-synced
+// previews are stretched incrementally by Rubber Band on the producer thread.
+// The audio thread only copies samples that are already ready.
 class StreamingFilePreviewSource final : public juce::PositionableAudioSource,
                                           private juce::Thread
 {
@@ -188,14 +192,108 @@ public:
         if (reader == nullptr)
             return;
 
-        int produced = 0;
-        while (produced < totalOut && ! threadShouldExit())
+        if (std::abs(sourceSamples - static_cast<juce::int64>(totalOut)) <= 1)
         {
-            const auto count = juce::jmin(2048, totalOut - produced);
+            int produced = 0;
+            while (produced < totalOut && ! threadShouldExit())
+            {
+                const auto count = juce::jmin(2048, totalOut - produced);
+                reader->read(&out, produced, count, produced, true, true);
+                produced += count;
+                producedSamples.store(produced, std::memory_order_release);
+            }
+            return;
+        }
+
+#if ORION_HAVE_RUBBERBAND
+        using RB = RubberBand::RubberBandStretcher;
+        constexpr int blockSize = 2048;
+        const auto options = RB::OptionProcessRealTime
+                           | RB::OptionEngineFiner
+                           | RB::OptionTransientsCrisp
+                           | RB::OptionDetectorCompound;
+        RB stretcher(static_cast<std::size_t>(std::llround(sampleRate)),
+                     static_cast<std::size_t>(channels), options,
+                     static_cast<double>(totalOut) / static_cast<double>(sourceSamples), 1.0);
+        stretcher.setMaxProcessSize(blockSize);
+
+        juce::AudioBuffer<float> inputBlock(channels, blockSize);
+        juce::AudioBuffer<float> retrieveBlock(channels, blockSize);
+        int outputPosition = 0;
+        int samplesToDiscard = static_cast<int>(stretcher.getStartDelay());
+
+        const auto retrieveReady = [&]
+        {
+            while (! threadShouldExit() && outputPosition < totalOut)
+            {
+                const auto available = stretcher.available();
+                if (available <= 0)
+                    break;
+
+                const auto count = juce::jmin(blockSize, available);
+                float* retrievePointers[2] = {
+                    retrieveBlock.getWritePointer(0),
+                    channels > 1 ? retrieveBlock.getWritePointer(1) : nullptr
+                };
+                const auto retrieved = static_cast<int>(stretcher.retrieve(retrievePointers, count));
+                if (retrieved <= 0)
+                    break;
+
+                const auto skip = juce::jmin(samplesToDiscard, retrieved);
+                samplesToDiscard -= skip;
+                const auto copyCount = juce::jmin(retrieved - skip, totalOut - outputPosition);
+                if (copyCount > 0)
+                {
+                    for (int channel = 0; channel < channels; ++channel)
+                        out.copyFrom(channel, outputPosition, retrieveBlock, channel, skip, copyCount);
+                    outputPosition += copyCount;
+                    producedSamples.store(outputPosition, std::memory_order_release);
+                }
+            }
+        };
+
+        auto processBlock = [&](int count, bool final)
+        {
+            const float* inputPointers[2] = {
+                inputBlock.getReadPointer(0),
+                channels > 1 ? inputBlock.getReadPointer(1) : nullptr
+            };
+            stretcher.process(inputPointers, static_cast<std::size_t>(count), final);
+            retrieveReady();
+        };
+
+        auto startPad = static_cast<int>(stretcher.getPreferredStartPad());
+        inputBlock.clear();
+        while (startPad > 0 && ! threadShouldExit())
+        {
+            const auto count = juce::jmin(blockSize, startPad);
+            processBlock(count, false);
+            startPad -= count;
+        }
+
+        juce::int64 inputPosition = 0;
+        while (inputPosition < sourceSamples && ! threadShouldExit())
+        {
+            const auto count = static_cast<int>(juce::jmin<juce::int64>(blockSize, sourceSamples - inputPosition));
+            inputBlock.clear();
+            reader->read(&inputBlock, 0, count, inputPosition, true, true);
+            inputPosition += count;
+            processBlock(count, inputPosition >= sourceSamples);
+        }
+        retrieveReady();
+        return;
+#else
+        // Preserve the source pitch if a build has no Rubber Band support.
+        int produced = 0;
+        const auto rawSamples = static_cast<int>(juce::jmin<juce::int64>(sourceSamples, totalOut));
+        while (produced < rawSamples && ! threadShouldExit())
+        {
+            const auto count = juce::jmin(2048, rawSamples - produced);
             reader->read(&out, produced, count, produced, true, true);
             produced += count;
             producedSamples.store(produced, std::memory_order_release);
         }
+#endif
     }
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override

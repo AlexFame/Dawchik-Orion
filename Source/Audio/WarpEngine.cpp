@@ -1297,27 +1297,6 @@ juce::AudioBuffer<float> stretchBufferFastPreview(const juce::AudioBuffer<float>
     return out;
 }
 
-juce::AudioBuffer<float> stretchBufferRubberBandPreview(const juce::AudioBuffer<float>& source,
-                                                        int outputSamples,
-                                                        double sampleRate)
-{
-    if (source.getNumSamples() <= 1 || outputSamples <= 1 || sampleRate <= 0.0)
-        return source;
-
-    if (std::abs(outputSamples - source.getNumSamples()) <= 1)
-        return source;
-
-#if ORION_HAVE_RUBBERBAND
-    auto stretched = rubberBandStretchBufferToLength(source, outputSamples, sampleRate,
-                                                      {}, 1.0, /*percussive*/ false);
-    if (stretched.getNumSamples() > 0 && stretched.getNumChannels() == source.getNumChannels())
-        return stretched;
-#endif
-
-    DBG("[BrowserPreview] Rubber Band render failed; returning original pitch and tempo");
-    return source;
-}
-
 juce::AudioBuffer<float> stretchBufferToLengthWithExperimentalBackend(const juce::AudioBuffer<float>& source,
                                                                       int outputSamples,
                                                                       double sampleRate,
