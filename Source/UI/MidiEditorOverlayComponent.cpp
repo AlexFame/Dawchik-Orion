@@ -1901,14 +1901,39 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
             selectSingleNote(hit->selected.noteIndex);
 
         std::vector<int> selectedIndices(selectedNotes.begin(), selectedNotes.end());
+        int primaryIndex = hit->selected.noteIndex;
+        bool historyCaptured = false;
+
+        // Alt+drag duplicates the selection in place, then drags the copies — the originals stay
+        // put (Ableton). Only for a plain move (not a resize-handle grab).
+        if (event.mods.isAltDown() && ! hit->overResizeHandle)
+        {
+            OptionalAudioLock lk(audioEditLock);   // appends notes — guard vs the audio thread
+            pushUndoSnapshot();
+            historyCaptured = true;
+            std::vector<int> duplicated;
+            duplicated.reserve(selectedIndices.size());
+            for (const auto index : selectedIndices)
+            {
+                activeClip->midiNotes.push_back(activeClip->midiNotes[static_cast<std::size_t>(index)]);
+                const int newIndex = static_cast<int>(activeClip->midiNotes.size()) - 1;
+                if (index == primaryIndex)
+                    primaryIndex = newIndex;
+                duplicated.push_back(newIndex);
+            }
+            selectedNotes.clear();
+            selectedNotes.insert(duplicated.begin(), duplicated.end());
+            selectedIndices = duplicated;
+        }
+
         std::vector<MidiNote> originalSelectedNotes;
         originalSelectedNotes.reserve(selectedIndices.size());
         for (const auto index : selectedIndices)
             originalSelectedNotes.push_back(activeClip->midiNotes[static_cast<std::size_t>(index)]);
 
-        const auto& note = activeClip->midiNotes[static_cast<std::size_t>(hit->selected.noteIndex)];
+        const auto& note = activeClip->midiNotes[static_cast<std::size_t>(primaryIndex)];
         noteDragState = NoteDragState {
-            hit->selected,
+            SelectedNote { primaryIndex },
             hit->overResizeHandle ? NoteDragMode::resizeRight : NoteDragMode::move,
             event.getPosition(),
             note.startBeat,
@@ -1916,7 +1941,7 @@ void MidiEditorOverlayComponent::mouseDown(const juce::MouseEvent& event)
             note.pitch,
             originalSelectedNotes,
             selectedIndices,
-            false
+            historyCaptured
         };
         repaint();
         return;
@@ -2098,9 +2123,9 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
     {
         const auto pitchDelta = static_cast<int>(std::round((noteDragState->mouseDownPosition.y - event.position.y) / laneHeight));
 
-        // Clamp the horizontal shift for the SELECTION AS A WHOLE (by its earliest/latest note) so
-        // that hitting a boundary stops the whole group together — clamping each note individually
-        // would collapse the relative spacing and pile notes on top of each other.
+        // Shift the SELECTION AS A WHOLE so relative spacing is preserved. Floor the earliest note at
+        // beat 0; moving right is unrestricted — the clip grows to fit (Ableton-style), instead of the
+        // group locking up whenever it touches the clip end.
         double minStart = std::numeric_limits<double>::max();
         double maxEnd   = std::numeric_limits<double>::lowest();
         for (const auto& orig : noteDragState->originalSelectedNotes)
@@ -2108,9 +2133,7 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
             minStart = juce::jmin(minStart, orig.startBeat);
             maxEnd   = juce::jmax(maxEnd, orig.startBeat + orig.lengthInBeats);
         }
-        const double lowerDelta = -minStart;                              // can't push the first note before 0
-        const double upperDelta = activeClip->lengthInBeats - maxEnd;     // can't push the last note past the clip
-        const double groupDelta = juce::jlimit(lowerDelta, juce::jmax(lowerDelta, upperDelta), snappedBeatDelta);
+        const double groupDelta = juce::jmax(-minStart, snappedBeatDelta);   // earliest note can't cross 0
 
         for (std::size_t i = 0; i < noteDragState->selectedIndices.size(); ++i)
         {
@@ -2122,6 +2145,7 @@ void MidiEditorOverlayComponent::mouseDrag(const juce::MouseEvent& event)
                 newPitch = snapPitchToScale(newPitch);
             movedNote.pitch = newPitch;
         }
+        growClipToFit(maxEnd + groupDelta);   // extend the clip if the group moved past its end
     }
     else
     {
@@ -2199,9 +2223,8 @@ void MidiEditorOverlayComponent::mouseUp(const juce::MouseEvent&)
             for (const auto index : noteDragState->selectedIndices)
             {
                 auto& movedNote = activeClip->midiNotes[static_cast<std::size_t>(index)];
-                movedNote.startBeat = juce::jlimit(0.0,
-                                                   activeClip->lengthInBeats - movedNote.lengthInBeats,
-                                                   snapBeatNearest(movedNote.startBeat));
+                movedNote.startBeat = juce::jmax(0.0, snapBeatNearest(movedNote.startBeat));
+                growClipToFit(movedNote.startBeat + movedNote.lengthInBeats);   // extend to hold notes moved right
             }
         }
         else

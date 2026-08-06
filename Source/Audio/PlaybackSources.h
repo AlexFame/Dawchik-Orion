@@ -2907,6 +2907,25 @@ private:
                         if (const auto offOffset = offsetForBeat(offBeat); offOffset >= 0)
                             midi.addEvent(juce::MidiMessage::noteOff(ch, note.pitch), offOffset);
                     }
+
+                    // Cut notes that straddle the loop/project wrap AT the wrap point. Otherwise their
+                    // note-off never lands (its beat is past the wrap), so on a sample player with
+                    // limited polyphony (Analog Lab) they hang as stuck voices — piling up each repeat
+                    // and stealing the voices the next pass's first chord needs (only one note survives).
+                    if (wrapActive)
+                    {
+                        const int wrapOffset = juce::jlimit(0, numSamples - 1,
+                            static_cast<int>(std::round((wrapPoint - blockStartBeat) / beatAdvancePerSample)));
+                        for (int ni = 0; ni < noteCount; ++ni)
+                        {
+                            const auto& note = clip.midiNotes[static_cast<std::size_t>(ni)];
+                            const auto onBeat  = clip.startBeat + note.startBeat;
+                            const auto offBeat = onBeat + juce::jmax(0.01, note.lengthInBeats);
+                            if (onBeat < wrapPoint && offBeat > wrapPoint)   // straddles the boundary
+                                midi.addEvent(juce::MidiMessage::noteOff(noteChannel[static_cast<std::size_t>(ni)], note.pitch), wrapOffset);
+                        }
+                    }
+
                     for (int ni = 0; ni < noteCount; ++ni)
                     {
                         const auto& note = clip.midiNotes[static_cast<std::size_t>(ni)];

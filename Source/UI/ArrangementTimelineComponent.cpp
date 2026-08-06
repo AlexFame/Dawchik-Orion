@@ -1576,10 +1576,16 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
 
                 const auto displayedPitchCount = juce::jmax(1, maxPitch - minPitch + 1);
                 const auto midiLaneHeight = static_cast<float>(clipBodyBounds.getHeight()) / static_cast<float>(displayedPitchCount);
+                // Clip the preview to the clip body so notes past the (live) clip length never spill
+                // out as floating squares while the clip edge is being dragged/resized.
+                g.saveState();
+                g.reduceClipRegion(clipBodyBounds);
                 g.setColour(juce::Colours::white.withAlpha(0.42f));
                 for (const auto& note : clip.midiNotes)
                 {
                     const auto startRatio = clip.lengthInBeats > 0.0 ? note.startBeat / clip.lengthInBeats : 0.0;
+                    if (startRatio >= 1.0)
+                        continue;   // note starts beyond the current clip length — nothing to show
                     const auto endRatio = clip.lengthInBeats > 0.0 ? (note.startBeat + note.lengthInBeats) / clip.lengthInBeats : 0.1;
                     const auto noteX = clipBodyBounds.getX() + static_cast<int>(std::round(startRatio * clipBodyBounds.getWidth()));
                     const auto noteRight = clipBodyBounds.getX() + static_cast<int>(std::round(endRatio * clipBodyBounds.getWidth()));
@@ -1596,6 +1602,7 @@ void ArrangementTimelineComponent::paint(juce::Graphics& g)
                                            noteHeight,
                                            2.5f);
                 }
+                g.restoreState();
             }
 
             // Always draw a 1px darker outline around every clip. This is what makes two
@@ -5516,7 +5523,9 @@ void ArrangementTimelineComponent::createMidiClipAt(int trackIndex, double start
 
     pushUndoSnapshot();
     auto& track = tracks[static_cast<std::size_t>(trackIndex)];
-    const auto clipLength = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    // Default new MIDI clip = 4 bars (4 grid cells at "Grid 1 Bar").
+    const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+    const auto clipLength = 4.0 * beatsPerBar;
     const auto clippedStart = juce::jlimit(0.0, juce::jmax(0.0, getTimelineEndBeats() - clipLength), startBeat);
     track.clips.push_back(TimelineClip {
         "MIDI Clip",
