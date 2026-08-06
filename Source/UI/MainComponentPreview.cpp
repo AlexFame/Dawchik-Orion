@@ -281,8 +281,10 @@ bool MainComponent::startClipEditorPreview()
     int semitones = clip->transposeSemitones;
     if (clip->keyShiftEnabled && clip->sourceKeyRoot >= 0 && projectState.isKeyEnabled())
     {
-        semitones += computeKeyMatchSemitones(clip->sourceKeyRoot, clip->sourceKeyIsMinor,
-                                              projectState.getKeyRoot(), projectState.isKeyMinor());
+        int keyDiff = projectState.getKeyRoot() - clip->sourceKeyRoot;
+        while (keyDiff > 6)  keyDiff -= 12;
+        while (keyDiff < -6) keyDiff += 12;
+        semitones += keyDiff;
     }
     const auto pitchScale = std::pow(2.0, static_cast<double>(semitones) / 12.0);
 

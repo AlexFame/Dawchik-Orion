@@ -3011,9 +3011,10 @@ void MainComponent::loadBrowserItemIntoSampler(const BrowserItem& item, bool add
     // the playlist clip's key-shift default so the sampler plays in the project's key too.
     if (projectState.isKeyEnabled() && analysis.sourceKeyRoot >= 0)
     {
-        track.samplerTransposeSemitones = computeKeyMatchSemitones(
-            analysis.sourceKeyRoot, analysis.sourceKeyIsMinor,
-            projectState.getKeyRoot(), projectState.isKeyMinor());
+        int keyDiff = projectState.getKeyRoot() - analysis.sourceKeyRoot;
+        while (keyDiff > 6)  keyDiff -= 12;
+        while (keyDiff < -6) keyDiff += 12;
+        track.samplerTransposeSemitones = keyDiff;
     }
     else
     {
@@ -3810,9 +3811,10 @@ void MainComponent::refreshClipEditor()
         editorState.autoKeyShiftActive = clip->keyShiftEnabled && clip->sourceKeyRoot >= 0 && projectState.isKeyEnabled();
         if (editorState.autoKeyShiftActive)
         {
-            editorState.autoKeyShiftSemitones = computeKeyMatchSemitones(
-                clip->sourceKeyRoot, clip->sourceKeyIsMinor,
-                projectState.getKeyRoot(), projectState.isKeyMinor());
+            int keyDiff = projectState.getKeyRoot() - clip->sourceKeyRoot;
+            while (keyDiff > 6)  keyDiff -= 12;
+            while (keyDiff < -6) keyDiff += 12;
+            editorState.autoKeyShiftSemitones = keyDiff;
         }
         else
             editorState.autoKeyShiftSemitones = 0;

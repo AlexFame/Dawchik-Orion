@@ -2516,8 +2516,10 @@ private:
         if (! clip.keyShiftEnabled || clip.sourceKeyRoot < 0 || ! project.isKeyEnabled())
             return diff;
 
-        diff += computeKeyMatchSemitones(clip.sourceKeyRoot, clip.sourceKeyIsMinor,
-                                         project.getKeyRoot(), project.isKeyMinor());
+        int keyDiff = project.getKeyRoot() - clip.sourceKeyRoot;
+        while (keyDiff > 6)  keyDiff -= 12;
+        while (keyDiff < -6) keyDiff += 12;
+        diff += keyDiff;
         return diff;
     }
 
