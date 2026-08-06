@@ -1211,12 +1211,12 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
                 while (difference > 6)  difference -= 12;
                 while (difference < -6) difference += 12;
 
-                // A one-semitone discrepancy is the characteristic mislabeled-pack
-                // case and needs only moderate confidence. Larger corrections require
-                // a much clearer tonal estimate to avoid rewriting ambiguous chords.
+                // Only correct the characteristic one-semitone mislabeled-pack case.
+                // Larger discrepancies are commonly relative keys, fifths or chord
+                // inversions, where a confident chroma result is still not the tonic.
                 const bool trustworthyMismatch = difference != 0
-                    && ((std::abs(difference) == 1 && est.confidence >= 0.58)
-                        || est.confidence >= 0.78);
+                    && std::abs(difference) == 1
+                    && est.confidence >= 0.58;
                 if (trustworthyMismatch)
                 {
                     result.sourceKeyRoot = signalRootInNamedMode;
