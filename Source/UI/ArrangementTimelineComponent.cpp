@@ -295,7 +295,9 @@ AudioImportAnalysis analyzeImportedAudioClip(const juce::File& file, double temp
     const bool shortFile = warp.durationSeconds > 0.0 && warp.durationSeconds <= 20.0;
     if (incomplete && shortFile)
         warp = orion::analyzeAudioWarpMetadata(file, tempoBpm, numerator, true);   // cheap for short clips
-    result.needsSignalAnalysis = incomplete && ! shortFile;   // only long files use the background pass
+    const bool verifyNamedKey = warp.sourceKeyRoot >= 0
+        && orion::shouldVerifyNamedKeyFromSignal(file);
+    result.needsSignalAnalysis = verifyNamedKey || (incomplete && ! shortFile);
     result.durationSeconds  = warp.durationSeconds;
     result.sourceBpm        = warp.sourceBpm;
     result.detectedBars     = warp.detectedBars;

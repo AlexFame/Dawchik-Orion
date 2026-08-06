@@ -181,13 +181,21 @@ int main(int argc, char* argv[])
     int unknown = 0;
     for (const auto& file : files)
     {
-        const auto metadata = orion::analyzeAudioWarpMetadata(file, 126.0, 4, false);
+        const auto namedMetadata = orion::analyzeAudioWarpMetadata(file, 126.0, 4, false);
+        const auto metadata = orion::analyzeAudioWarpMetadata(file, 126.0, 4, true);
         if (metadata.sourceKeyRoot < 0)
         {
             ++unknown;
             std::cout << "UNKNOWN," << file.getFileName() << '\n';
             continue;
         }
+
+        if (namedMetadata.sourceKeyRoot >= 0
+            && namedMetadata.sourceKeyRoot != metadata.sourceKeyRoot)
+            std::cout << "KEY_CORRECTED," << file.getFileName() << ",from="
+                      << orion::formatKeyName(namedMetadata.sourceKeyRoot, namedMetadata.sourceKeyIsMinor)
+                      << ",to=" << orion::formatKeyName(metadata.sourceKeyRoot, metadata.sourceKeyIsMinor)
+                      << '\n';
 
         const int expected = orion::computeKeyMatchSemitones(metadata.sourceKeyRoot,
                                                               metadata.sourceKeyIsMinor,

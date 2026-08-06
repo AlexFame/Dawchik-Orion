@@ -761,6 +761,29 @@ double parseBpmFromFileName(const juce::File& file)
     return bestBpm;
 }
 
+bool shouldVerifyNamedKeyFromSignal(const juce::File& file)
+{
+    const auto path = file.getFullPathName().toLowerCase();
+    static const std::vector<juce::String> drumKeywords {
+        "drum", "kick", "snare", "break", "808", "hihat", "hi-hat", "hi_hat",
+        "perc", "clap", "tom", "ride", "cymbal", "rim", "shaker", "tamb",
+        "conga", "bongo"
+    };
+    static const std::vector<juce::String> melodicKeywords {
+        "melody", "melodic", "lead", "pad", "synth", "piano", "guitar",
+        "violin", "string", "flute", "horn", "sax", "chord", "vocal", "vox",
+        "keys", "arp", "bell", "rhodes"
+    };
+
+    for (const auto& keyword : drumKeywords)
+        if (path.contains(keyword))
+            return false;
+    for (const auto& keyword : melodicKeywords)
+        if (path.contains(keyword))
+            return true;
+    return false;
+}
+
 // ---- Real signal analysis (used when the filename gives no answer) ----------
 namespace
 {
@@ -1061,7 +1084,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
 
     // Bump whenever signal-derived metadata changes so existing .awa files are
     // re-analysed instead of silently preserving an older key estimate.
-    static constexpr auto analysisVersion = "key-root-v3";
+    static constexpr auto analysisVersion = "key-root-v4";
     const auto cacheKey = juce::String(analysisVersion) + "|" + file.getFullPathName()
         + "|" + juce::String(file.getLastModificationTime().toMilliseconds())
         + "|" + juce::String(file.getSize())
@@ -1142,11 +1165,16 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
     };
 
     // --- Key ---------------------------------------------------------------
-    // Filename first (e.g. "Cm_120bpm", "F#maj_loop"); otherwise analyse the signal.
+    // Filename first (e.g. "Cm_120bpm", "F#maj_loop"). For melodic material we
+    // still verify the label: some packs are rendered a semitone away from the
+    // advertised key. The filename mode remains authoritative because relative
+    // major/minor pairs share the same pitch classes and chroma cannot distinguish
+    // them reliably.
     const auto parsedKey = parseKeyFromFileName(file);
     result.sourceKeyRoot    = parsedKey.root;
     result.sourceKeyIsMinor = parsedKey.minor;
-    if (parsedKey.root < 0 && deepAnalysis && ensureMono())
+    const bool verifyNamedKey = parsedKey.root >= 0 && shouldVerifyNamedKeyFromSignal(file);
+    if (deepAnalysis && (parsedKey.root < 0 || verifyNamedKey) && ensureMono())
     {
         const auto est = estimateKeyFromAnalysis(computeChroma(mono, monoSr));
         // Keep uncertain or atonal material unknown rather than applying a risky shift.
@@ -1164,10 +1192,41 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
                     correctedRoot = evidence.octaveRoot;
             }
 
-            result.sourceKeyRoot    = correctedRoot;
-            result.sourceKeyIsMinor = est.minor;
-            DBG("[Warp] " + file.getFileName() + " | key(audio)=" + formatKeyName(correctedRoot, est.minor)
-                + " | conf=" + juce::String(est.confidence, 2));
+            if (parsedKey.root < 0)
+            {
+                result.sourceKeyRoot    = correctedRoot;
+                result.sourceKeyIsMinor = est.minor;
+                DBG("[Warp] " + file.getFileName() + " | key(audio)=" + formatKeyName(correctedRoot, est.minor)
+                    + " | conf=" + juce::String(est.confidence, 2));
+            }
+            else
+            {
+                // Convert a relative-major estimate back to the filename's minor
+                // mode (and vice versa) before comparing roots.
+                auto signalRootInNamedMode = correctedRoot;
+                if (parsedKey.minor != est.minor)
+                    signalRootInNamedMode = (correctedRoot + (parsedKey.minor ? 9 : 3)) % 12;
+
+                auto difference = signalRootInNamedMode - parsedKey.root;
+                while (difference > 6)  difference -= 12;
+                while (difference < -6) difference += 12;
+
+                // A one-semitone discrepancy is the characteristic mislabeled-pack
+                // case and needs only moderate confidence. Larger corrections require
+                // a much clearer tonal estimate to avoid rewriting ambiguous chords.
+                const bool trustworthyMismatch = difference != 0
+                    && ((std::abs(difference) == 1 && est.confidence >= 0.58)
+                        || est.confidence >= 0.78);
+                if (trustworthyMismatch)
+                {
+                    result.sourceKeyRoot = signalRootInNamedMode;
+                    result.sourceKeyIsMinor = parsedKey.minor;
+                    DBG("[Warp] " + file.getFileName()
+                        + " | key(filename)=" + formatKeyName(parsedKey.root, parsedKey.minor)
+                        + " | corrected(audio)=" + formatKeyName(signalRootInNamedMode, parsedKey.minor)
+                        + " | conf=" + juce::String(est.confidence, 2));
+                }
+            }
         }
     }
 

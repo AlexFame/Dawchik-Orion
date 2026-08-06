@@ -77,6 +77,10 @@ struct AudioWarpAnalysis
 // Returns 0.0 when nothing usable is found.
 double parseBpmFromFileName(const juce::File& file);
 
+// True for pitched/melodic material whose filename key should be checked against
+// the audio. Some commercial packs contain consistently mistuned key labels.
+bool shouldVerifyNamedKeyFromSignal(const juce::File& file);
+
 // Reads a file's header + name to estimate tempo / key / bar count for warping.
 // deepAnalysis=false skips the expensive signal analysis (audio decode + chroma key
 // + autocorrelation tempo) and uses only filename + duration heuristics — fast enough
