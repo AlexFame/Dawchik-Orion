@@ -37,9 +37,12 @@
 #include <vamp-hostsdk/PluginBufferingAdapter.h>
 
 #include "Chordino.h"
+#include "NNLSChroma.h"
 
 #include <sndfile.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <string>
 
@@ -51,12 +54,19 @@ int main(int argc, char **argv)
 {
     const char *myname = argv[0];
 
-    if (argc != 2) {
-	cerr << "usage: " << myname << " file.wav" << endl;
+    const bool chromaMode = argc == 3 && (string(argv[1]) == "--chroma"
+                                      || string(argv[1]) == "--both-chroma"
+                                      || string(argv[1]) == "--semitones"
+                                      || string(argv[1]) == "--key-features");
+    const bool bothChromaMode = chromaMode && string(argv[1]) == "--both-chroma";
+    const bool semitoneMode = chromaMode && string(argv[1]) == "--semitones";
+    const bool keyFeaturesMode = chromaMode && string(argv[1]) == "--key-features";
+    if ((!chromaMode && argc != 2) || (chromaMode && argc != 3)) {
+	cerr << "usage: " << myname << " [--chroma|--both-chroma|--semitones|--key-features] file.wav" << endl;
 	return 2;
     }
 
-    const char *infile = argv[1];
+    const char *infile = argv[chromaMode ? 2 : 1];
 
     SF_INFO sfinfo;
     SNDFILE *sndfile = sf_open(infile, SFM_READ, &sfinfo);
@@ -67,8 +77,10 @@ int main(int argc, char **argv)
 	return 1;
     }
 
-    Chordino *chordino = new Chordino(sfinfo.samplerate);
-    PluginInputDomainAdapter *ia = new PluginInputDomainAdapter(chordino);
+    Plugin *plugin = chromaMode
+        ? static_cast<Plugin *>(new NNLSChroma(sfinfo.samplerate))
+        : static_cast<Plugin *>(new Chordino(sfinfo.samplerate));
+    PluginInputDomainAdapter *ia = new PluginInputDomainAdapter(plugin);
     ia->setProcessTimestampMethod(PluginInputDomainAdapter::ShiftData);
     PluginBufferingAdapter *adapter = new PluginBufferingAdapter(ia);
 
@@ -83,26 +95,39 @@ int main(int argc, char **argv)
     float *filebuf = new float[sfinfo.channels * blocksize];
     float *mixbuf = new float[blocksize];
 
-    Plugin::FeatureList chordFeatures;
+    Plugin::FeatureList outputFeatures;
+    Plugin::FeatureList secondaryOutputFeatures;
     Plugin::FeatureSet fs;
 
-    int chordFeatureNo = -1;
+    int outputFeatureNo = -1;
+    int secondaryOutputFeatureNo = -1;
     Plugin::OutputList outputs = adapter->getOutputDescriptors();
     for (int i = 0; i < int(outputs.size()); ++i) {
-	if (outputs[i].identifier == "simplechord") {
-	    chordFeatureNo = i;
+	if (outputs[i].identifier == (keyFeaturesMode ? "bothchroma"
+                                              : semitoneMode ? "semitonespectrum"
+                                              : bothChromaMode ? "bothchroma"
+                                              : chromaMode ? "chroma"
+                                              : "simplechord")) {
+	    outputFeatureNo = i;
+	}
+	if (keyFeaturesMode && outputs[i].identifier == "semitonespectrum") {
+	    secondaryOutputFeatureNo = i;
 	}
     }
-    if (chordFeatureNo < 0) {
-	cerr << myname << ": Failed to identify chords output!" << endl;
+    if (outputFeatureNo < 0 || (keyFeaturesMode && secondaryOutputFeatureNo < 0)) {
+	cerr << myname << ": Failed to identify requested output!" << endl;
 	return 1;
     }
     
     int frame = 0;
-    while (frame < sfinfo.frames) {
+    const int64_t maxFrames = keyFeaturesMode
+        ? std::min<int64_t>(sfinfo.frames, static_cast<int64_t>(sfinfo.samplerate) * 30)
+        : sfinfo.frames;
+    while (frame < maxFrames) {
 
 	int count = -1;
-	if ((count = sf_readf_float(sndfile, filebuf, blocksize)) <= 0) break;
+	const int framesToRead = static_cast<int>(std::min<int64_t>(blocksize, maxFrames - frame));
+	if ((count = sf_readf_float(sndfile, filebuf, framesToRead)) <= 0) break;
 
 	// mix down
 	for (int i = 0; i < blocksize; ++i) {
@@ -119,9 +144,14 @@ int main(int argc, char **argv)
 	// feed to plugin: can just take address of buffer, as only one channel
 	fs = adapter->process(&mixbuf, timestamp);
 
-	chordFeatures.insert(chordFeatures.end(),
-			     fs[chordFeatureNo].begin(),
-			     fs[chordFeatureNo].end());
+	outputFeatures.insert(outputFeatures.end(),
+			     fs[outputFeatureNo].begin(),
+			     fs[outputFeatureNo].end());
+	if (keyFeaturesMode) {
+	    secondaryOutputFeatures.insert(secondaryOutputFeatures.end(),
+			     fs[secondaryOutputFeatureNo].begin(),
+			     fs[secondaryOutputFeatureNo].end());
+	}
 
 	frame += count;
     }
@@ -132,13 +162,29 @@ int main(int argc, char **argv)
     fs = adapter->getRemainingFeatures();
 
     // chord output is output index 0
-    chordFeatures.insert(chordFeatures.end(),
-			 fs[chordFeatureNo].begin(),
-			 fs[chordFeatureNo].end());
+    outputFeatures.insert(outputFeatures.end(),
+			 fs[outputFeatureNo].begin(),
+			 fs[outputFeatureNo].end());
 
-    for (int i = 0; i < (int)chordFeatures.size(); ++i) {
-	cout << chordFeatures[i].timestamp.toString() << ": "
-	     << chordFeatures[i].label << endl;
+    if (keyFeaturesMode) {
+        secondaryOutputFeatures.insert(secondaryOutputFeatures.end(),
+                         fs[secondaryOutputFeatureNo].begin(),
+                         fs[secondaryOutputFeatureNo].end());
+    }
+
+    const int outputCount = keyFeaturesMode
+        ? std::min<int>(outputFeatures.size(), secondaryOutputFeatures.size())
+        : static_cast<int>(outputFeatures.size());
+    for (int i = 0; i < outputCount; ++i) {
+	cout << outputFeatures[i].timestamp.toString() << ":";
+        if (chromaMode) {
+            for (float value : outputFeatures[i].values) cout << " " << value;
+            if (keyFeaturesMode)
+                for (float value : secondaryOutputFeatures[i].values) cout << " " << value;
+        } else {
+            cout << " " << outputFeatures[i].label;
+        }
+        cout << endl;
     }
 
     delete[] filebuf;
@@ -146,4 +192,3 @@ int main(int argc, char **argv)
     
     delete adapter;
 }
-

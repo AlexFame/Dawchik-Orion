@@ -1,4 +1,5 @@
 #include "WarpEngine.h"
+#include "ChordDetector.h"
 #include "OrionStretchEngine.h"
 
 #include <algorithm>
@@ -1058,7 +1059,10 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
     static juce::CriticalSection cacheLock;
     static std::map<juce::String, AudioWarpAnalysis> cache;
 
-    const auto cacheKey = file.getFullPathName()
+    // Bump whenever signal-derived metadata changes so existing .awa files are
+    // re-analysed instead of silently preserving an older key estimate.
+    static constexpr auto analysisVersion = "key-root-v3";
+    const auto cacheKey = juce::String(analysisVersion) + "|" + file.getFullPathName()
         + "|" + juce::String(file.getLastModificationTime().toMilliseconds())
         + "|" + juce::String(file.getSize())
         + "|" + juce::String(juce::roundToInt(projectTempoBpm * 100.0))
@@ -1148,9 +1152,21 @@ AudioWarpAnalysis analyzeAudioWarpMetadataUncached(const juce::File& file, doubl
         // Keep uncertain or atonal material unknown rather than applying a risky shift.
         if (est.root >= 0 && est.confidence >= 0.55)
         {
-            result.sourceKeyRoot    = est.root;
+            auto correctedRoot = est.root;
+            if (result.durationSeconds >= 10.0 && est.confidence < 0.70)
+            {
+                const auto evidence = chorddetect::detectKeyRootEvidence(file);
+                const auto independentlyConfirmed = evidence.octaveRoot >= 0
+                    && evidence.octaveRoot != est.root
+                    && (evidence.octaveRoot == evidence.nnlsRoot
+                        || evidence.octaveRoot == evidence.bassRoot);
+                if (independentlyConfirmed)
+                    correctedRoot = evidence.octaveRoot;
+            }
+
+            result.sourceKeyRoot    = correctedRoot;
             result.sourceKeyIsMinor = est.minor;
-            DBG("[Warp] " + file.getFileName() + " | key(audio)=" + formatKeyName(est.root, est.minor)
+            DBG("[Warp] " + file.getFileName() + " | key(audio)=" + formatKeyName(correctedRoot, est.minor)
                 + " | conf=" + juce::String(est.confidence, 2));
         }
     }
