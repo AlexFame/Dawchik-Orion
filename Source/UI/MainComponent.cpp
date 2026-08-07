@@ -2223,8 +2223,17 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key != juce::KeyPress::spaceKey)
         return false;
 
-    // Space belongs to the project transport. Browser audition has its own play/stop
-    // control; a preview may also be stopped by the transport's normal stop callback.
+    // Match Ableton's browser audition flow: the first Space stops an active browser
+    // preview, and the next Space is passed to the project transport.
+    if (previewTransportSource.isPlaying() || pendingBrowserPreviewStart)
+    {
+        pendingBrowserPreviewStart = false;
+        browserPanel.setPreviewArmed(false);
+        stopBrowserPreview(true);
+        browserPanel.setPreviewPlayback(false, 0.0f);
+        return true;
+    }
+
     if (transportEngine.isPlaying() || transportEngine.isCountInActive())
         stopTransportFromUi();
     else
