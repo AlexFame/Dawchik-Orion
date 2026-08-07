@@ -12,7 +12,7 @@ public:
     {
         setColour(juce::PopupMenu::backgroundColourId, theme::surface::elevated);
         setColour(juce::PopupMenu::textColourId, theme::text::primary);
-        setColour(juce::PopupMenu::highlightedBackgroundColourId, theme::accent::activeCoral);
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, theme::accent::previewSlate);
         setColour(juce::PopupMenu::highlightedTextColourId, theme::text::inverse);
     }
 
@@ -58,14 +58,14 @@ public:
         const auto itemArea = area.reduced(5, 2);
         if (isHighlighted && item.isEnabled)
         {
-            g.setColour(theme::accent::activeCoral.withAlpha(0.90f));
+            g.setColour(theme::accent::previewSlate.withAlpha(0.92f));
             g.fillRoundedRectangle(itemArea.toFloat(), 6.0f);
         }
 
         auto textArea = itemArea.reduced(12, 0);
         if (item.isTicked)
         {
-            g.setColour(isHighlighted ? theme::text::inverse : theme::accent::activeCoral);
+            g.setColour(isHighlighted ? theme::text::inverse : theme::accent::previewSlate);
             g.fillEllipse(static_cast<float>(textArea.getX()),
                           static_cast<float>(textArea.getCentreY() - 3), 6.0f, 6.0f);
             textArea.removeFromLeft(16);
