@@ -3471,7 +3471,10 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
                     menu.addItem(5, "Normalize peaks, keep balance" + suffix, multi, false);
                     menu.addItem(6, "Reset gain" + suffix);
                     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this)
-                                           .withTargetScreenArea({ event.getScreenX(), event.getScreenY(), 1, 1 }),
+                                           .withTargetScreenArea({ event.getScreenX(), event.getScreenY(), 1, 1 })
+                                           .withMinimumWidth(292)
+                                           .withMinimumNumColumns(1)
+                                           .withStandardItemHeight(36),
                                        [this, ti = hit->trackIndex, ci = hit->clipIndex, gainTargets](int r)
                                        {
                                            if (r == 4 || r == 5)
