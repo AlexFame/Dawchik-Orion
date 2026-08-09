@@ -90,12 +90,19 @@ void CameraChordWheelComponent::cameraOpened (juce::CameraDevice* device, const 
     }
     camera->addListener (this);
     statusLabel.setText ("Point your index finger at a chord", juce::dontSendNotification);
-    startTimerHz (15);
+    worker = std::make_unique<FrameWorker> (*this);
+    worker->startThread();
+    startTimerHz (15);   // message-thread timer only repaints the live preview
 }
 
 void CameraChordWheelComponent::stopCamera()
 {
     stopTimer();
+    if (worker != nullptr)
+    {
+        worker->stopThread (500);
+        worker.reset();
+    }
     if (camera != nullptr)
     {
         camera->removeListener (this);
@@ -107,24 +114,42 @@ void CameraChordWheelComponent::stopCamera()
 
 void CameraChordWheelComponent::imageReceived (const juce::Image& image)
 {
+    // One owning copy of the camera's transient buffer; the worker shares this ref (no 2nd copy).
     const juce::ScopedLock lock (frameLock);
     latestFrame = image.createCopy();
 }
 
 void CameraChordWheelComponent::timerCallback()
 {
-    updatePointingFromFrame();
     repaint();
 }
 
-void CameraChordWheelComponent::updatePointingFromFrame()
+void CameraChordWheelComponent::detectionLoop (juce::Thread& self)
 {
-    juce::Image frame;
+    juce::Component::SafePointer<CameraChordWheelComponent> safeThis (this);
+    while (! self.threadShouldExit())
     {
-        const juce::ScopedLock lock (frameLock);
-        frame = latestFrame.createCopy();
+        juce::Image frame;
+        {
+            const juce::ScopedLock lock (frameLock);
+            frame = latestFrame;   // shares the ref-counted buffer; detection only reads it
+        }
+        std::optional<juce::Point<float>> tip;
+        if (frame.isValid())
+            tip = camera::detectIndexTip (frame);
+
+        juce::MessageManager::callAsync ([safeThis, tip]
+        {
+            if (safeThis != nullptr)
+                safeThis->applyPointing (tip);
+        });
+
+        self.wait (66);   // ~15 Hz; also the exit-check interval
     }
-    const auto tip = camera::detectIndexTip (frame);
+}
+
+void CameraChordWheelComponent::applyPointing (const std::optional<juce::Point<float>>& tip)
+{
     if (! tip.has_value())
     {
         wheel->clearPointing();

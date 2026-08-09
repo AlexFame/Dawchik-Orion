@@ -206,7 +206,10 @@ namespace orion::chords
         std::sort (iv.begin(), iv.end());
         iv.erase (std::unique (iv.begin(), iv.end()), iv.end());
 
-        const int base = rootMidi - (rootMidi % 12) + rootPc;
+        // Voice every diatonic chord at or above the tonic (ascending ladder I→vii within one octave)
+        // so a degree whose root pitch class sits below the key root (e.g. vii = C in D minor) doesn't
+        // drop an octave under the tonic.
+        const int base = rootMidi - (rootMidi % 12) + rootPc + (rootPc < keyRootPc ? 12 : 0);
         std::vector<int> out;
         for (int s : iv)
             out.push_back (juce::jlimit (0, 127, base + s));

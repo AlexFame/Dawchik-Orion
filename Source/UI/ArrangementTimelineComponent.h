@@ -84,6 +84,10 @@ public:
     std::function<void()> onChordAuditionStop;
     // Fired when the chord lane changes, so the host can re-render re-harmonised audio clips.
     std::function<void()> onChordLaneChanged;
+    // Clicking the "Key: …" label in the chord selector — host opens the project-key menu.
+    std::function<void(juce::Rectangle<int> screenArea)> onRequestKeyMenu;
+    // Re-push the current project key into the open chord selector (call after the key changes).
+    void refreshChordSelectorKey();
 
     // Public so the host can be handed a set of clips to act on (clip gain / normalize).
     struct SelectedClip

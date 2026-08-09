@@ -431,6 +431,7 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     chordSelector->onAudition     = [this](const std::vector<int>& p) { auditionChord(p); };
     chordSelector->onClose        = [this] { closeChordSelector(); };
     chordSelector->onDragChordOut = [this](const std::vector<int>& p) { beginChordDrag(p); };
+    chordSelector->onRequestKeyMenu = [this](juce::Rectangle<int> area) { if (onRequestKeyMenu) onRequestKeyMenu(area); };
     addChildComponent(*chordSelector);
 
     cameraChordWheel = std::make_unique<CameraChordWheelComponent>();
@@ -554,6 +555,14 @@ void MidiEditorOverlayComponent::setProjectKey(int rootSemitones, bool minor)
     scaleRoot         = ((rootSemitones % 12) + 12) % 12;
     scalePatternIndex = minor ? 0 : 1;
     updateSubtitle();
+    // Keep an open chord selector in sync with the new project key.
+    if (chordSelector != nullptr && chordSelector->isVisible())
+    {
+        const int patternIndex = juce::jlimit(0, static_cast<int>(scalePatterns.size()) - 1, scalePatternIndex);
+        const juce::String keyName = juce::String(rootNames[static_cast<std::size_t>(scaleRoot)])
+                                   + " " + scalePatterns[static_cast<std::size_t>(patternIndex)].name;
+        chordSelector->setProjectKey(scaleRoot, scalePatterns[static_cast<std::size_t>(patternIndex)].pitchClasses, keyName);
+    }
     repaint();
 }
 
@@ -1528,7 +1537,7 @@ void MidiEditorOverlayComponent::resized()
     if (chordSelector != nullptr && chordSelector->isVisible())
     {
         const auto grid = getVisibleGridViewport();
-        constexpr int w = 620, h = 400;
+        constexpr int w = 760, h = 560;
         const int x = juce::jlimit(grid.getX(), juce::jmax(grid.getX(), grid.getRight() - w),
                                    grid.getCentreX() - w / 2);
         chordSelector->setBounds(x, grid.getY() + 14, w, h);
@@ -3186,7 +3195,7 @@ void MidiEditorOverlayComponent::openChordSelector()
 
     // Centre the panel over the grid, just below the toolbar.
     const auto grid = getVisibleGridViewport();
-    constexpr int w = 620, h = 400;
+    constexpr int w = 760, h = 560;
     const int x = juce::jlimit(grid.getX(), juce::jmax(grid.getX(), grid.getRight() - w),
                                grid.getCentreX() - w / 2);
     const int y = grid.getY() + 14;

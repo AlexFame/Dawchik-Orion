@@ -2522,6 +2522,7 @@ void ArrangementTimelineComponent::openChordEditorFor(int index)
             repaint();
         };
         arrChordSelector->onClose = [this] { if (arrChordSelector) arrChordSelector->setVisible(false); };
+        arrChordSelector->onRequestKeyMenu = [this](juce::Rectangle<int> area) { if (onRequestKeyMenu) onRequestKeyMenu(area); };
     }
 
     arrChordSelector->setProjectKey(project.getKeyRoot(), pattern, keyName);
@@ -2531,7 +2532,7 @@ void ArrangementTimelineComponent::openChordEditorFor(int index)
     {
         const auto grid = getChordLaneGridArea();
         const auto blockX = static_cast<int>(beatToX(chords[static_cast<std::size_t>(index)].startBeat, grid));
-        constexpr int w = 620, h = 400;
+        constexpr int w = 760, h = 560;
         const int x = juce::jlimit(getLocalBounds().getX() + 8,
                                    juce::jmax(getLocalBounds().getX() + 8, getWidth() - w - 8), blockX);
         const int y = juce::jmin(getChordLaneBounds().getBottom() + 6, getHeight() - h - 8);
@@ -2539,6 +2540,18 @@ void ArrangementTimelineComponent::openChordEditorFor(int index)
     }
     arrChordSelector->setVisible(true);
     arrChordSelector->toFront(true);
+}
+
+void ArrangementTimelineComponent::refreshChordSelectorKey()
+{
+    if (arrChordSelector == nullptr || ! arrChordSelector->isVisible())
+        return;
+    const std::array<int, 7> pattern = project.isKeyMinor()
+        ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
+        : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
+    const juce::String keyName = juce::String(orion::chords::rootName(project.getKeyRoot()))
+                               + (project.isKeyMinor() ? " Minor" : " Major");
+    arrChordSelector->setProjectKey(project.getKeyRoot(), pattern, keyName);
 }
 
 void ArrangementTimelineComponent::updateChordMarqueeSelection()

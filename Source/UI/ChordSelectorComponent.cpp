@@ -104,6 +104,12 @@ juce::Rectangle<int> ChordSelectorComponent::closeButtonBounds() const
     return juce::Rectangle<int> (h.getRight() - 30, h.getY() + 6, 28, 28);
 }
 
+juce::Rectangle<int> ChordSelectorComponent::keyLabelBounds() const
+{
+    // Right side of the header, left of the close button — holds the clickable "Key: …" text.
+    return headerBounds().withTrimmedRight (40).removeFromRight (180);
+}
+
 std::array<juce::Rectangle<int>, 8> ChordSelectorComponent::qualityRects() const
 {
     std::array<juce::Rectangle<int>, 8> out;
@@ -157,56 +163,99 @@ void ChordSelectorComponent::paint (juce::Graphics& g)
     g.setFont (juce::Font (24.0f, juce::Font::bold));
     g.drawText (chordName (spec), header.withTrimmedRight (40), juce::Justification::centredLeft);
     g.setFont (juce::Font (14.0f, juce::Font::plain));
-    g.setColour (theme::text::primary.withAlpha (0.55f));
-    g.drawText ("Key: " + keyName, header.withTrimmedRight (40), juce::Justification::centredRight);
+    // Clickable key label (opens the project-key menu) — brighter + a ▾ so it reads as a control.
+    g.setColour (theme::text::primary.withAlpha (0.78f));
+    g.drawText ("Key: " + keyName + "  " + juce::String::fromUTF8 ("\xE2\x96\xBE"),
+                keyLabelBounds(), juce::Justification::centredRight);
 
     const auto cb = closeButtonBounds();
     g.setColour (juce::Colours::white.withAlpha (0.6f));
     g.drawLine (cb.getX() + 9.0f, cb.getY() + 9.0f, cb.getRight() - 9.0f, cb.getBottom() - 9.0f, 1.6f);
     g.drawLine (cb.getRight() - 9.0f, cb.getY() + 9.0f, cb.getX() + 9.0f, cb.getBottom() - 9.0f, 1.6f);
 
-    // Note wheel.
+    // Circle of Fifths: outer ring = 12 major chords by fifths, inner ring = their relative minors,
+    // tonic (the key) in the centre, roman numerals on the chords diatonic to the current key.
     {
         const auto w = wheelBounds().toFloat();
         const auto cx = w.getCentreX(), cy = w.getCentreY();
-        const auto outer = w.getWidth() * 0.5f;
-        const auto inner = outer * 0.46f;
-        const auto midR = (outer + inner) * 0.5f;
+        const auto rOuter = w.getWidth() * 0.5f;
+        const auto rMid   = rOuter * 0.66f;   // boundary between the major (outer) and minor (inner) rings
+        const auto rHub   = rOuter * 0.34f;   // centre hub (tonic)
 
-        std::array<bool, 12> inKey { {} };
-        for (int i = 0; i < 7; ++i)
-            inKey[static_cast<std::size_t> (((keyRootPc + keyPattern[static_cast<std::size_t> (i)]) % 12 + 12) % 12)] = true;
-
-        for (int pc = 0; pc < 12; ++pc)
+        // Roman-numeral labels for the chords diatonic to the current key, keyed by (root, isMinorRing).
+        std::array<juce::String, 12> outerRoman {}, innerRoman {};
         {
-            const float a0 = juce::degreesToRadians (pc * 30.0f - 15.0f);
-            const float a1 = juce::degreesToRadians (pc * 30.0f + 15.0f);
-            juce::Path seg;
-            seg.addPieSegment (cx - outer, cy - outer, outer * 2.0f, outer * 2.0f, a0, a1, inner / outer);
-
-            const bool selected = pc == spec.rootPc;
-            const bool hover = pc == hoverPc;
-            juce::Colour fill = theme::surface::elevated;
-            if (inKey[static_cast<std::size_t> (pc)]) fill = theme::surface::panel.brighter (0.05f);
-            if (hover)    fill = fill.brighter (0.18f);
-            if (selected) fill = theme::cool::cyan.withAlpha (0.92f);
-            g.setColour (fill);
-            g.fillPath (seg);
-            g.setColour (juce::Colours::black.withAlpha (0.35f));
-            g.strokePath (seg, juce::PathStrokeType (1.0f));
-
-            const float theta = juce::degreesToRadians (pc * 30.0f);
-            const float lx = cx + midR * std::sin (theta);
-            const float ly = cy - midR * std::cos (theta);
-            g.setColour (selected ? juce::Colours::black.withAlpha (0.92f)
-                                  : theme::text::primary.withAlpha (inKey[static_cast<std::size_t> (pc)] ? 0.95f : 0.5f));
-            g.setFont (juce::Font (13.0f, selected || inKey[static_cast<std::size_t> (pc)] ? juce::Font::bold : juce::Font::plain));
-            g.drawText (rootName (pc), juce::Rectangle<float> (lx - 14, ly - 10, 28, 20), juce::Justification::centred);
+            const auto tri = diatonicTriads (keyRootPc, keyPattern);
+            static constexpr std::array<const char*, 7> base { "I", "II", "III", "IV", "V", "VI", "VII" };
+            for (int i = 0; i < 7; ++i)
+            {
+                const auto& d = tri[static_cast<std::size_t> (i)];
+                const bool minorish = d.quality == Quality::minor || d.quality == Quality::dim;
+                juce::String num (base[static_cast<std::size_t> (i)]);
+                if (minorish) num = num.toLowerCase();
+                if (d.quality == Quality::dim) num += juce::String::fromUTF8 ("\xC2\xB0");
+                (minorish ? innerRoman : outerRoman)[static_cast<std::size_t> ((d.rootPc % 12 + 12) % 12)] = num;
+            }
         }
-        // Hub label.
-        g.setColour (theme::text::primary.withAlpha (0.85f));
-        g.setFont (juce::Font (15.0f, juce::Font::bold));
-        g.drawText (rootName (spec.rootPc), juce::Rectangle<float> (cx - inner, cy - 12, inner * 2, 24), juce::Justification::centred);
+
+        const auto drawRing = [&] (bool minor, float rIn, float rOut)
+        {
+            for (int pos = 0; pos < 12; ++pos)
+            {
+                const int root = minor ? innerRootAt (pos) : outerRootAt (pos);
+                const float a0 = juce::degreesToRadians (pos * 30.0f - 15.0f);
+                const float a1 = juce::degreesToRadians (pos * 30.0f + 15.0f);
+                juce::Path seg;
+                seg.addPieSegment (cx - rOut, cy - rOut, rOut * 2.0f, rOut * 2.0f, a0, a1, rIn / rOut);
+
+                const auto& roman = (minor ? innerRoman : outerRoman)[static_cast<std::size_t> (root)];
+                const bool diatonic = roman.isNotEmpty();
+                const bool selected = root == spec.rootPc
+                                   && ((spec.quality == Quality::minor) == minor);
+                const bool hover    = root == hoverPc && minor == hoverMinor;
+
+                juce::Colour fill = minor ? theme::surface::elevated : theme::surface::panel.brighter (0.03f);
+                if (diatonic) fill = fill.brighter (0.12f);
+                if (hover)    fill = fill.brighter (0.20f);
+                if (selected) fill = theme::cool::cyan.withAlpha (0.92f);
+                g.setColour (fill);
+                g.fillPath (seg);
+                g.setColour (juce::Colours::black.withAlpha (0.38f));
+                g.strokePath (seg, juce::PathStrokeType (1.0f));
+
+                const float theta = juce::degreesToRadians (pos * 30.0f);
+                const float rLabel = (rIn + rOut) * 0.5f;
+                const float lx = cx + rLabel * std::sin (theta);
+                const float ly = cy - rLabel * std::cos (theta);
+                const auto name = juce::String (rootName (root)) + (minor ? "m" : "");
+                g.setColour (selected ? juce::Colours::black.withAlpha (0.95f)
+                                      : theme::text::primary.withAlpha (diatonic ? 0.98f : 0.62f));
+                g.setFont (juce::Font (minor ? 15.0f : 17.5f, selected || diatonic ? juce::Font::bold : juce::Font::plain));
+                g.drawText (name, juce::Rectangle<float> (lx - 22, ly - (diatonic ? 13 : 10), 44, 20), juce::Justification::centred);
+                if (diatonic)
+                {
+                    g.setColour ((selected ? juce::Colours::black : theme::cool::cyan).withAlpha (0.85f));
+                    g.setFont (juce::Font (11.5f, juce::Font::bold));
+                    g.drawText (roman, juce::Rectangle<float> (lx - 22, ly + 5, 44, 14), juce::Justification::centred);
+                }
+            }
+        };
+
+        drawRing (false, rMid, rOuter);   // outer: major
+        drawRing (true,  rHub, rMid);     // inner: relative minor
+
+        // Hub: the tonic / current key.
+        g.setColour (theme::core::studio);
+        g.fillEllipse (cx - rHub, cy - rHub, rHub * 2.0f, rHub * 2.0f);
+        g.setColour (theme::cool::cyan.withAlpha (0.30f));
+        g.drawEllipse (cx - rHub, cy - rHub, rHub * 2.0f, rHub * 2.0f, 1.0f);
+        g.setColour (theme::text::primary.withAlpha (0.95f));
+        g.setFont (juce::Font (24.0f, juce::Font::bold));
+        g.drawText (juce::String (rootName (keyRootPc)) + (keyPattern[2] == 3 ? "m" : ""),
+                    juce::Rectangle<float> (cx - rHub, cy - 20, rHub * 2, 26), juce::Justification::centred);
+        g.setColour (theme::text::primary.withAlpha (0.55f));
+        g.setFont (juce::Font (12.0f, juce::Font::bold));
+        g.drawText ("I", juce::Rectangle<float> (cx - rHub, cy + 8, rHub * 2, 14), juce::Justification::centred);
     }
 
     // Quality row.
@@ -287,31 +336,51 @@ void ChordSelectorComponent::paint (juce::Graphics& g)
 }
 
 //========================================================================== input
-int ChordSelectorComponent::wheelPcAtPoint (juce::Point<int> p) const
+ChordSelectorComponent::WheelChord ChordSelectorComponent::wheelChordAtPoint (juce::Point<int> p) const
 {
     const auto w = wheelBounds().toFloat();
     const auto cx = w.getCentreX(), cy = w.getCentreY();
-    const auto outer = w.getWidth() * 0.5f;
-    const auto inner = outer * 0.46f;
+    const auto rOuter = w.getWidth() * 0.5f;
+    const auto rMid   = rOuter * 0.66f;
+    const auto rHub   = rOuter * 0.34f;
     const auto dx = p.x - cx, dy = p.y - cy;
     const auto dist = std::sqrt (dx * dx + dy * dy);
-    if (dist < inner || dist > outer)
-        return -1;
+    if (dist < rHub || dist > rOuter)
+        return {};   // hub or outside the rings
     auto angle = std::atan2 (dx, -dy);
     if (angle < 0) angle += juce::MathConstants<float>::twoPi;
-    return static_cast<int> (std::round (angle / juce::MathConstants<float>::twoPi * 12.0f)) % 12;
+    const int pos = static_cast<int> (std::round (angle / juce::MathConstants<float>::twoPi * 12.0f)) % 12;
+    const bool minor = dist < rMid;   // inner ring
+    return WheelChord { minor ? innerRootAt (pos) : outerRootAt (pos), minor };
 }
 
 void ChordSelectorComponent::mouseDown (const juce::MouseEvent& e)
 {
     dragStarted = false;
+    movingPanel = false;
     const auto p = e.getPosition();
 
     if (closeButtonBounds().contains (p)) { if (onClose) onClose(); return; }
 
-    if (const int pc = wheelPcAtPoint (p); pc >= 0)
+    // Clicking the key label opens the project-key menu (host wires it to the transport key menu).
+    if (keyLabelBounds().contains (p))
     {
-        spec.rootPc = pc;
+        if (onRequestKeyMenu) onRequestKeyMenu (localAreaToGlobal (keyLabelBounds()));
+        return;
+    }
+
+    // Dragging the header moves the whole panel (the header is the title bar / move handle).
+    if (headerBounds().contains (p))
+    {
+        movingPanel = true;
+        panelDragger.startDraggingComponent (this, e);
+        return;
+    }
+
+    if (const auto wc = wheelChordAtPoint (p); wc.isValid())
+    {
+        spec.rootPc  = wc.rootPc;
+        spec.quality = wc.minor ? Quality::minor : Quality::major;   // ring picks major/minor
         commitChange (true);
         return;
     }
@@ -360,12 +429,17 @@ void ChordSelectorComponent::mouseDown (const juce::MouseEvent& e)
 
 void ChordSelectorComponent::mouseDrag (const juce::MouseEvent& e)
 {
-    // Drag a chord out of the keyboard/header to drop it on the grid.
+    if (movingPanel)   // dragging the header moves the panel
+    {
+        panelDragger.dragComponent (this, e, nullptr);
+        return;
+    }
+
+    // Drag a chord out of the keyboard/diatonic row to drop it on the grid.
     if (dragStarted || onDragChordOut == nullptr)
         return;
     const auto down = e.getMouseDownPosition();
     const bool fromDragZone = keyboardBounds().contains (down)
-                           || headerBounds().contains (down)
                            || diatonicRowBounds().contains (down);
     if (fromDragZone && e.getDistanceFromDragStart() > 8)
     {
@@ -376,10 +450,11 @@ void ChordSelectorComponent::mouseDrag (const juce::MouseEvent& e)
 
 void ChordSelectorComponent::mouseMove (const juce::MouseEvent& e)
 {
-    const int next = wheelPcAtPoint (e.getPosition());
-    if (next != hoverPc)
+    const auto wc = wheelChordAtPoint (e.getPosition());
+    if (wc.rootPc != hoverPc || wc.minor != hoverMinor)
     {
-        hoverPc = next;
+        hoverPc    = wc.rootPc;
+        hoverMinor = wc.minor;
         repaint (wheelBounds());
     }
 }

@@ -22,6 +22,7 @@ public:
     std::function<void (const std::vector<int>&)> onAudition;                 // play the chord
     std::function<void (const orion::chords::ChordSpec&)> onChordChanged;     // spec changed
     std::function<void (const std::vector<int>&)> onDragChordOut;             // begin drag-to-grid
+    std::function<void (juce::Rectangle<int>)> onRequestKeyMenu;             // clicking the key label
     std::function<void()> onClose;
 
     void paint (juce::Graphics&) override;
@@ -39,21 +40,30 @@ private:
     juce::Rectangle<int> diatonicRowBounds() const;
     juce::Rectangle<int> keyboardBounds() const;
     juce::Rectangle<int> closeButtonBounds() const;
+    juce::Rectangle<int> keyLabelBounds() const;   // clickable "Key: …" area in the header
 
     std::array<juce::Rectangle<int>, 8>  qualityRects() const;
     std::array<juce::Rectangle<int>, 12> extensionRects() const;
     std::array<juce::Rectangle<int>, 7>  diatonicRects() const;
 
     void commitChange (bool audition);
-    int wheelPcAtPoint (juce::Point<int> p) const; // -1 if outside the ring
+
+    // Circle of Fifths hit result: outer ring = major chords by fifths, inner ring = relative minors.
+    struct WheelChord { int rootPc { -1 }; bool minor { false }; bool isValid() const { return rootPc >= 0; } };
+    WheelChord wheelChordAtPoint (juce::Point<int> p) const;   // invalid if outside the rings
+    static int outerRootAt (int pos) noexcept { return (7 * pos) % 12; }        // major, fifths order (C,G,D…)
+    static int innerRootAt (int pos) noexcept { return (7 * pos + 9) % 12; }    // relative minor of the outer
 
     orion::chords::ChordSpec spec;
     int keyRootPc { 0 };
     std::array<int, 7> keyPattern { { 0, 2, 3, 5, 7, 8, 10 } };
     juce::String keyName { "C Minor" };
 
-    int hoverPc { -1 };
+    int  hoverPc { -1 };         // hovered chord root, -1 = none
+    bool hoverMinor { false };   // which ring the hover is on
     bool dragStarted { false };
+    bool movingPanel { false };  // dragging the header moves the whole panel
+    juce::ComponentDragger panelDragger;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChordSelectorComponent)
 };

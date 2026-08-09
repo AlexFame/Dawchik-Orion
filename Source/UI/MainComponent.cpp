@@ -4331,6 +4331,7 @@ void MainComponent::showKeySelectionMenu(juce::Rectangle<int> targetScreenArea)
                 arrangementPlaybackSource->prepareWarpCacheForCurrentTempo();
             // Sync the piano-roll scale to the new project key if it's open.
             midiEditorOverlay.setProjectKey(root, isMinor);
+            arrangementTimeline.refreshChordSelectorKey();   // update the open chord-lane selector too
             updateTransportLabels();
             refreshClipInspector();
             arrangementTimeline.repaint();

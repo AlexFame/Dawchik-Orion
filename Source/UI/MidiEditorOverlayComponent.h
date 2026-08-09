@@ -47,6 +47,7 @@ public:
     std::function<void(int)> onChordSizeChanged;  // fired when the chord size (3/7/9/11/13) is picked
     std::function<void(int, int)> onPreviewNoteOn;
     std::function<void(int)> onPreviewNoteOff;
+    std::function<void(juce::Rectangle<int> screenArea)> onRequestKeyMenu;  // clicking the chord key label
     std::function<void()> onPreviewChordRetrigger;
     std::function<void(double)> onStartGlobalSpacePreview;
     std::function<void()> onStopGlobalSpacePreview;

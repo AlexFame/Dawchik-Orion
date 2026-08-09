@@ -892,6 +892,8 @@ void MainComponent::wireEditors()
             liveMidiNoteOff(selectedArrangementClip->first, midiNote);
     };
     arrangementTimeline.onChordAudition = [this](const std::vector<int>& pitches) { auditionArrangementChord(pitches); };
+    arrangementTimeline.onRequestKeyMenu = [this](juce::Rectangle<int> area) { showKeySelectionMenu(area); };
+    midiEditorOverlay.onRequestKeyMenu   = [this](juce::Rectangle<int> area) { showKeySelectionMenu(area); };
 
     arrangementTimeline.onChordLaneChanged = [this]()
     {
