@@ -82,6 +82,9 @@ target_sources(
         Source/Audio/TransportEngine.cpp
         Source/Audio/VoiceChatEngine.cpp
         Source/Audio/WarpEngine.cpp
+        Source/ChordWheel/ChordWheelModel.cpp
+        Source/ChordWheel/ChordWheelComponent.cpp
+        Source/CameraChordWheel/CameraChordWheelComponent.cpp
         Source/Core/ProjectSerializer.cpp
         Source/Core/ProjectState.cpp
         Source/Collab/OpLog.cpp
@@ -120,6 +123,11 @@ target_sources(
         Source/UI/StepSequencerComponent.cpp
         Source/UI/TransportBarComponent.cpp
 )
+
+if(APPLE)
+    target_sources(Orion PRIVATE Source/CameraChordWheel/HandPoseTracker.mm)
+    target_link_libraries(Orion PRIVATE "-framework Vision" "-framework CoreGraphics")
+endif()
 
 target_include_directories(
     Orion

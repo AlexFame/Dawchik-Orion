@@ -412,11 +412,42 @@ MidiEditorOverlayComponent::MidiEditorOverlayComponent()
     };
     addAndMakeVisible(chordToggle);
 
+    cameraChordButton.setButtonText("Camera");
+    cameraChordButton.setTooltip("Open a separate camera-controlled chord wheel");
+    cameraChordButton.setColour(juce::TextButton::buttonColourId, theme::surface::primary);
+    cameraChordButton.setColour(juce::TextButton::buttonOnColourId, theme::accent::activeCoral);
+    cameraChordButton.setColour(juce::TextButton::textColourOffId, theme::text::primary);
+    cameraChordButton.setColour(juce::TextButton::textColourOnId, theme::text::primary);
+    cameraChordButton.onClick = [this]
+    {
+        if (cameraChordWheel != nullptr && cameraChordWheel->isVisible())
+            closeCameraChordWheel();
+        else
+            openCameraChordWheel();
+    };
+    addAndMakeVisible(cameraChordButton);
+
     chordSelector = std::make_unique<ChordSelectorComponent>();
     chordSelector->onAudition     = [this](const std::vector<int>& p) { auditionChord(p); };
     chordSelector->onClose        = [this] { closeChordSelector(); };
     chordSelector->onDragChordOut = [this](const std::vector<int>& p) { beginChordDrag(p); };
     addChildComponent(*chordSelector);
+
+    cameraChordWheel = std::make_unique<CameraChordWheelComponent>();
+    cameraChordWheel->onClose = [this] { closeCameraChordWheel(); };
+    cameraChordWheel->onChordPointed = [this] (const chords::ChordSpec& chord)
+    {
+        const auto patternIndex = juce::jlimit (0, static_cast<int> (scalePatterns.size()) - 1, scalePatternIndex);
+        auditionChord (chords::pitchesInKey (chord, scaleRoot,
+                                             scalePatterns[static_cast<std::size_t> (patternIndex)].pitchClasses, 48));
+    };
+    cameraChordWheel->onChordSelected = [this] (const chords::ChordSpec& chord)
+    {
+        const auto patternIndex = juce::jlimit (0, static_cast<int> (scalePatterns.size()) - 1, scalePatternIndex);
+        auditionChord (chords::pitchesInKey (chord, scaleRoot,
+                                             scalePatterns[static_cast<std::size_t> (patternIndex)].pitchClasses, 48));
+    };
+    addChildComponent (*cameraChordWheel);
 
     focusToggle.setVisible(false);
 
@@ -1484,6 +1515,7 @@ void MidiEditorOverlayComponent::resized()
     scaleLockToggle.setBounds(controlsArea.removeFromLeft(26).reduced(0, 5));
     scaleLockLabel.setBounds(controlsArea.removeFromLeft(80).reduced(0, 4));
     chordToggle.setBounds(pill(66));
+    cameraChordButton.setBounds(pill(76));
     glideButton.setBounds(pill(62));
     joinButton.setBounds(pill(56));
     splitButton.setBounds(pill(56));
@@ -1500,6 +1532,15 @@ void MidiEditorOverlayComponent::resized()
         const int x = juce::jlimit(grid.getX(), juce::jmax(grid.getX(), grid.getRight() - w),
                                    grid.getCentreX() - w / 2);
         chordSelector->setBounds(x, grid.getY() + 14, w, h);
+    }
+
+    if (cameraChordWheel != nullptr && cameraChordWheel->isVisible())
+    {
+        const auto grid = getVisibleGridViewport();
+        constexpr int w = 760, h = 500;
+        const int x = juce::jlimit (grid.getX(), juce::jmax (grid.getX(), grid.getRight() - w),
+                                    grid.getCentreX() - w / 2);
+        cameraChordWheel->setBounds (x, grid.getY() + 14, w, h);
     }
 
     clampScrollOffsets();
@@ -3161,6 +3202,39 @@ void MidiEditorOverlayComponent::closeChordSelector()
     if (chordSelector != nullptr)
         chordSelector->setVisible(false);
     chordToggle.setToggleState(false, juce::dontSendNotification);
+}
+
+void MidiEditorOverlayComponent::openCameraChordWheel()
+{
+    if (cameraChordWheel == nullptr)
+        return;
+
+    const int patternIndex = juce::jlimit (0, static_cast<int> (scalePatterns.size()) - 1, scalePatternIndex);
+    const auto& pattern = scalePatterns[static_cast<std::size_t> (patternIndex)];
+    const juce::String keyName = juce::String (rootNames[static_cast<std::size_t> (((scaleRoot % 12) + 12) % 12)])
+                               + " " + pattern.name;
+    cameraChordWheel->setProjectKey (scaleRoot, pattern.pitchClasses, keyName);
+    cameraChordWheel->setChord (chords::diatonicTriads (scaleRoot, pattern.pitchClasses)[0], false);
+
+    if (chordSelector != nullptr)
+        chordSelector->setVisible (false);
+    chordToggle.setToggleState (false, juce::dontSendNotification);
+    cameraChordButton.setToggleState (true, juce::dontSendNotification);
+    cameraChordWheel->setVisible (true);
+    cameraChordWheel->toFront (false);
+    cameraChordWheel->startCamera();
+    resized();
+}
+
+void MidiEditorOverlayComponent::closeCameraChordWheel()
+{
+    if (cameraChordWheel != nullptr)
+    {
+        cameraChordWheel->stopCamera();
+        cameraChordWheel->setVisible (false);
+    }
+    cameraChordButton.setToggleState (false, juce::dontSendNotification);
+    releaseChordPreview();
 }
 
 void MidiEditorOverlayComponent::beginChordDrag(const std::vector<int>& pitches)

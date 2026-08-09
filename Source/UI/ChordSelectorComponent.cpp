@@ -142,22 +142,6 @@ std::array<juce::Rectangle<int>, 7> ChordSelectorComponent::diatonicRects() cons
     return out;
 }
 
-int ChordSelectorComponent::wheelPcAtPoint (juce::Point<int> p) const
-{
-    const auto w = wheelBounds().toFloat();
-    const auto cx = w.getCentreX(), cy = w.getCentreY();
-    const auto outer = w.getWidth() * 0.5f;
-    const auto inner = outer * 0.46f;
-    const auto dx = p.x - cx, dy = p.y - cy;
-    const auto dist = std::sqrt (dx * dx + dy * dy);
-    if (dist < inner || dist > outer)
-        return -1;
-    auto angle = std::atan2 (dx, -dy);            // 0 at top, clockwise positive
-    if (angle < 0) angle += juce::MathConstants<float>::twoPi;
-    const int pc = static_cast<int> (std::round (angle / juce::MathConstants<float>::twoPi * 12.0f)) % 12;
-    return pc;
-}
-
 //========================================================================== paint
 void ChordSelectorComponent::paint (juce::Graphics& g)
 {
@@ -303,6 +287,21 @@ void ChordSelectorComponent::paint (juce::Graphics& g)
 }
 
 //========================================================================== input
+int ChordSelectorComponent::wheelPcAtPoint (juce::Point<int> p) const
+{
+    const auto w = wheelBounds().toFloat();
+    const auto cx = w.getCentreX(), cy = w.getCentreY();
+    const auto outer = w.getWidth() * 0.5f;
+    const auto inner = outer * 0.46f;
+    const auto dx = p.x - cx, dy = p.y - cy;
+    const auto dist = std::sqrt (dx * dx + dy * dy);
+    if (dist < inner || dist > outer)
+        return -1;
+    auto angle = std::atan2 (dx, -dy);
+    if (angle < 0) angle += juce::MathConstants<float>::twoPi;
+    return static_cast<int> (std::round (angle / juce::MathConstants<float>::twoPi * 12.0f)) % 12;
+}
+
 void ChordSelectorComponent::mouseDown (const juce::MouseEvent& e)
 {
     dragStarted = false;
@@ -377,11 +376,19 @@ void ChordSelectorComponent::mouseDrag (const juce::MouseEvent& e)
 
 void ChordSelectorComponent::mouseMove (const juce::MouseEvent& e)
 {
-    const int pc = wheelPcAtPoint (e.getPosition());
-    if (pc != hoverPc) { hoverPc = pc; repaint (wheelBounds()); }
+    const int next = wheelPcAtPoint (e.getPosition());
+    if (next != hoverPc)
+    {
+        hoverPc = next;
+        repaint (wheelBounds());
+    }
 }
 
 void ChordSelectorComponent::mouseExit (const juce::MouseEvent&)
 {
-    if (hoverPc != -1) { hoverPc = -1; repaint (wheelBounds()); }
+    if (hoverPc != -1)
+    {
+        hoverPc = -1;
+        repaint (wheelBounds());
+    }
 }

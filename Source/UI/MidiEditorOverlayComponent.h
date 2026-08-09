@@ -10,6 +10,7 @@
 
 #include "../Core/ProjectState.h"
 #include "ChordSelectorComponent.h"
+#include "../CameraChordWheel/CameraChordWheelComponent.h"
 
 #include <memory>
 
@@ -346,10 +347,14 @@ private:
     juce::TextButton closeButton;
     juce::ToggleButton scaleLockToggle;
     juce::TextButton chordToggle;
+    juce::TextButton cameraChordButton { "Camera" };
     juce::Label scaleLockLabel;
     std::unique_ptr<ChordSelectorComponent> chordSelector;   // opened from the Chord button
+    std::unique_ptr<CameraChordWheelComponent> cameraChordWheel;
     void openChordSelector();
     void closeChordSelector();
+    void openCameraChordWheel();
+    void closeCameraChordWheel();
     void auditionChord(const std::vector<int>& pitches);
     void releaseChordPreview();
     std::vector<int> chordPreviewPitches;

@@ -43,9 +43,9 @@ private:
     std::array<juce::Rectangle<int>, 8>  qualityRects() const;
     std::array<juce::Rectangle<int>, 12> extensionRects() const;
     std::array<juce::Rectangle<int>, 7>  diatonicRects() const;
-    int wheelPcAtPoint (juce::Point<int> p) const;   // -1 if outside the ring
 
     void commitChange (bool audition);
+    int wheelPcAtPoint (juce::Point<int> p) const; // -1 if outside the ring
 
     orion::chords::ChordSpec spec;
     int keyRootPc { 0 };
