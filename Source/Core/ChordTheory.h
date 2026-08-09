@@ -160,8 +160,8 @@ namespace orion::chords
         for (int i = 0; i < 7; ++i)
             if (((keyRootPc + pattern[static_cast<std::size_t> (i)]) % 12 + 12) % 12 == rootPc) { deg = i; break; }
 
-        if (deg < 0)
-            return pitches (c, rootMidi);   // chromatic root → fixed offsets
+        if (deg < 0)   // chromatic (borrowed) root → fixed offsets, but keep it at/above the tonic too
+            return pitches (c, rootMidi + (rootPc < keyRootPc ? 12 : 0));
 
         // Semitone offset (from the chord root) of the scale tone `stepsUp` diatonic steps above it.
         auto tone = [&] (int stepsUp)

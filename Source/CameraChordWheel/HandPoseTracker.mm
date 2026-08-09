@@ -13,12 +13,12 @@ std::optional<juce::Point<float>> detectIndexTip (const juce::Image& frame)
         return std::nullopt;
 
     // Vision hand-pose is happy with a small frame, and downscaling cuts both the pixel-copy and the
-    // detection cost. Cap the long edge at 320 px. (Runs on a background thread — see the component.)
+    // detection cost. Cap the long edge at 256 px. (Runs on a background thread — see the component.)
     juce::Image small = frame;
-    constexpr int targetW = 320;
+    constexpr int targetW = 256;
     if (frame.getWidth() > targetW)
         small = frame.rescaled (targetW, juce::jmax (2, frame.getHeight() * targetW / frame.getWidth()),
-                                juce::Graphics::mediumResamplingQuality);
+                                juce::Graphics::lowResamplingQuality);
 
     const int width  = small.getWidth();
     const int height = small.getHeight();
@@ -26,16 +26,29 @@ std::optional<juce::Point<float>> detectIndexTip (const juce::Image& frame)
     std::vector<uint8_t> rgba (static_cast<size_t> (width * height * 4));
     {
         const juce::Image::BitmapData pixels (small, juce::Image::BitmapData::readOnly);
+        const bool argb = pixels.pixelFormat == juce::Image::ARGB && pixels.pixelStride == 4;
         for (int y = 0; y < height; ++y)
         {
-            auto* dst = rgba.data() + static_cast<size_t> (y * width * 4);
+            auto* dst  = rgba.data() + static_cast<size_t> (y * width * 4);
+            auto* line = pixels.getLinePointer (y);
             for (int x = 0; x < width; ++x)
             {
-                const auto c = pixels.getPixelColour (x, y);
-                *dst++ = c.getRed();
-                *dst++ = c.getGreen();
-                *dst++ = c.getBlue();
-                *dst++ = c.getAlpha();
+                if (argb)   // fast path: read the packed pixel directly (no Colour object per pixel)
+                {
+                    const auto* px = reinterpret_cast<const juce::PixelARGB*> (line + x * 4);
+                    *dst++ = px->getRed();
+                    *dst++ = px->getGreen();
+                    *dst++ = px->getBlue();
+                    *dst++ = px->getAlpha();
+                }
+                else
+                {
+                    const auto c = pixels.getPixelColour (x, y);
+                    *dst++ = c.getRed();
+                    *dst++ = c.getGreen();
+                    *dst++ = c.getBlue();
+                    *dst++ = c.getAlpha();
+                }
             }
         }
     }
@@ -68,7 +81,7 @@ std::optional<juce::Point<float>> detectIndexTip (const juce::Image& frame)
             {
                 VNRecognizedPoint* point = [observation recognizedPointForJointName:VNHumanHandPoseObservationJointNameIndexTip
                                                                              error:&error];
-                if (point != nil && point.confidence >= 0.35)
+                if (point != nil && point.confidence >= 0.3)
                     result = juce::Point<float> (static_cast<float> (point.location.x),
                                                  1.0f - static_cast<float> (point.location.y));
             }

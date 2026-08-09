@@ -1,15 +1,20 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_video/juce_video.h>
 #include "../Core/ChordTheory.h"
+#include "../CameraChordWheel/HandPoseTracker.h"
 #include <array>
 #include <functional>
+#include <optional>
 #include <vector>
 
-// A self-contained chord picker: root wheel + quality + extensions + a live keyboard preview,
-// seeded with the seven diatonic chords of the project key. Clicking a chord auditions it;
-// dragging it out drops the chord onto the grid (wired by the host).
-class ChordSelectorComponent final : public juce::Component
+// A self-contained chord picker: Circle-of-Fifths wheel + quality + extensions + a live keyboard
+// preview, seeded with the seven diatonic chords of the project key. Clicking a chord auditions it;
+// dragging it out drops the chord onto the grid (wired by the host). An optional camera mode lets
+// the user point at chords with a fingertip (Vision hand-pose).
+class ChordSelectorComponent final : public juce::Component,
+                                     private juce::CameraDevice::Listener
 {
 public:
     ChordSelectorComponent();
@@ -31,7 +36,38 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override;
 
+    ~ChordSelectorComponent() override;
+
 private:
+    // ---- Camera (finger-pointing) mode ------------------------------------------------------
+    void imageReceived (const juce::Image&) override;
+    void toggleCamera();
+    void startCamera();
+    void stopCamera();
+    void cameraOpened (juce::CameraDevice*, const juce::String& error);
+    void detectionLoop (juce::Thread& self);            // background: fingertip → callAsync applyPointing
+    void applyPointing (const std::optional<juce::Point<float>>& normTip);  // message thread only
+    juce::Rectangle<int> cameraButtonBounds() const;
+
+    struct FrameWorker final : juce::Thread
+    {
+        explicit FrameWorker (ChordSelectorComponent& o) : juce::Thread ("orion-chord-cam"), owner (o) {}
+        void run() override { owner.detectionLoop (*this); }
+        ChordSelectorComponent& owner;
+    };
+
+    // A transparent top layer that draws ONLY the fast-moving camera cursor + self-view, so the
+    // expensive Circle-of-Fifths wheel isn't repainted every camera frame.
+    struct CamOverlay final : juce::Component
+    {
+        explicit CamOverlay (ChordSelectorComponent& o) : owner (o) { setInterceptsMouseClicks (false, false); }
+        void paint (juce::Graphics& g) override { owner.paintCameraOverlay (g); }
+        ChordSelectorComponent& owner;
+    };
+    void paintCameraOverlay (juce::Graphics&);
+    void resized() override;
+    std::unique_ptr<CamOverlay> camOverlay;
+
     juce::Rectangle<int> panelBounds() const;
     juce::Rectangle<int> headerBounds() const;
     juce::Rectangle<int> wheelBounds() const;
@@ -64,6 +100,23 @@ private:
     bool dragStarted { false };
     bool movingPanel { false };  // dragging the header moves the whole panel
     juce::ComponentDragger panelDragger;
+
+    // Camera mode state.
+    bool cameraOn { false };
+    bool cameraOpening { false };
+    std::unique_ptr<juce::CameraDevice> camera;
+    std::unique_ptr<FrameWorker> worker;
+    juce::CriticalSection frameLock;
+    juce::Image latestFrame;
+    int  pointHoverPc { -1 };        // chord under the fingertip, -1 = none
+    bool pointHoverMinor { false };
+    double lastPointAuditionMs { 0.0 };
+    juce::Point<float> smoothTip { 0.5f, 0.5f };  // gained+smoothed fingertip → drives the wheel cursor
+    juce::Point<float> previewTip { 0.5f, 0.5f };  // raw smoothed fingertip → the dot on the self-view
+    bool  haveTip { false };
+    int   missedFrames { 0 };        // brief hold-last when detection drops a frame
+    juce::Point<float> cursorPos;    // on-wheel cursor in local coords
+    bool  cursorValid { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChordSelectorComponent)
 };

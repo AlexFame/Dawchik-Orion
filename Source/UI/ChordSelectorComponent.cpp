@@ -168,6 +168,20 @@ void ChordSelectorComponent::paint (juce::Graphics& g)
     g.drawText ("Key: " + keyName + "  " + juce::String::fromUTF8 ("\xE2\x96\xBE"),
                 keyLabelBounds(), juce::Justification::centredRight);
 
+    // Camera toggle: point at chords with a fingertip.
+    {
+        const auto camB = cameraButtonBounds().toFloat();
+        g.setColour (cameraOn ? theme::cool::cyan.withAlpha (0.90f)
+                              : theme::surface::elevated.withAlpha (0.85f));
+        g.fillRoundedRectangle (camB, 6.0f);
+        g.setColour ((cameraOn ? theme::cool::cyan : juce::Colours::white).withAlpha (0.35f));
+        g.drawRoundedRectangle (camB.reduced (0.5f), 6.0f, 1.0f);
+        g.setColour (cameraOn ? juce::Colours::black.withAlpha (0.9f) : theme::text::primary.withAlpha (0.85f));
+        g.setFont (juce::Font (12.0f, juce::Font::bold));
+        g.drawText (cameraOpening ? "Cam…" : (cameraOn ? "Cam \xE2\x97\x8F" : "\xF0\x9F\x93\xB7 Cam"),
+                    camB, juce::Justification::centred);
+    }
+
     const auto cb = closeButtonBounds();
     g.setColour (juce::Colours::white.withAlpha (0.6f));
     g.drawLine (cb.getX() + 9.0f, cb.getY() + 9.0f, cb.getRight() - 9.0f, cb.getBottom() - 9.0f, 1.6f);
@@ -333,6 +347,64 @@ void ChordSelectorComponent::paint (juce::Graphics& g)
                 g.fillRoundedRectangle (key, 2.0f);
             }
     }
+
+}
+
+void ChordSelectorComponent::resized()
+{
+    if (camOverlay != nullptr)
+        camOverlay->setBounds (getLocalBounds());
+}
+
+// Fast top layer: only the camera cursor + self-view (see CamOverlay). Never touches the wheel.
+void ChordSelectorComponent::paintCameraOverlay (juce::Graphics& g)
+{
+    // Camera overlay: on-wheel cursor + a live self-view so the user sees where the finger points.
+    if (cameraOn)
+    {
+        // Fingertip cursor on the wheel (crosshair + ring).
+        if (cursorValid)
+        {
+            const auto c = cursorPos;
+            g.setColour (theme::accent::activeCoral.withAlpha (0.95f));
+            g.drawEllipse (c.x - 11.0f, c.y - 11.0f, 22.0f, 22.0f, 2.4f);
+            g.fillEllipse (c.x - 3.0f, c.y - 3.0f, 6.0f, 6.0f);
+            g.setColour (juce::Colours::white.withAlpha (0.85f));
+            g.drawLine (c.x - 15.0f, c.y, c.x - 6.0f, c.y, 1.4f);
+            g.drawLine (c.x + 6.0f, c.y, c.x + 15.0f, c.y, 1.4f);
+            g.drawLine (c.x, c.y - 15.0f, c.x, c.y - 6.0f, 1.4f);
+            g.drawLine (c.x, c.y + 6.0f, c.x, c.y + 15.0f, 1.4f);
+        }
+
+        // Self-view thumbnail (mirrored) in the wheel's top-left corner + a dot on the fingertip.
+        const auto wb = wheelBounds();
+        juce::Rectangle<float> preview (static_cast<float> (wb.getX()), static_cast<float> (wb.getY()), 150.0f, 112.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.75f));
+        g.fillRoundedRectangle (preview, 8.0f);
+        {
+            const juce::ScopedLock lock (frameLock);
+            if (latestFrame.isValid())
+            {
+                juce::Graphics::ScopedSaveState ss (g);
+                juce::Path clip; clip.addRoundedRectangle (preview.reduced (2.0f), 7.0f);
+                g.reduceClipRegion (clip);
+                // Mirror horizontally so it reads like a mirror.
+                g.addTransform (juce::AffineTransform::scale (-1.0f, 1.0f, preview.getCentreX(), preview.getCentreY()));
+                g.drawImage (latestFrame, preview.reduced (2.0f), juce::RectanglePlacement::fillDestination);
+            }
+        }
+        if (haveTip)
+        {
+            const float dx = preview.getX() + (1.0f - previewTip.x) * preview.getWidth();   // preview is mirrored
+            const float dy = preview.getY() + previewTip.y * preview.getHeight();
+            g.setColour (theme::accent::activeCoral);
+            g.fillEllipse (dx - 4.0f, dy - 4.0f, 8.0f, 8.0f);
+            g.setColour (juce::Colours::white);
+            g.drawEllipse (dx - 4.0f, dy - 4.0f, 8.0f, 8.0f, 1.2f);
+        }
+        g.setColour (theme::cool::cyan.withAlpha (0.5f));
+        g.drawRoundedRectangle (preview.reduced (0.5f), 8.0f, 1.0f);
+    }
 }
 
 //========================================================================== input
@@ -361,6 +433,8 @@ void ChordSelectorComponent::mouseDown (const juce::MouseEvent& e)
     const auto p = e.getPosition();
 
     if (closeButtonBounds().contains (p)) { if (onClose) onClose(); return; }
+
+    if (cameraButtonBounds().contains (p)) { toggleCamera(); return; }
 
     // Clicking the key label opens the project-key menu (host wires it to the transport key menu).
     if (keyLabelBounds().contains (p))
@@ -435,11 +509,12 @@ void ChordSelectorComponent::mouseDrag (const juce::MouseEvent& e)
         return;
     }
 
-    // Drag a chord out of the keyboard/diatonic row to drop it on the grid.
+    // Drag a chord out of the wheel / keyboard / diatonic row to drop it on the grid.
     if (dragStarted || onDragChordOut == nullptr)
         return;
     const auto down = e.getMouseDownPosition();
-    const bool fromDragZone = keyboardBounds().contains (down)
+    const bool fromDragZone = wheelBounds().contains (down)
+                           || keyboardBounds().contains (down)
                            || diatonicRowBounds().contains (down);
     if (fromDragZone && e.getDistanceFromDragStart() > 8)
     {
@@ -461,9 +536,156 @@ void ChordSelectorComponent::mouseMove (const juce::MouseEvent& e)
 
 void ChordSelectorComponent::mouseExit (const juce::MouseEvent&)
 {
-    if (hoverPc != -1)
+    if (hoverPc != -1 && ! cameraOn)   // don't fight the camera's own pointing
     {
         hoverPc = -1;
         repaint (wheelBounds());
     }
+}
+
+// ---- Camera (finger-pointing) mode ----------------------------------------------------------
+
+ChordSelectorComponent::~ChordSelectorComponent() { stopCamera(); }
+
+juce::Rectangle<int> ChordSelectorComponent::cameraButtonBounds() const
+{
+    // A pill in the header, just left of the "Key: …" label.
+    auto h = headerBounds();
+    return juce::Rectangle<int> (h.getRight() - 220 - 8 - 66, h.getY() + 7, 66, 26);
+}
+
+void ChordSelectorComponent::toggleCamera()
+{
+    if (cameraOn || cameraOpening) stopCamera();
+    else                          startCamera();
+    repaint();
+}
+
+void ChordSelectorComponent::startCamera()
+{
+    if (cameraOn || cameraOpening) return;
+    if (juce::CameraDevice::getAvailableDevices().isEmpty()) return;
+    cameraOpening = true;
+    juce::Component::SafePointer<ChordSelectorComponent> safeThis (this);
+    juce::CameraDevice::openDeviceAsync (0,
+        [safeThis] (juce::CameraDevice* device, const juce::String& error)
+        {
+            if (safeThis != nullptr) safeThis->cameraOpened (device, error);
+            else delete device;
+        }, 640, 480, 1280, 720, false);
+}
+
+void ChordSelectorComponent::cameraOpened (juce::CameraDevice* device, const juce::String& /*error*/)
+{
+    cameraOpening = false;
+    camera.reset (device);
+    if (camera == nullptr) return;
+    camera->addListener (this);
+    cameraOn = true;
+    if (camOverlay == nullptr)
+    {
+        camOverlay = std::make_unique<CamOverlay> (*this);
+        addAndMakeVisible (*camOverlay);
+    }
+    camOverlay->setBounds (getLocalBounds());
+    camOverlay->setVisible (true);
+    camOverlay->toFront (false);
+    worker = std::make_unique<FrameWorker> (*this);
+    worker->startThread();
+    repaint();
+}
+
+void ChordSelectorComponent::stopCamera()
+{
+    if (worker != nullptr) { worker->stopThread (500); worker.reset(); }
+    if (camera != nullptr) { camera->removeListener (this); camera->stopRecording(); camera.reset(); }
+    cameraOn = false;
+    cameraOpening = false;
+    pointHoverPc = -1;
+    haveTip = false;
+    cursorValid = false;
+    if (camOverlay != nullptr) camOverlay->setVisible (false);
+    if (hoverPc != -1) hoverPc = -1;
+    repaint();
+}
+
+void ChordSelectorComponent::imageReceived (const juce::Image& image)
+{
+    const juce::ScopedLock lock (frameLock);
+    latestFrame = image.createCopy();   // one owning copy; the worker shares this ref
+}
+
+void ChordSelectorComponent::detectionLoop (juce::Thread& self)
+{
+    juce::Component::SafePointer<ChordSelectorComponent> safeThis (this);
+    while (! self.threadShouldExit())
+    {
+        juce::Image frame;
+        { const juce::ScopedLock lock (frameLock); frame = latestFrame; }
+        std::optional<juce::Point<float>> tip;
+        if (frame.isValid())
+            tip = orion::camera::detectIndexTip (frame);
+        juce::MessageManager::callAsync ([safeThis, tip] { if (safeThis != nullptr) safeThis->applyPointing (tip); });
+        self.wait (45);   // ~22 Hz
+    }
+}
+
+void ChordSelectorComponent::applyPointing (const std::optional<juce::Point<float>>& normTip)
+{
+    if (! cameraOn) return;
+    if (! normTip.has_value())
+    {
+        // Brief hold: a single dropped frame shouldn't blank the cursor (Vision misses now and then).
+        if (haveTip && ++missedFrames < 8)
+        {
+            if (camOverlay != nullptr) camOverlay->repaint();
+            return;
+        }
+        haveTip = false;
+        cursorValid = false;
+        const bool hadHover = hoverPc != -1;
+        hoverPc = -1;
+        if (hadHover) repaint (wheelBounds());     // clear the segment highlight (rare)
+        if (camOverlay != nullptr) camOverlay->repaint();
+        return;
+    }
+    missedFrames = 0;
+
+    // Map the CENTRE of the camera view to the whole wheel (gain around 0.5) so every chord — even the
+    // bottom of the circle — is reachable without pushing the hand to the extreme edge of the frame.
+    constexpr float gain = 1.7f;
+    const juce::Point<float> t { juce::jlimit (0.0f, 1.0f, 0.5f + (normTip->x - 0.5f) * gain),
+                                 juce::jlimit (0.0f, 1.0f, 0.5f + (normTip->y - 0.5f) * gain) };
+
+    // Exponential smoothing: kills the frame-to-frame jitter so the cursor reads cleanly.
+    if (! haveTip) { smoothTip = t; previewTip = *normTip; haveTip = true; }
+    else           { smoothTip += (t - smoothTip) * 0.5f; previewTip += (*normTip - previewTip) * 0.5f; }
+
+    // Map the (mirrored) fingertip onto the wheel and hit-test a chord segment.
+    const auto w = wheelBounds().toFloat();
+    const float lx = w.getX() + (1.0f - smoothTip.x) * w.getWidth();
+    const float ly = w.getY() + smoothTip.y * w.getHeight();
+    cursorPos   = { lx, ly };
+    cursorValid = true;
+    const auto wc = wheelChordAtPoint ({ juce::roundToInt (lx), juce::roundToInt (ly) });
+
+    if (wc.rootPc != hoverPc || wc.minor != hoverMinor)
+    {
+        hoverPc    = wc.rootPc;
+        hoverMinor = wc.minor;
+        repaint (wheelBounds());   // only when the pointed chord changes (heavy) — NOT every frame
+
+        // Audition the pointed chord, throttled so it doesn't retrigger every frame.
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        if (wc.isValid() && now - lastPointAuditionMs > 220.0 && onAudition)
+        {
+            lastPointAuditionMs = now;
+            ChordSpec probe = spec;
+            probe.rootPc  = wc.rootPc;
+            probe.quality = wc.minor ? Quality::minor : Quality::major;
+            probe.extensions = ext_none;
+            onAudition (pitchesInKey (probe, keyRootPc, keyPattern, 48));
+        }
+    }
+    if (camOverlay != nullptr) camOverlay->repaint();   // cursor + preview move (cheap, transparent layer)
 }
