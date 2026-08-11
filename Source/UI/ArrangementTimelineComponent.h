@@ -468,7 +468,10 @@ private:
     juce::Rectangle<int> getChordLaneGridArea() const noexcept; // lane minus the track-header gutter
     int chordEventAtPoint(juce::Point<int> position) const;     // index into chordTrack, or -1
     void addChordAtBeat(double beat);
+    void addChordAtBeat(double beat, const orion::chords::ChordSpec& spec);   // drop a specific chord
     void openChordEditorFor(int index);
+    orion::chords::ChordSpec pendingDropChord;   // chord being dragged out of the selector
+    std::optional<double> chordDropPreviewBeat;  // snapped drop position while dragging a chord in
     // Detect a chord progression from a dropped audio loop (background thread) and lay it on the lane.
     void detectChordsForClip(const juce::File& file, double startBeat, int numBars, int keyRoot, bool keyMinor,
                              double clipLengthBeats, double sampleStartRatio = 0.0, double sourceLengthBeats = 0.0);

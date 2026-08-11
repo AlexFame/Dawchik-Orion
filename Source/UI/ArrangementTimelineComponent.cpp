@@ -2471,22 +2471,35 @@ int ArrangementTimelineComponent::chordEventAtPoint(juce::Point<int> position) c
 
 void ArrangementTimelineComponent::addChordAtBeat(double beat)
 {
+    const std::array<int, 7> pattern = project.isKeyMinor()
+        ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
+        : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
+    addChordAtBeat(beat, orion::chords::diatonicTriads(project.getKeyRoot(), pattern)[0]);
+}
+
+void ArrangementTimelineComponent::addChordAtBeat(double beat, const orion::chords::ChordSpec& spec)
+{
     const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
     const auto snapped = juce::jmax(0.0, std::floor(snapBeatValue(beat) / beatsPerBar) * beatsPerBar);
 
     const std::array<int, 7> pattern = project.isKeyMinor()
         ? std::array<int, 7>{ 0, 2, 3, 5, 7, 8, 10 }
         : std::array<int, 7>{ 0, 2, 4, 5, 7, 9, 11 };
-    const auto tonic = orion::chords::diatonicTriads(project.getKeyRoot(), pattern)[0];
 
     pushUndoSnapshot();
     {
         const juce::ScopedLock sl(project.getAudioEditLock());
-        project.getChordTrack().push_back(ChordEvent { snapped, beatsPerBar, tonic });
+        auto& ct = project.getChordTrack();
+        // If a chord already sits at this bar, replace it (dropping onto it = change it), else add.
+        bool replaced = false;
+        for (auto& ev : ct)
+            if (std::abs(ev.startBeat - snapped) < 1.0e-6) { ev.spec = spec; replaced = true; break; }
+        if (! replaced)
+            ct.push_back(ChordEvent { snapped, beatsPerBar, spec });
     }
     if (onChordLaneChanged) onChordLaneChanged();
     if (onChordAudition)
-        onChordAudition(orion::chords::pitchesInKey(tonic, project.getKeyRoot(), pattern, 48 + project.getChordLaneOctave() * 12));
+        onChordAudition(orion::chords::pitchesInKey(spec, project.getKeyRoot(), pattern, 48 + project.getChordLaneOctave() * 12));
     repaint();
 }
 
@@ -2512,17 +2525,31 @@ void ArrangementTimelineComponent::openChordEditorFor(int index)
         arrChordSelector = std::make_unique<ChordSelectorComponent>();
         addChildComponent(*arrChordSelector);
         arrChordSelector->onAudition = [this](const std::vector<int>& p) { if (onChordAudition) onChordAudition(p); };
-        arrChordSelector->onChordChanged = [this](const orion::chords::ChordSpec& s)
-        {
-            const juce::ScopedLock sl(project.getAudioEditLock());
-            auto& ct = project.getChordTrack();
-            if (editingChordIndex >= 0 && editingChordIndex < static_cast<int>(ct.size()))
-                ct[static_cast<std::size_t>(editingChordIndex)].spec = s;
-            if (onChordLaneChanged) onChordLaneChanged();
-            repaint();
-        };
+        // NOTE: clicking chords in the wheel only AUDITIONS — it must not rewrite an already-placed
+        // chord. A chord is placed/changed only by dragging it onto the chord lane (onDragChordOut).
         arrChordSelector->onClose = [this] { if (arrChordSelector) arrChordSelector->setVisible(false); };
         arrChordSelector->onRequestKeyMenu = [this](juce::Rectangle<int> area) { if (onRequestKeyMenu) onRequestKeyMenu(area); };
+        arrChordSelector->onDragChordOut = [this](const std::vector<int>&)
+        {
+            auto* container = juce::DragAndDropContainer::findParentDragContainerFor(this);
+            if (container == nullptr || arrChordSelector == nullptr)
+                return;
+            pendingDropChord = arrChordSelector->getChord();
+
+            // A labelled chip that follows the cursor; drop it on the chord lane to place the chord.
+            juce::Image img(juce::Image::ARGB, 104, 30, true);
+            {
+                juce::Graphics g(img);
+                g.setColour(theme::cool::cyan.withAlpha(0.92f));
+                g.fillRoundedRectangle(img.getBounds().toFloat().reduced(1.0f), 6.0f);
+                g.setColour(juce::Colours::black.withAlpha(0.9f));
+                g.setFont(juce::FontOptions("Avenir Next", 14.0f, juce::Font::bold));
+                g.drawText(orion::chords::chordName(pendingDropChord), img.getBounds(), juce::Justification::centred);
+            }
+            auto* payload = new juce::DynamicObject();
+            payload->setProperty("type", "chord-spec");
+            container->startDragging(juce::var(payload), arrChordSelector.get(), juce::ScaledImage(img), true);
+        };
     }
 
     arrChordSelector->setProjectKey(project.getKeyRoot(), pattern, keyName);
@@ -2742,6 +2769,20 @@ void ArrangementTimelineComponent::drawChordLane(juce::Graphics& g)
     g.setColour(theme::text::primary.withAlpha(0.6f));
     g.setFont(juce::Font(11.0f, juce::Font::bold));
     g.drawText("CHORDS", label, juce::Justification::centredLeft);
+
+    // Drop preview: where a chord dragged out of the selector will land.
+    if (chordDropPreviewBeat.has_value())
+    {
+        const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+        const auto x0 = beatToX(*chordDropPreviewBeat, grid);
+        const auto x1 = beatToX(*chordDropPreviewBeat + beatsPerBar, grid);
+        juce::Rectangle<float> hl(x0, static_cast<float>(lane.getY()) + 3.0f,
+                                  juce::jmax(6.0f, x1 - x0), static_cast<float>(lane.getHeight()) - 6.0f);
+        g.setColour(theme::cool::cyan.withAlpha(0.26f));
+        g.fillRoundedRectangle(hl, 5.0f);
+        g.setColour(theme::cool::cyan.withAlpha(0.85f));
+        g.drawRoundedRectangle(hl, 5.0f, 1.2f);
+    }
 
     // Octave ▲▼ for chord playback/audition.
     const auto up = getChordOctaveUpBounds();
@@ -4792,14 +4833,19 @@ void ArrangementTimelineComponent::mouseUp(const juce::MouseEvent&)
 
         const bool moved = chordMoveCaptured;
 
-        // Settle the dragged block into the hole it opened up during the live reorder.
+        // Settle the dragged block at the bar it was dropped on (keep the live-dragged position —
+        // works for free moves to an empty slot as well as reorder swaps), not back at its origin.
         if (moved && chordDragOrig.size() == 1)
         {
             const juce::ScopedLock sl(project.getAudioEditLock());
             auto& ct = project.getChordTrack();
             const int dragged = chordDragOrig.front().first;
             if (dragged >= 0 && dragged < static_cast<int>(ct.size()))
-                ct[static_cast<std::size_t>(dragged)].startBeat = juce::jmax(0.0, chordDragHomeStart);
+            {
+                const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+                auto& c = ct[static_cast<std::size_t>(dragged)];
+                c.startBeat = juce::jmax(0.0, std::round(c.startBeat / beatsPerBar) * beatsPerBar);
+            }
         }
 
         chordMoving = false;
@@ -6160,7 +6206,7 @@ bool ArrangementTimelineComponent::isInterestedInDragSource(const SourceDetails&
         return false;
 
     const auto type = payload->getProperty("type").toString();
-    return type == "browser-item" || type == "clip-editor-audio";
+    return type == "browser-item" || type == "clip-editor-audio" || type == "chord-spec";
 }
 
 void ArrangementTimelineComponent::itemDragEnter(const SourceDetails& dragSourceDetails)
@@ -6170,12 +6216,28 @@ void ArrangementTimelineComponent::itemDragEnter(const SourceDetails& dragSource
 
 void ArrangementTimelineComponent::itemDragMove(const SourceDetails& dragSourceDetails)
 {
+    const auto* payload = dragSourceDetails.description.getDynamicObject();
+    if (payload != nullptr && payload->getProperty("type").toString() == "chord-spec")
+    {
+        // A chord drag: NO track ghost — just highlight where it will land on the chord lane.
+        clearBrowserDropPreview();
+        const auto beatsPerBar = static_cast<double>(juce::jmax(1, project.getNumerator()));
+        const auto beat = juce::jmax(0.0, std::floor(snapBeatValue(xToBeatPosition(dragSourceDetails.localPosition.x)) / beatsPerBar) * beatsPerBar);
+        if (! chordDropPreviewBeat.has_value() || std::abs(*chordDropPreviewBeat - beat) > 1.0e-6)
+        {
+            chordDropPreviewBeat = beat;
+            repaint();
+        }
+        return;
+    }
+    chordDropPreviewBeat.reset();
     updateBrowserDropPreview(dragSourceDetails.localPosition, dragSourceDetails.description);
 }
 
 void ArrangementTimelineComponent::itemDragExit(const SourceDetails&)
 {
     clearBrowserDropPreview();
+    if (chordDropPreviewBeat.has_value()) { chordDropPreviewBeat.reset(); repaint(); }
 }
 
 void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDetails)
@@ -6184,6 +6246,19 @@ void ArrangementTimelineComponent::itemDropped(const SourceDetails& dragSourceDe
     if (payload == nullptr)
     {
         clearBrowserDropPreview();
+        return;
+    }
+
+    // A chord dragged out of the selector: place it on the chord lane at the dropped beat.
+    if (payload->getProperty("type").toString() == "chord-spec")
+    {
+        clearBrowserDropPreview();
+        chordDropPreviewBeat.reset();
+        const auto grid = getChordLaneGridArea();
+        if (project.isChordLaneVisible() && ! grid.isEmpty()
+            && dragSourceDetails.localPosition.x >= grid.getX())   // forgiving on Y — chords only live on the lane
+            addChordAtBeat(xToBeatPosition(dragSourceDetails.localPosition.x), pendingDropChord);
+        repaint();
         return;
     }
 
