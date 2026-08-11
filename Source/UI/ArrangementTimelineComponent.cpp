@@ -5697,8 +5697,9 @@ void ArrangementTimelineComponent::bakeChordsToMidiClip(int trackIndex)
     repaint();
 }
 
-// Audio → editable MIDI. Transcribes the clip's melody (monophonic YIN, off the message thread) and
-// lays the notes on a new MIDI track under the source — "drop a melody → Convert to MIDI".
+// Audio → editable MIDI. Transcribes the clip's audio (Spotify Basic Pitch, polyphonic, run as a
+// separate process off the message thread) and lays the notes on a new MIDI track under the source
+// — "drop a melody → Convert to MIDI". Handles chords/melodies/bass, not just a single line.
 void ArrangementTimelineComponent::convertClipToMidi(int trackIndex, int clipIndex)
 {
     if (transcribeRunning)
@@ -5715,6 +5716,12 @@ void ArrangementTimelineComponent::convertClipToMidi(int trackIndex, int clipInd
     const juce::File src(original.sourcePath);
     if (! src.existsAsFile())
         return;
+    if (! orion::a2m::isAvailable())
+    {
+        stemStatus = "Audio-to-MIDI model not installed";
+        repaint();
+        return;
+    }
 
     transcribeRunning = true;
     stemStatus = juce::String::fromUTF8("Converting to MIDI\xE2\x80\xA6");
@@ -5723,7 +5730,7 @@ void ArrangementTimelineComponent::convertClipToMidi(int trackIndex, int clipInd
     juce::Component::SafePointer<ArrangementTimelineComponent> safe(this);
     juce::Thread::launch([safe, src, original, trackIndex]
     {
-        std::vector<orion::transcribe::Note> notes;
+        orion::a2m::Result res;
         double regionSec = 0.0;
         {
             juce::AudioFormatManager fmt;
@@ -5743,20 +5750,27 @@ void ArrangementTimelineComponent::convertClipToMidi(int trackIndex, int clipInd
                     juce::AudioBuffer<float> buf(static_cast<int>(juce::jmax(1u, reader->numChannels)), len);
                     reader->read(&buf, 0, len, s0, true, true);
                     regionSec = static_cast<double>(len) / sr;
-                    notes = orion::transcribe::monophonic(buf, sr);
+                    res = orion::a2m::transcribe(buf, sr, {},
+                                                 [safe] { return safe == nullptr; });
                 }
             }
         }
-        juce::MessageManager::callAsync([safe, notes, original, trackIndex, regionSec]
+        juce::MessageManager::callAsync([safe, res, original, trackIndex, regionSec]
         {
             if (safe == nullptr) return;
             safe->transcribeRunning = false;
-            safe->applyTranscription(notes, original, trackIndex, regionSec);
+            if (! res.ok && ! res.error.isEmpty())
+            {
+                safe->stemStatus = "Convert to MIDI failed: " + res.error;
+                safe->repaint();
+                return;
+            }
+            safe->applyTranscription(res.notes, original, trackIndex, regionSec);
         });
     });
 }
 
-void ArrangementTimelineComponent::applyTranscription(const std::vector<orion::transcribe::Note>& notes,
+void ArrangementTimelineComponent::applyTranscription(const std::vector<orion::a2m::Note>& notes,
                                                       const TimelineClip& original, int originalTrackIndex, double regionSeconds)
 {
     if (notes.empty() || regionSeconds <= 0.0)
@@ -5774,8 +5788,9 @@ void ArrangementTimelineComponent::applyTranscription(const std::vector<orion::t
     {
         const double startBeat = nt.startSec * beatsPerSec;
         if (startBeat >= original.lengthInBeats - 1.0e-6) continue;
-        const double lenBeat = juce::jmax(minLen, juce::jmin(original.lengthInBeats - startBeat, nt.durSec * beatsPerSec));
-        midi.push_back(MidiNote { nt.pitch, startBeat, lenBeat, juce::jlimit(1, 127, static_cast<int>(std::lround(nt.velocity * 127.0f))) });
+        const double durSec = juce::jmax(0.0, nt.endSec - nt.startSec);
+        const double lenBeat = juce::jmax(minLen, juce::jmin(original.lengthInBeats - startBeat, durSec * beatsPerSec));
+        midi.push_back(MidiNote { nt.pitch, startBeat, lenBeat, juce::jlimit(1, 127, static_cast<int>(std::lround(nt.amp * 127.0f))) });
     }
     if (midi.empty())
     {

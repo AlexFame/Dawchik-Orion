@@ -74,6 +74,7 @@ target_sources(
         Source/Audio/AudioRenderPool.cpp
         Source/Audio/ChordDetector.cpp
         Source/Audio/ExportService.cpp
+        Source/Audio/AudioToMidi.cpp
         Source/Audio/IndependentAudioInput.cpp
         Source/Audio/LoudnessMeter.cpp
         Source/Audio/NoteTranscriber.cpp

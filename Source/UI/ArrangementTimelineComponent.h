@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "../Audio/TransportEngine.h"
-#include "../Audio/NoteTranscriber.h"
+#include "../Audio/AudioToMidi.h"
 #include "../Core/ProjectState.h"
 #include "ChordSelectorComponent.h"
 #include "OrionTheme.h"
@@ -505,9 +505,9 @@ private:
     // --- Stem separation (Demucs, Logic-style Stem Splitter) --------------------------------------
     void separateStemsForClip(int trackIndex, int clipIndex, const std::vector<juce::String>& wantedStems);
     void applyStemResult(const orion::stems::Result& res, const TimelineClip& original, int originalTrackIndex);
-    // Audio → editable MIDI: transcribe an audio clip's melody and lay it on a new MIDI track.
+    // Audio → editable MIDI: transcribe an audio clip (Basic Pitch, polyphonic) → new MIDI track.
     void convertClipToMidi(int trackIndex, int clipIndex);
-    void applyTranscription(const std::vector<orion::transcribe::Note>& notes, const TimelineClip& original,
+    void applyTranscription(const std::vector<orion::a2m::Note>& notes, const TimelineClip& original,
                             int originalTrackIndex, double regionSeconds);
     bool  transcribeRunning { false };
     bool  stemRunning { false };

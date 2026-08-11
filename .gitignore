@@ -39,3 +39,6 @@ Makefile
 # ...but the bundled helper libraries ARE part of the app (copied into
 # Orion.app/Contents/Resources), so they must be tracked.
 !Resources/chorddetect/libs/*.dylib
+
+# Audio-to-MIDI Python venv (Basic Pitch) — 593MB, recreate via Resources/audio2midi/README
+Resources/audio2midi/venv/
