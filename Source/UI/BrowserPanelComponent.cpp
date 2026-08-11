@@ -957,17 +957,23 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         g.setFont(browserFont(15.0f));
         g.drawText(item.subtitle, row.withTrimmedRight(item.isDirectory ? 0 : 34), juce::Justification::centredLeft, true);
 
-        // Favorite heart on the right edge (files only): the classic heart glyph — filled red ♥ when
-        // favorited, outline ♡ otherwise.
+        // Favorite heart on the right edge (files only): a plump heart — wide round lobes that bulge
+        // out and up (control points past the box edges), tapering to a short bottom point.
         if (! item.isDirectory && ! item.isParentLink)
         {
-            const auto b = favoriteStarBounds(rowFull);
+            const auto b = favoriteStarBounds(rowFull).toFloat();
             const bool fav = isFavorite(item.file);
+            const float x = b.getX(), y = b.getY(), w = b.getWidth(), h = b.getHeight(), cx = b.getCentreX();
+            const float dip = y + h * 0.30f, bot = y + h * 0.94f;
+            juce::Path heart;
+            heart.startNewSubPath(cx, bot);
+            heart.cubicTo(x - w * 0.12f, y + h * 0.42f, x + w * 0.14f, y - h * 0.02f, cx, dip);   // left lobe (wide + up)
+            heart.cubicTo(x + w * 0.86f, y - h * 0.02f, x + w * 1.12f, y + h * 0.42f, cx, bot);   // right lobe (wide + up)
+            heart.closeSubPath();
             g.setColour(fav ? juce::Colour(0xffe60012)   // Uniqlo red
                             : juce::Colours::white.withAlpha(hovered || selected ? 0.42f : 0.22f));
-            g.setFont(juce::Font(static_cast<float>(b.getHeight())));
-            g.drawText(juce::String::fromUTF8(fav ? "\xe2\x99\xa5" : "\xe2\x99\xa1"),
-                       b, juce::Justification::centred);
+            if (fav) g.fillPath(heart);
+            else     g.strokePath(heart, juce::PathStrokeType(1.3f));
         }
     }
 
