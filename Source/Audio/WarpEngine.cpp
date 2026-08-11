@@ -16,6 +16,10 @@ namespace orion
 {
 const char* const warpBackendCacheVersion = ORION_HAVE_RUBBERBAND ? "rubberband_exp1_drain1" : "signalsmith_fallback";
 
+// Bump when the metadata decision path changes. In particular, filename keys must
+// invalidate results produced by older signal-only detection passes.
+static constexpr const char* audioAnalysisCacheVersion = "audio_analysis_v2_filename_key_priority";
+
 juce::String currentWarpBackendTag()
 {
     return juce::String(warpBackendCacheVersion) + (isOrionWarpEnabled() ? "|orion_v0" : "");
@@ -1018,6 +1022,7 @@ AudioWarpAnalysis analyzeAudioWarpMetadata(const juce::File& file, double projec
         + "|" + juce::String(file.getSize())
         + "|" + juce::String(juce::roundToInt(projectTempoBpm * 100.0))
         + "|" + juce::String(numerator)
+        + "|" + audioAnalysisCacheVersion
         + "|" + (deepAnalysis ? "d" : "s");
 
     {
