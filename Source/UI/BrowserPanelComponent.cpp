@@ -783,8 +783,10 @@ BrowserPanelComponent::BrowserPanelComponent()
     };
     styleSectionButton(loopsSectionButton);
     styleSectionButton(oneShotsSectionButton);
+    styleSectionButton(favoritesSectionButton);
     updateSectionButtons();
 
+    loadFavorites();
     currentDirectory = getMacBrowseRoot();
     showLocationRoots(false);
     refreshEntries();
@@ -890,6 +892,7 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
         auto row = getRowBounds(index);
         if (row.isEmpty())
             continue;
+        const auto rowFull = row;   // unmutated rect, for the favorite star on the right edge
         // Cull rows outside the visible list area. Without this every row (incl. hundreds of
         // off-screen ones in a big folder) ran filename parsing + text layout on every repaint,
         // which froze the UI briefly on each selection/scroll.
@@ -952,7 +955,20 @@ void BrowserPanelComponent::paint(juce::Graphics& g)
 
         g.setColour(mutedText);
         g.setFont(browserFont(15.0f));
-        g.drawText(item.subtitle, row, juce::Justification::centredLeft, true);
+        g.drawText(item.subtitle, row.withTrimmedRight(item.isDirectory ? 0 : 34), juce::Justification::centredLeft, true);
+
+        // Favorite heart on the right edge (files only): the classic heart glyph — filled red ♥ when
+        // favorited, outline ♡ otherwise.
+        if (! item.isDirectory && ! item.isParentLink)
+        {
+            const auto b = favoriteStarBounds(rowFull);
+            const bool fav = isFavorite(item.file);
+            g.setColour(fav ? juce::Colour(0xffe60012)   // Uniqlo red
+                            : juce::Colours::white.withAlpha(hovered || selected ? 0.42f : 0.22f));
+            g.setFont(juce::Font(static_cast<float>(b.getHeight())));
+            g.drawText(juce::String::fromUTF8(fav ? "\xe2\x99\xa5" : "\xe2\x99\xa1"),
+                       b, juce::Justification::centred);
+        }
     }
 
     if (items.empty() && searchQuery.isNotEmpty() && ! recursiveScanPending)
@@ -1141,10 +1157,69 @@ void BrowserPanelComponent::setBrowserSection(BrowserSection section)
     refreshEntries();
 }
 
+// ---- Favorites -----------------------------------------------------------------------------
+
+juce::File BrowserPanelComponent::favoritesFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+               .getChildFile("Orion").getChildFile("favorites.txt");
+}
+
+void BrowserPanelComponent::loadFavorites()
+{
+    favoritesSet.clear();
+    const auto f = favoritesFile();
+    if (! f.existsAsFile())
+        return;
+    juce::StringArray lines;
+    f.readLines(lines);
+    for (const auto& line : lines)
+        if (line.trim().isNotEmpty())
+            favoritesSet.insert(line.trim());
+}
+
+void BrowserPanelComponent::saveFavorites() const
+{
+    const auto f = favoritesFile();
+    f.getParentDirectory().createDirectory();
+    juce::StringArray lines;
+    for (const auto& p : favoritesSet)
+        lines.add(p);
+    f.replaceWithText(lines.joinIntoString("\n"));
+}
+
+bool BrowserPanelComponent::isFavorite(const juce::File& file) const
+{
+    return favoritesSet.count(file.getFullPathName()) > 0;
+}
+
+void BrowserPanelComponent::toggleFavorite(const juce::File& file)
+{
+    if (file == juce::File())
+        return;
+    const auto key = file.getFullPathName();
+    if (favoritesSet.count(key))
+        favoritesSet.erase(key);
+    else
+        favoritesSet.insert(key);
+    saveFavorites();
+    if (browserSection == BrowserSection::favorites)   // the list itself changed
+        refreshEntries();
+    repaint();
+}
+
+juce::Rectangle<int> BrowserPanelComponent::favoriteStarBounds(juce::Rectangle<int> row) const
+{
+    // A small square hit zone on the right edge of the row (the heart is drawn inside it).
+    constexpr int d = 16;
+    return juce::Rectangle<int>(row.getRight() - 26, row.getY() + (row.getHeight() - d) / 2, d, d);
+}
+
 void BrowserPanelComponent::updateSectionButtons()
 {
     loopsSectionButton.setToggleState(browserSection == BrowserSection::loops, juce::dontSendNotification);
     oneShotsSectionButton.setToggleState(browserSection == BrowserSection::oneShots, juce::dontSendNotification);
+    favoritesSectionButton.setToggleState(browserSection == BrowserSection::favorites, juce::dontSendNotification);
 }
 
 void BrowserPanelComponent::resized()
@@ -1168,10 +1243,12 @@ void BrowserPanelComponent::resized()
 
     bounds.removeFromTop(browserSectionGap); // clear separation between search and filters
     auto sectionRow = bounds.removeFromTop(th::metrics::controlHeight);
-    constexpr int pillW = 88;
+    constexpr int pillW = 84;
     loopsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
     sectionRow.removeFromLeft(browserSectionGap);
     oneShotsSectionButton.setBounds(sectionRow.removeFromLeft(pillW));
+    sectionRow.removeFromLeft(browserSectionGap);
+    favoritesSectionButton.setBounds(sectionRow.removeFromLeft(pillW + 20));
     updateNavigationButtons();
 }
 
@@ -1234,6 +1311,8 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
         orion::ui::stylePopupMenu(menu);
         if (! item.isDirectory)
         {
+            menu.addItem(6, isFavorite(item.file) ? "Remove from Favorites" : "Add to Favorites");
+            menu.addSeparator();
             menu.addItem(3, "Add to playlist");                  // sampler track + clip
             menu.addItem(2, "Open in sampler");                  // sampler track only
             menu.addItem(4, "Replace selected track's sample");
@@ -1261,8 +1340,22 @@ void BrowserPanelComponent::mouseDown(const juce::MouseEvent& event)
                                    safeThis->onReplaceSelectedTrackSample(activated);
                                else if (result == 5)
                                    safeThis->enterSimilarMode(file);
+                               else if (result == 6)
+                                   safeThis->toggleFavorite(file);
                            });
         return;
+    }
+
+    // Clicking the favorite star toggles it (files only) — never selects/auditions the row.
+    if (const auto starIdx = hitTestRow(event.getPosition()); starIdx.has_value())
+    {
+        const auto& it = items[static_cast<std::size_t>(*starIdx)];
+        if (! it.isDirectory && ! it.isParentLink
+            && favoriteStarBounds(getRowBounds(*starIdx)).contains(event.getPosition()))
+        {
+            toggleFavorite(it.file);
+            return;
+        }
     }
 
     dragIndex = hitTestRow(event.getPosition());
@@ -1577,6 +1670,8 @@ void BrowserPanelComponent::buttonClicked(juce::Button* button)
         setBrowserSection(browserSection == BrowserSection::loops ? BrowserSection::all : BrowserSection::loops);
     else if (button == &oneShotsSectionButton)
         setBrowserSection(browserSection == BrowserSection::oneShots ? BrowserSection::all : BrowserSection::oneShots);
+    else if (button == &favoritesSectionButton)
+        setBrowserSection(browserSection == BrowserSection::favorites ? BrowserSection::all : BrowserSection::favorites);
     else if (button == &closeButton)
     {
         if (onCloseRequested)
@@ -1621,6 +1716,34 @@ void BrowserPanelComponent::refreshEntries()
 {
     std::vector<BrowserItem> refreshedItems;
     const bool searching = searchQuery.trim().isNotEmpty();
+
+    // Favorites: a flat, cross-folder listing of the starred sounds (a search narrows it further).
+    if (browserSection == BrowserSection::favorites && ! inSimilarMode())
+    {
+        const auto filter = parseBrowserSearchFilter(searchQuery);
+        items.clear();
+        for (const auto& p : favoritesSet)
+        {
+            const juce::File file(p);
+            if (! file.existsAsFile() || ! isAudioFile(file))
+                continue;
+            BrowserItem it { file.getFileName(), file.getParentDirectory().getFileName(),
+                             subtitleForFile(file), colourForEntry(file, false),
+                             defaultLengthForFile(file), file, false, false };
+            it.tags = deriveTags(file);
+            if (searching && ! matchesBrowserSearch(it, filter))
+                continue;
+            items.push_back(std::move(it));
+        }
+        std::sort(items.begin(), items.end(),
+                  [](const BrowserItem& a, const BrowserItem& b) { return a.name.compareNatural(b.name) < 0; });
+        if (selectedIndex.has_value() && *selectedIndex >= static_cast<int>(items.size()))
+            selectedIndex.reset();
+        entrySignature = "@favorites=" + juce::String(static_cast<int>(items.size())) + "@q=" + searchQuery;
+        clampScrollOffset();
+        repaint();
+        return;
+    }
 
     // Global search (Ableton-style): a query searches the WHOLE library, independent of the current
     // view (works even at the locations overview). Handled here with an early return so it doesn't

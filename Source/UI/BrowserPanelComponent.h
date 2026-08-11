@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace orion
@@ -132,8 +133,18 @@ private:
     {
         all,
         loops,
-        oneShots
+        oneShots,
+        favorites
     };
+
+    // Favorites: a persistent, cross-folder collection of sounds the user starred.
+    juce::File favoritesFile() const;
+    void loadFavorites();
+    void saveFavorites() const;
+    bool isFavorite(const juce::File& f) const;
+    void toggleFavorite(const juce::File& f);
+    juce::Rectangle<int> favoriteStarBounds(juce::Rectangle<int> row) const;
+    std::set<juce::String> favoritesSet;
 
     void buttonClicked(juce::Button* button) override;
     void timerCallback() override;
@@ -229,6 +240,7 @@ private:
     juce::TextButton clearSearchButton { "x" };
     juce::TextButton loopsSectionButton { "Loops" };
     juce::TextButton oneShotsSectionButton { "One-Shots" };
+    juce::TextButton favoritesSectionButton { juce::String::fromUTF8("\xe2\x99\xa5 Favorites") };
     BrowserSection browserSection { BrowserSection::all };
     juce::String     searchQuery;
     // Items returned from the filesystem before applying the search filter.
