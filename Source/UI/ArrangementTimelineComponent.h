@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "../Audio/TransportEngine.h"
+#include "../Audio/NoteTranscriber.h"
 #include "../Core/ProjectState.h"
 #include "ChordSelectorComponent.h"
 #include "OrionTheme.h"
@@ -504,6 +505,11 @@ private:
     // --- Stem separation (Demucs, Logic-style Stem Splitter) --------------------------------------
     void separateStemsForClip(int trackIndex, int clipIndex, const std::vector<juce::String>& wantedStems);
     void applyStemResult(const orion::stems::Result& res, const TimelineClip& original, int originalTrackIndex);
+    // Audio → editable MIDI: transcribe an audio clip's melody and lay it on a new MIDI track.
+    void convertClipToMidi(int trackIndex, int clipIndex);
+    void applyTranscription(const std::vector<orion::transcribe::Note>& notes, const TimelineClip& original,
+                            int originalTrackIndex, double regionSeconds);
+    bool  transcribeRunning { false };
     bool  stemRunning { false };
     float stemProgress { 0.0f };
     juce::String stemStatus;
@@ -657,6 +663,7 @@ private:
     // (reading a long file to compute peaks must not block the UI). Cache + pending set
     // are touched only on the message thread; results are posted back via callAsync.
     std::set<std::string> waveformPending;
+    std::map<std::string, int> waveformFailCount;   // retry a failed read a few times, then give up
     juce::ThreadPool waveformPool { 1 };
 
     ProjectState& project;

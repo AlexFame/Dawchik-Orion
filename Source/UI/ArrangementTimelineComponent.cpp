@@ -3517,6 +3517,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
                     juce::PopupMenu menu;
                     orion::ui::stylePopupMenu(menu);
                     menu.addItem(2, "Analyze chords");   // Logic-style: (re)detect this loop's progression
+                    menu.addItem(8, "Convert to MIDI (melody)", ! transcribeRunning, false);
                     menu.addItem(3, "Separate stems (6)", orion::stems::isAvailable() && ! stemRunning, false);
                     menu.addItem(1, "Follow chord lane (re-harmonise)", true, on);
                     menu.addSeparator();
@@ -3546,6 +3547,7 @@ void ArrangementTimelineComponent::mouseDown(const juce::MouseEvent& event)
                                                if (onMatchClipLoudness) onMatchClipLoudness(gainTargets);
                                                return;
                                            }
+                                           if (r == 8) { convertClipToMidi(ti, ci); return; }
                                            if (r != 1 && r != 2 && r != 3) return;
                                            auto& t = project.getTracks();
                                            if (ti >= static_cast<int>(t.size()) || ci >= static_cast<int>(t[static_cast<std::size_t>(ti)].clips.size()))
@@ -5692,6 +5694,115 @@ void ArrangementTimelineComponent::bakeChordsToMidiClip(int trackIndex)
     }
 
     setSingleSelection(SelectedClip { trackIndex, static_cast<int>(track.clips.size()) - 1 });
+    repaint();
+}
+
+// Audio → editable MIDI. Transcribes the clip's melody (monophonic YIN, off the message thread) and
+// lays the notes on a new MIDI track under the source — "drop a melody → Convert to MIDI".
+void ArrangementTimelineComponent::convertClipToMidi(int trackIndex, int clipIndex)
+{
+    if (transcribeRunning)
+        return;
+    auto& tracks = project.getTracks();
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+        return;
+    auto& clips = tracks[static_cast<std::size_t>(trackIndex)].clips;
+    if (clipIndex < 0 || clipIndex >= static_cast<int>(clips.size()))
+        return;
+    const TimelineClip original = clips[static_cast<std::size_t>(clipIndex)];   // capture by value
+    if (original.type != ClipType::audio)
+        return;
+    const juce::File src(original.sourcePath);
+    if (! src.existsAsFile())
+        return;
+
+    transcribeRunning = true;
+    stemStatus = juce::String::fromUTF8("Converting to MIDI\xE2\x80\xA6");
+    repaint();
+
+    juce::Component::SafePointer<ArrangementTimelineComponent> safe(this);
+    juce::Thread::launch([safe, src, original, trackIndex]
+    {
+        std::vector<orion::transcribe::Note> notes;
+        double regionSec = 0.0;
+        {
+            juce::AudioFormatManager fmt;
+            fmt.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader(fmt.createReaderFor(src));
+            if (reader != nullptr && reader->sampleRate > 0.0 && reader->lengthInSamples > 4096)
+            {
+                const double sr = reader->sampleRate;
+                const juce::int64 total = reader->lengthInSamples;
+                const double startR = juce::jlimit(0.0, 0.999, original.sampleStartRatio);
+                const double endR   = juce::jlimit(startR + 0.001, 1.0, original.sampleEndRatio);
+                const juce::int64 s0 = static_cast<juce::int64>(startR * static_cast<double>(total));
+                const int len = static_cast<int>(juce::jmax<juce::int64>(0,
+                                    static_cast<juce::int64>(endR * static_cast<double>(total)) - s0));
+                if (len > 2048)
+                {
+                    juce::AudioBuffer<float> buf(static_cast<int>(juce::jmax(1u, reader->numChannels)), len);
+                    reader->read(&buf, 0, len, s0, true, true);
+                    regionSec = static_cast<double>(len) / sr;
+                    notes = orion::transcribe::monophonic(buf, sr);
+                }
+            }
+        }
+        juce::MessageManager::callAsync([safe, notes, original, trackIndex, regionSec]
+        {
+            if (safe == nullptr) return;
+            safe->transcribeRunning = false;
+            safe->applyTranscription(notes, original, trackIndex, regionSec);
+        });
+    });
+}
+
+void ArrangementTimelineComponent::applyTranscription(const std::vector<orion::transcribe::Note>& notes,
+                                                      const TimelineClip& original, int originalTrackIndex, double regionSeconds)
+{
+    if (notes.empty() || regionSeconds <= 0.0)
+    {
+        stemStatus = "No melody found to convert";
+        repaint();
+        return;
+    }
+
+    // Map seconds → beats: the analysed region plays over the clip's beat span (handles warp/stretch).
+    const double beatsPerSec = original.lengthInBeats / juce::jmax(1.0e-6, regionSeconds);
+    constexpr double minLen = 0.0625;
+    std::vector<MidiNote> midi;
+    for (const auto& nt : notes)
+    {
+        const double startBeat = nt.startSec * beatsPerSec;
+        if (startBeat >= original.lengthInBeats - 1.0e-6) continue;
+        const double lenBeat = juce::jmax(minLen, juce::jmin(original.lengthInBeats - startBeat, nt.durSec * beatsPerSec));
+        midi.push_back(MidiNote { nt.pitch, startBeat, lenBeat, juce::jlimit(1, 127, static_cast<int>(std::lround(nt.velocity * 127.0f))) });
+    }
+    if (midi.empty())
+    {
+        stemStatus = "No melody found to convert";
+        repaint();
+        return;
+    }
+    stemStatus = {};
+
+    pushUndoSnapshot();
+    const int idx = insertTrackAt(originalTrackIndex + 1, /*isMidi*/ true, original.name + " MIDI", juce::Colour(), true);
+    if (idx < 0 || idx >= static_cast<int>(project.getTracks().size()))
+        return;
+    auto& t = project.getTracks()[static_cast<std::size_t>(idx)];
+    TimelineClip clip;
+    clip.name          = original.name + " MIDI";
+    clip.type          = ClipType::midi;
+    clip.startBeat     = original.startBeat;
+    clip.lengthInBeats = original.lengthInBeats;
+    clip.colour        = t.colour;
+    clip.midiNotes     = std::move(midi);
+    {
+        const juce::ScopedLock sl(project.getAudioEditLock());
+        t.clips.push_back(std::move(clip));
+    }
+    setSingleSelection(SelectedClip { idx, static_cast<int>(t.clips.size()) - 1 });
+    clampScrollOffsets();
     repaint();
 }
 
@@ -8607,7 +8718,11 @@ const ArrangementTimelineComponent::AudioPeaks* ArrangementTimelineComponent::ge
             juce::File file(path);
             if (file.existsAsFile())
             {
-                auto& fm = getSharedWaveformFormatManager();
+                // A per-job format manager: the shared static was read concurrently from every
+                // waveform-pool thread, which could hand back a null reader (→ no waveform, and an
+                // endless re-enqueue/retry that spun the CPU). A local manager is contention-free.
+                juce::AudioFormatManager fm;
+                fm.registerBasicFormats();
                 std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
                 if (reader != nullptr && reader->lengthInSamples > 0 && reader->numChannels > 0)
                 {
@@ -8634,12 +8749,18 @@ const ArrangementTimelineComponent::AudioPeaks* ArrangementTimelineComponent::ge
                             const auto bucketIdx = (samplesProcessed + i) / samplesPerBucket;
                             if (bucketIdx >= numBuckets)
                                 break;
-                            float val = 0.0f;
+                            // Extremes ACROSS channels, not the average: averaging cancels out-of-phase
+                            // stereo (right = -left) to a dead flat line, which is exactly why such a
+                            // file drew as an empty waveform. min/max per channel shows the real signal.
+                            float lo = 0.0f, hi = 0.0f;
                             for (int ch = 0; ch < numChannels; ++ch)
-                                val += chunk.getSample(ch, i);
-                            val /= static_cast<float>(numChannels);
-                            peaks->minVals[static_cast<size_t>(bucketIdx)] = juce::jmin(peaks->minVals[static_cast<size_t>(bucketIdx)], val);
-                            peaks->maxVals[static_cast<size_t>(bucketIdx)] = juce::jmax(peaks->maxVals[static_cast<size_t>(bucketIdx)], val);
+                            {
+                                const float s = chunk.getSample(ch, i);
+                                lo = juce::jmin(lo, s);
+                                hi = juce::jmax(hi, s);
+                            }
+                            peaks->minVals[static_cast<size_t>(bucketIdx)] = juce::jmin(peaks->minVals[static_cast<size_t>(bucketIdx)], lo);
+                            peaks->maxVals[static_cast<size_t>(bucketIdx)] = juce::jmax(peaks->maxVals[static_cast<size_t>(bucketIdx)], hi);
                         }
                         samplesProcessed += toRead;
                     }
@@ -8653,7 +8774,18 @@ const ArrangementTimelineComponent::AudioPeaks* ArrangementTimelineComponent::ge
                 {
                     self->waveformPending.erase(key);
                     if (ok)
-                        self->waveformCache.emplace(key, std::move(*peaks));
+                    {
+                        self->waveformCache.emplace(key, std::move(*peaks));   // success → cache real peaks
+                        self->waveformFailCount.erase(key);
+                    }
+                    else
+                    {
+                        // Read failed (e.g. the reader wasn't ready yet): retry a few times on the next
+                        // repaint, then give up (cache empty) so we never spin forever on a bad file.
+                        DBG("[waveform] read failed for " << juce::String(key.c_str()));
+                        if (++self->waveformFailCount[key] >= 5)
+                            self->waveformCache.emplace(key, AudioPeaks{});
+                    }
                     self->repaint();
                 }
             });

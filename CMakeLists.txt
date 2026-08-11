@@ -76,6 +76,7 @@ target_sources(
         Source/Audio/ExportService.cpp
         Source/Audio/IndependentAudioInput.cpp
         Source/Audio/LoudnessMeter.cpp
+        Source/Audio/NoteTranscriber.cpp
         Source/Audio/OrionStretchEngine.cpp
         Source/Audio/StemSeparator.cpp
         Source/Audio/TransportController.cpp
